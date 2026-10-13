@@ -10,7 +10,13 @@
 //
 // It covers regional addresses (get, list, insert, delete, setLabels) and the
 // region operations that report on them. Long-running operations finish
-// before the call returns. Other methods answer 404.
+// before the call returns. A call that repeats an earlier call's requestId
+// gets that call's operation back without taking effect again. Other methods
+// answer 404.
+//
+// A lost response aborts the handler with [http.ErrAbortHandler] after
+// sending the response header, so the [http.Server] serving it closes the
+// connection. Calling ServeHTTP directly propagates that panic.
 package compute
 
 import (
@@ -41,6 +47,7 @@ type Server struct {
 	nextID     uint64
 	addresses  map[string]*addressSet
 	operations map[string]*operation
+	requests   map[string]*operation
 	nextIP     map[string]netip.Addr
 }
 
@@ -65,6 +72,7 @@ func New(opts ...Option) *Server {
 		nextID:     1_000_000_000_000_000_000,
 		addresses:  map[string]*addressSet{},
 		operations: map[string]*operation{},
+		requests:   map[string]*operation{},
 		nextIP: map[string]netip.Addr{
 			// Neither range is routable on the internet, so a test cannot reach a real host by mistake.
 			addressExternal: netip.MustParseAddr("100.64.0.1"),
@@ -81,6 +89,9 @@ func New(opts ...Option) *Server {
 	s.route("DELETE "+region+"/addresses/{name}", "compute.addresses.delete", "", s.deleteAddress)
 	s.route("POST "+region+"/addresses/{name}/setLabels", "compute.addresses.setLabels", "/setLabels", s.setAddressLabels)
 	s.route("GET "+region+"/operations/{name}", "compute.regionOperations.get", "", s.getOperation)
+	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, notFound(strings.TrimPrefix(r.URL.Path, "/compute/v1/")))
+	})
 	return s
 }
 
@@ -95,48 +106,46 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 type handler func(r *http.Request, opFault *apiError) (any, *apiError)
 
 func (s *Server) route(pattern, method, verb string, h handler) {
+	startsOperation := !strings.HasPrefix(pattern, http.MethodGet+" ")
 	s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 		resource := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/compute/v1/"), verb)
 		f, _ := s.faults.Decide(fault.Call{Method: method, Resource: resource})
 		if f.Delay > 0 {
-			t := time.NewTimer(f.Delay)
 			select {
-			case <-t.C:
+			case <-time.After(f.Delay):
 			case <-r.Context().Done():
-				t.Stop()
 				return
 			}
+		}
+		if f.Mode == fault.Reject || f.Mode == fault.FailOperation && !startsOperation {
+			writeError(w, faultError(f))
+			return
 		}
 		var opFault *apiError
-		switch f.Mode {
-		case fault.Reject:
-			writeError(w, faultError(f))
-			return
-		case fault.FailOperation:
+		if f.Mode == fault.FailOperation {
 			opFault = faultError(f)
-		case fault.Pass, fault.LoseResponse, fault.FailAfter:
 		}
 		body, err := h(r, opFault)
-		if err != nil {
+		switch {
+		case f.Mode == fault.LoseResponse:
+			loseResponse(w)
+		case err != nil:
 			writeError(w, err)
-			return
-		}
-		switch f.Mode {
-		case fault.LoseResponse:
-			// Ends the response without one, as a connection lost after the server committed would.
-			panic(http.ErrAbortHandler)
-		case fault.FailAfter:
+		case f.Mode == fault.FailAfter:
 			writeError(w, faultError(f))
-			return
-		case fault.FailOperation:
-			if _, isOp := body.(*operation); !isOp {
-				writeError(w, opFault)
-				return
-			}
-		case fault.Pass, fault.Reject:
+		default:
+			writeJSON(w, http.StatusOK, body)
 		}
-		writeJSON(w, http.StatusOK, body)
 	})
+}
+
+// loseResponse ends the response partway through, as a connection lost after
+// the server committed would. Without the header on the wire, the client's
+// transport would silently retry an idempotent request on a reused connection.
+func loseResponse(w http.ResponseWriter) {
+	w.WriteHeader(http.StatusOK)
+	_ = http.NewResponseController(w).Flush()
+	panic(http.ErrAbortHandler)
 }
 
 // decodeBody reads a JSON request body into v.
@@ -162,6 +171,38 @@ func (s *Server) newID() uint64 {
 
 // timestamp formats t as the API does.
 func timestamp(t time.Time) string { return t.Format("2006-01-02T15:04:05.000-07:00") }
+
+// requestID returns the call's requestId, which the API requires to be a
+// non-zero UUID.
+func requestID(r *http.Request) (string, *apiError) {
+	id := r.URL.Query().Get("requestId")
+	if id == "" {
+		return "", nil
+	}
+	if !validUUID(id) {
+		return "", invalid("Invalid value for field 'requestId': '%s'. The request ID must be a valid UUID other than the zero UUID.", id)
+	}
+	return id, nil
+}
+
+func validUUID(id string) bool {
+	if len(id) != 36 || id == "00000000-0000-0000-0000-000000000000" {
+		return false
+	}
+	for i, c := range []byte(id) {
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		default:
+			if !strings.ContainsRune("0123456789abcdefABCDEF", rune(c)) {
+				return false
+			}
+		}
+	}
+	return true
+}
 
 func regionPath(r *http.Request) string {
 	return fmt.Sprintf("projects/%s/regions/%s", r.PathValue("project"), r.PathValue("region"))

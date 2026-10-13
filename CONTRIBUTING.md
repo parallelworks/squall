@@ -4,8 +4,9 @@
 - PR titles follow [Conventional Commits](https://www.conventionalcommits.org)
   (`feat(compute): ...`, `fix(fault): ...`, `docs: ...`). PRs are squash-merged, so
   the title becomes the commit and the changelog entry.
-- The module depends only on the Go standard library. Client libraries a
-  stand-in is tested against are test dependencies.
+- Packages import only the Go standard library. Client libraries a stand-in is
+  tested against are test dependencies, but go.mod still lists them, so their
+  versions become the minimum for every module that requires squall.
 - A new method or service is tested through the official Go client library for
   that API, so the stand-in is held to what the client actually sends and parses.
   Its package documentation says where it differs from the real API.

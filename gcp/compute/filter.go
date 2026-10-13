@@ -20,6 +20,7 @@ var errUnsupportedFilter = errors.New("unsupported filter")
 // parseFilter parses the subset of the Compute Engine filter syntax the server
 // supports: comparisons "field = value" and "field != value", optionally in
 // parentheses, joined by AND or by juxtaposition. A value with spaces is quoted.
+// It rejects a "*" in a value, which the API may read as a wildcard.
 func parseFilter(s string) (filter, error) {
 	p := filterParser{s: s}
 	var f filter
@@ -29,13 +30,21 @@ func parseFilter(s string) (filter, error) {
 		if err != nil {
 			return nil, err
 		}
-		if paren && !p.consume(")") {
-			return nil, p.errorf("unclosed parenthesis")
+		if paren {
+			p.skipSpace()
+			if !p.consume(")") {
+				return nil, p.errorf("unclosed parenthesis")
+			}
 		}
 		f = append(f, c)
 		p.skipSpace()
-		if p.consume("AND") && p.i < len(p.s) && p.s[p.i] != ' ' && p.s[p.i] != '(' {
-			return nil, p.errorf("AND needs a space after it")
+		if p.consume("AND") {
+			if p.i < len(p.s) && p.s[p.i] != ' ' && p.s[p.i] != '\t' && p.s[p.i] != '(' {
+				return nil, p.errorf("AND needs a space after it")
+			}
+			if p.skipSpace(); p.i == len(p.s) {
+				return nil, p.errorf("AND needs a comparison after it")
+			}
 		}
 	}
 	return f, nil
@@ -97,6 +106,9 @@ func (p *filterParser) comparison() (comparison, error) {
 		}
 	} else if value = p.until(" \t()\""); value == "" {
 		return comparison{}, p.errorf("expected a value for %q", field)
+	}
+	if strings.Contains(value, "*") {
+		return comparison{}, p.errorf("wildcards are not supported")
 	}
 	return comparison{field: field, value: value, equal: equal}, nil
 }

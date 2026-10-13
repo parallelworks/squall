@@ -41,6 +41,38 @@ func TestRuleNthFiresOnce(t *testing.T) {
 	}
 }
 
+func TestRuleNthCountsCallsAnEarlierRuleDecided(t *testing.T) {
+	in := fault.New().Add(
+		fault.Rule{Method: insert.Method, Nth: 1, Fault: fault.Unavailable()},
+		fault.Rule{Method: insert.Method, Nth: 2, Fault: fault.RateLimited()},
+	)
+	var statuses []int
+	for range 3 {
+		f, _ := in.Decide(insert)
+		statuses = append(statuses, f.Status)
+	}
+	if want := []int{http.StatusServiceUnavailable, http.StatusTooManyRequests, 0}; !slices.Equal(statuses, want) {
+		t.Fatalf("statuses = %v, want %v", statuses, want)
+	}
+}
+
+func TestZeroValueInjectorDrawsRandomFaults(t *testing.T) {
+	var in fault.Injector
+	in.Random(1, fault.Unavailable())
+	if _, ok := in.Decide(insert); !ok {
+		t.Fatal("Decide injected nothing at rate 1")
+	}
+}
+
+func TestRandomCopiesItsFaults(t *testing.T) {
+	faults := []fault.Fault{fault.Unavailable()}
+	in := fault.New().Random(1, faults...)
+	faults[0] = fault.LostResponse()
+	if f, _ := in.Decide(insert); f.Mode != fault.Reject {
+		t.Fatalf("Decide = %v, want the fault passed to Random", f)
+	}
+}
+
 func TestRuleTimesLimitsFiring(t *testing.T) {
 	in := fault.New().Add(fault.Rule{Method: "compute.addresses.*", Times: 2, Fault: fault.Unavailable()})
 	if got, want := decide(in, insert, 3), []bool{true, true, false}; !slices.Equal(got, want) {

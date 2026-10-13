@@ -66,9 +66,12 @@ methods it covers, and is tested through the official Go client library. Where
 it simplifies, the package documentation says so. For Compute Engine:
 
 - Long-running operations finish before the call that started them returns.
+- A call that repeats an earlier call's `requestId` gets that call's operation
+  back without taking effect again, as the real API does for retries.
 - List filters support `field = value` and `field != value` comparisons on
   name, description, status, address, addressType and labels, joined by AND or
-  in parentheses. Anything else is rejected with 400 rather than ignored.
+  in parentheses. Lists are ordered by name. Anything else, such as a wildcard
+  or `orderBy=creationTimestamp desc`, is rejected with 400 rather than ignored.
 - IP addresses come from 100.64.0.0/10 (external) and 10.0.0.0/8 (internal),
   never from routable ranges.
 

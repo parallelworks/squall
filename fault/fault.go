@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -33,13 +34,14 @@ const (
 	Pass Mode = iota
 	// Reject fails the call before it takes effect.
 	Reject
-	// LoseResponse applies the call, then closes the connection without a response.
+	// LoseResponse applies the call, then closes the connection before the
+	// response is complete, whether the call succeeded or not.
 	LoseResponse
 	// FailAfter applies the call, then answers with an error.
 	FailAfter
 	// FailOperation accepts the call and answers with a long-running operation
 	// that ends in an error, without the call taking effect. A method that
-	// returns no operation fails as Reject.
+	// starts no operation, such as a get, fails as Reject.
 	FailOperation
 )
 
@@ -113,7 +115,8 @@ type Rule struct {
 	Method string
 	// Resource, when set, matches only calls on that resource.
 	Resource string
-	// Nth, when set, fires on the nth matching call only (1-based).
+	// Nth, when set, fires on the nth call the rule matches only (1-based),
+	// counting calls an earlier rule decided.
 	Nth int
 	// Times limits how often the rule fires; 0 is unlimited. Ignored with Nth.
 	Times int
@@ -135,6 +138,13 @@ type rule struct {
 	matched, fired int
 }
 
+func (r *rule) due() bool {
+	if r.Nth > 0 {
+		return r.matched == r.Nth
+	}
+	return r.Times == 0 || r.fired < r.Times
+}
+
 // Injected records one fault the injector handed out.
 type Injected struct {
 	// Seq is the call's 1-based position among every call decided.
@@ -147,9 +157,10 @@ func (i Injected) String() string {
 	return fmt.Sprintf("#%d %s %s: %s", i.Seq, i.Call.Method, i.Call.Resource, i.Fault)
 }
 
-// Injector decides the fault for each call. A nil *Injector injects nothing.
-// It is safe for concurrent use; decisions are reproducible when calls arrive
-// in the same order.
+// Injector decides the fault for each call. A nil *Injector injects nothing,
+// and the zero value is an injector with no rules and seed 0. It is safe for
+// concurrent use; decisions are reproducible when calls arrive in the same
+// order.
 type Injector struct {
 	mu       sync.Mutex
 	seed     uint64
@@ -175,7 +186,6 @@ func New(opts ...Option) *Injector {
 	for _, opt := range opts {
 		opt(in)
 	}
-	in.rng = rand.New(rand.NewPCG(in.seed, 0x5eed))
 	return in
 }
 
@@ -203,7 +213,7 @@ func (in *Injector) Random(rate float64, faults ...Fault) *Injector {
 	in.mu.Lock()
 	defer in.mu.Unlock()
 	in.rate = rate
-	in.random = faults
+	in.random = slices.Clone(faults)
 	return in
 }
 
@@ -216,8 +226,13 @@ func (in *Injector) Decide(c Call) (Fault, bool) {
 	defer in.mu.Unlock()
 	in.calls++
 	f, ok := in.scripted(c)
-	if !ok && len(in.random) > 0 && in.rng.Float64() < in.rate {
-		f, ok = in.random[in.rng.IntN(len(in.random))], true
+	if !ok && len(in.random) > 0 {
+		if in.rng == nil {
+			in.rng = rand.New(rand.NewPCG(in.seed, 0x5eed))
+		}
+		if in.rng.Float64() < in.rate {
+			f, ok = in.random[in.rng.IntN(len(in.random))], true
+		}
 	}
 	if ok {
 		in.injected = append(in.injected, Injected{Seq: in.calls, Call: c, Fault: f})
@@ -226,21 +241,21 @@ func (in *Injector) Decide(c Call) (Fault, bool) {
 }
 
 func (in *Injector) scripted(c Call) (Fault, bool) {
+	var chosen *rule
 	for _, r := range in.rules {
 		if !r.matches(c) {
 			continue
 		}
 		r.matched++
-		switch {
-		case r.Nth > 0 && r.matched != r.Nth:
-			continue
-		case r.Nth == 0 && r.Times > 0 && r.fired >= r.Times:
-			continue
+		if chosen == nil && r.due() {
+			chosen = r
 		}
-		r.fired++
-		return r.Fault, true
 	}
-	return Fault{}, false
+	if chosen == nil {
+		return Fault{}, false
+	}
+	chosen.fired++
+	return chosen.Fault, true
 }
 
 // Injected returns the faults handed out so far, in call order.

@@ -21,7 +21,7 @@ type operation struct {
 	EndTime             string           `json:"endTime"`
 	Region              string           `json:"region"`
 	SelfLink            string           `json:"selfLink"`
-	Error               *operationErrors `json:"error,omitempty"`
+	Error               *operationErrors `json:"error,omitzero"`
 	HTTPErrorStatusCode int              `json:"httpErrorStatusCode,omitzero"`
 	HTTPErrorMessage    string           `json:"httpErrorMessage,omitzero"`
 }
@@ -35,9 +35,10 @@ type operationError struct {
 	Message string `json:"message"`
 }
 
-// finishOperation records a done operation of kind opType on target. A
-// non-nil failure ends it in that error. The caller holds s.mu.
-func (s *Server) finishOperation(region, opType, target string, targetID uint64, failure *apiError) *operation {
+// finishOperation records a done operation of kind opType on target, started
+// by the call with requestID. A non-nil failure ends it in that error. The
+// caller holds s.mu.
+func (s *Server) finishOperation(requestID, region, opType, target string, targetID uint64, failure *apiError) *operation {
 	id := s.newID()
 	now := timestamp(s.now())
 	name := fmt.Sprintf("operation-%d", id)
@@ -62,6 +63,9 @@ func (s *Server) finishOperation(region, opType, target string, targetID uint64,
 		op.HTTPErrorMessage = http.StatusText(failure.Status)
 	}
 	s.operations[region+"/operations/"+name] = op
+	if requestID != "" {
+		s.requests[requestID] = op
+	}
 	return op
 }
 
