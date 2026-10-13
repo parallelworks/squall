@@ -22,7 +22,8 @@ type Call struct {
 	// Method is the API method ID, such as "compute.addresses.insert".
 	Method string
 	// Resource names what the call acts on, such as
-	// "projects/p/regions/r/addresses/a", or the collection for a list or insert.
+	// "projects/p/regions/r/addresses/a". An insert names the resource it
+	// creates; a list names the collection.
 	Resource string
 }
 
@@ -30,22 +31,28 @@ type Call struct {
 type Mode uint8
 
 const (
-	// Pass handles the call normally, after the fault's Delay.
-	Pass Mode = iota
-	// Reject fails the call before it takes effect.
-	Reject
-	// LoseResponse applies the call, then closes the connection before the
+	// ModePass handles the call normally, after the fault's Delay.
+	ModePass Mode = iota
+	// ModeReject fails the call before it takes effect.
+	ModeReject
+	// ModeLoseResponse applies the call, then closes the connection before the
 	// response is complete, whether the call succeeded or not.
-	LoseResponse
-	// FailAfter applies the call, then answers with an error.
-	FailAfter
-	// FailOperation accepts the call and answers with a long-running operation
-	// that ends in an error, without the call taking effect. A method that
-	// starts no operation, such as a get, fails as Reject.
-	FailOperation
+	ModeLoseResponse
+	// ModeFailAfter applies the call, then answers with an error.
+	ModeFailAfter
+	// ModeFailOperation accepts the call and answers with a long-running
+	// operation that ends in an error, without the call taking effect. A method
+	// that starts no operation, such as a get, fails as ModeReject.
+	ModeFailOperation
 )
 
-var modeNames = [...]string{Pass: "pass", Reject: "reject", LoseResponse: "lose response", FailAfter: "fail after", FailOperation: "fail operation"}
+var modeNames = [...]string{
+	ModePass:          "pass",
+	ModeReject:        "reject",
+	ModeLoseResponse:  "lose response",
+	ModeFailAfter:     "fail after",
+	ModeFailOperation: "fail operation",
+}
 
 func (m Mode) String() string {
 	if int(m) < len(modeNames) {
@@ -54,10 +61,12 @@ func (m Mode) String() string {
 	return fmt.Sprintf("Mode(%d)", m)
 }
 
-// Fault is what the server does to one call.
+// Fault is what the server does to one call. Build one with the functions
+// named after its mode, or as a literal.
 type Fault struct {
 	Mode Mode
-	// Status is the HTTP status of the error, for Reject, FailAfter and FailOperation.
+	// Status is the HTTP status of the error, for ModeReject, ModeFailAfter and
+	// ModeFailOperation.
 	Status int
 	// Reason is the machine-readable error reason, such as "backendError".
 	Reason string
@@ -80,33 +89,34 @@ func (f Fault) String() string {
 	return b.String()
 }
 
-// Unavailable rejects the call as a transient server error.
-func Unavailable() Fault {
-	return Fault{Mode: Reject, Status: http.StatusServiceUnavailable, Reason: "backendError"}
+// Reject fails the call with status and reason before it takes effect.
+func Reject(status int, reason string) Fault {
+	return Fault{Mode: ModeReject, Status: status, Reason: reason}
 }
+
+// Unavailable rejects the call as a transient server error.
+func Unavailable() Fault { return Reject(http.StatusServiceUnavailable, "backendError") }
 
 // RateLimited rejects the call as over quota.
-func RateLimited() Fault {
-	return Fault{Mode: Reject, Status: http.StatusTooManyRequests, Reason: "rateLimitExceeded"}
-}
+func RateLimited() Fault { return Reject(http.StatusTooManyRequests, "rateLimitExceeded") }
 
-// LostResponse applies the call and drops its response, as a timeout or a
+// LoseResponse applies the call and drops its response, as a timeout or a
 // broken connection after the server committed would.
-func LostResponse() Fault { return Fault{Mode: LoseResponse} }
+func LoseResponse() Fault { return Fault{Mode: ModeLoseResponse} }
 
-// ErrorAfterApply applies the call and answers with status anyway.
-func ErrorAfterApply(status int) Fault {
-	return Fault{Mode: FailAfter, Status: status, Reason: "backendError"}
+// FailAfter applies the call and answers with status anyway.
+func FailAfter(status int) Fault {
+	return Fault{Mode: ModeFailAfter, Status: status, Reason: "backendError"}
 }
 
-// OperationFailed accepts the call and ends its operation in an error with
+// FailOperation accepts the call and ends its operation in an error with
 // status, without the call taking effect.
-func OperationFailed(status int) Fault {
-	return Fault{Mode: FailOperation, Status: status, Reason: "backendError"}
+func FailOperation(status int) Fault {
+	return Fault{Mode: ModeFailOperation, Status: status, Reason: "backendError"}
 }
 
-// Slow delays the call by d and then handles it normally.
-func Slow(d time.Duration) Fault { return Fault{Delay: d} }
+// Delay holds the call for d and then handles it normally.
+func Delay(d time.Duration) Fault { return Fault{Delay: d} }
 
 // Rule scripts a fault for the calls it matches.
 type Rule struct {

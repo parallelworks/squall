@@ -31,12 +31,12 @@ func TestNilInjectorInjectsNothing(t *testing.T) {
 }
 
 func TestRuleNthFiresOnce(t *testing.T) {
-	in := fault.New().Add(fault.Rule{Method: insert.Method, Nth: 2, Fault: fault.LostResponse()})
+	in := fault.New().Add(fault.Rule{Method: insert.Method, Nth: 2, Fault: fault.LoseResponse()})
 	if got, want := decide(in, insert, 4), []bool{false, true, false, false}; !slices.Equal(got, want) {
 		t.Fatalf("decisions = %v, want %v", got, want)
 	}
 	got := in.Injected()
-	if len(got) != 1 || got[0].Seq != 2 || got[0].Fault.Mode != fault.LoseResponse {
+	if len(got) != 1 || got[0].Seq != 2 || got[0].Fault.Mode != fault.ModeLoseResponse {
 		t.Fatalf("Injected = %v", got)
 	}
 }
@@ -67,8 +67,8 @@ func TestZeroValueInjectorDrawsRandomFaults(t *testing.T) {
 func TestRandomCopiesItsFaults(t *testing.T) {
 	faults := []fault.Fault{fault.Unavailable()}
 	in := fault.New().Random(1, faults...)
-	faults[0] = fault.LostResponse()
-	if f, _ := in.Decide(insert); f.Mode != fault.Reject {
+	faults[0] = fault.LoseResponse()
+	if f, _ := in.Decide(insert); f.Mode != fault.ModeReject {
 		t.Fatalf("Decide = %v, want the fault passed to Random", f)
 	}
 }
@@ -105,19 +105,19 @@ func TestRuleMatching(t *testing.T) {
 
 func TestFirstFiringRuleWins(t *testing.T) {
 	in := fault.New().Add(
-		fault.Rule{Method: insert.Method, Nth: 1, Fault: fault.LostResponse()},
+		fault.Rule{Method: insert.Method, Nth: 1, Fault: fault.LoseResponse()},
 		fault.Rule{Method: insert.Method, Fault: fault.Unavailable()},
 	)
 	first, _ := in.Decide(insert)
 	second, _ := in.Decide(insert)
-	if first.Mode != fault.LoseResponse || second.Mode != fault.Reject {
+	if first.Mode != fault.ModeLoseResponse || second.Mode != fault.ModeReject {
 		t.Fatalf("faults = %v, %v", first, second)
 	}
 }
 
 func TestRandomIsReproducibleFromItsSeed(t *testing.T) {
 	run := func(seed uint64) []bool {
-		return decide(fault.New(fault.Seed(seed)).Random(0.3, fault.Unavailable(), fault.LostResponse()), insert, 200)
+		return decide(fault.New(fault.Seed(seed)).Random(0.3, fault.Unavailable(), fault.LoseResponse()), insert, 200)
 	}
 	a, b := run(7), run(7)
 	if !slices.Equal(a, b) {
@@ -138,8 +138,8 @@ func TestRandomIsReproducibleFromItsSeed(t *testing.T) {
 }
 
 func TestRulesTakePrecedenceOverRandom(t *testing.T) {
-	in := fault.New().Add(fault.Rule{Method: insert.Method, Fault: fault.Slow(time.Second)}).Random(1, fault.Unavailable())
-	if f, ok := in.Decide(insert); !ok || f.Mode != fault.Pass || f.Delay != time.Second {
+	in := fault.New().Add(fault.Rule{Method: insert.Method, Fault: fault.Delay(time.Second)}).Random(1, fault.Unavailable())
+	if f, ok := in.Decide(insert); !ok || f.Mode != fault.ModePass || f.Delay != time.Second {
 		t.Fatalf("Decide = %v, %v", f, ok)
 	}
 }
@@ -162,9 +162,9 @@ func TestFaultString(t *testing.T) {
 		want string
 	}{
 		{fault.Unavailable(), "reject 503 backendError"},
-		{fault.LostResponse(), "lose response"},
-		{fault.Slow(2 * time.Second), "pass after 2s"},
-		{fault.OperationFailed(http.StatusInternalServerError), "fail operation 500 backendError"},
+		{fault.LoseResponse(), "lose response"},
+		{fault.Delay(2 * time.Second), "pass after 2s"},
+		{fault.FailOperation(http.StatusInternalServerError), "fail operation 500 backendError"},
 		{fault.Fault{Mode: 99}, "Mode(99)"},
 	} {
 		if got := tc.f.String(); got != tc.want {

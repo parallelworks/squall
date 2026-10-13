@@ -291,10 +291,10 @@ func TestFaults(t *testing.T) {
 	}{
 		{"rejected", fault.Unavailable(), http.StatusServiceUnavailable, false},
 		{"rate limited", fault.RateLimited(), http.StatusTooManyRequests, false},
-		{"response lost", fault.LostResponse(), -1, true},
-		{"error after applying", fault.ErrorAfterApply(http.StatusInternalServerError), http.StatusInternalServerError, true},
-		{"operation failed", fault.OperationFailed(http.StatusForbidden), http.StatusForbidden, false},
-		{"slow", fault.Slow(20 * time.Millisecond), 0, true},
+		{"response lost", fault.LoseResponse(), -1, true},
+		{"error after applying", fault.FailAfter(http.StatusInternalServerError), http.StatusInternalServerError, true},
+		{"operation failed", fault.FailOperation(http.StatusForbidden), http.StatusForbidden, false},
+		{"slow", fault.Delay(20 * time.Millisecond), 0, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			faults := fault.New().Add(fault.Rule{Method: "compute.addresses.insert", Nth: 1, Fault: tc.fault})
@@ -341,7 +341,7 @@ func TestLostResponseReachesTheCaller(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			faults := fault.New().Add(fault.Rule{Method: tc.method, Nth: 2, Fault: fault.LostResponse()})
+			faults := fault.New().Add(fault.Rule{Method: tc.method, Nth: 2, Fault: fault.LoseResponse()})
 			c := newClient(t, compute.New(compute.WithFaults(faults)))
 			if err := insert(t, c, &computepb.Address{Name: new("ip-1")}); err != nil {
 				t.Fatal(err)
@@ -357,7 +357,7 @@ func TestLostResponseReachesTheCaller(t *testing.T) {
 }
 
 func TestOperationFailedOnAReadFailsTheRead(t *testing.T) {
-	faults := fault.New().Add(fault.Rule{Method: "compute.regionOperations.get", Nth: 1, Fault: fault.OperationFailed(http.StatusForbidden)})
+	faults := fault.New().Add(fault.Rule{Method: "compute.regionOperations.get", Nth: 1, Fault: fault.FailOperation(http.StatusForbidden)})
 	s := compute.New(compute.WithFaults(faults))
 	c := newClient(t, s)
 	if err := insert(t, c, &computepb.Address{Name: new("ip-1")}); apiCode(err) != http.StatusForbidden {
@@ -370,8 +370,8 @@ func TestOperationFailedOnAReadFailsTheRead(t *testing.T) {
 
 func TestRequestIDReplaysTheFirstOperation(t *testing.T) {
 	faults := fault.New().Add(
-		fault.Rule{Method: "compute.addresses.insert", Nth: 1, Fault: fault.LostResponse()},
-		fault.Rule{Method: "compute.addresses.delete", Nth: 1, Fault: fault.LostResponse()},
+		fault.Rule{Method: "compute.addresses.insert", Nth: 1, Fault: fault.LoseResponse()},
+		fault.Rule{Method: "compute.addresses.delete", Nth: 1, Fault: fault.LoseResponse()},
 	)
 	s := compute.New(compute.WithFaults(faults))
 	c := newClient(t, s)
@@ -432,7 +432,7 @@ func reserve(t *testing.T, c *gcompute.AddressesClient, name, owner string) erro
 func TestRetryingReserveConvergesUnderRandomFaults(t *testing.T) {
 	for seed := range uint64(50) {
 		faults := fault.New(fault.Seed(seed)).Random(0.4,
-			fault.Unavailable(), fault.LostResponse(), fault.ErrorAfterApply(http.StatusInternalServerError), fault.OperationFailed(http.StatusInternalServerError))
+			fault.Unavailable(), fault.LoseResponse(), fault.FailAfter(http.StatusInternalServerError), fault.FailOperation(http.StatusInternalServerError))
 		s := compute.New(compute.WithFaults(faults))
 		c := newClient(t, s)
 		if err := reserve(t, c, "ip-1", "me"); err != nil {

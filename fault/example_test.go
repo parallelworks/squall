@@ -9,7 +9,7 @@ import (
 func Example() {
 	in := fault.New(fault.Seed(42)).Add(
 		// The second insert takes effect, but its caller never hears back.
-		fault.Rule{Method: "compute.addresses.insert", Nth: 2, Fault: fault.LostResponse()},
+		fault.Rule{Method: "compute.addresses.insert", Nth: 2, Fault: fault.LoseResponse()},
 	)
 	call := fault.Call{Method: "compute.addresses.insert", Resource: "projects/p/regions/us-east1/addresses"}
 	for range 3 {

@@ -12,5 +12,7 @@ Instructions for coding agents working in this repository.
   surprise a reader.
 - Tests call the real package through the official client library where one
   exists. Use `t.Context()`, not `context.Background()`, in tests.
+- Tests through official client libraries go in the `sdktest` module; the
+  `squall` module itself requires nothing.
 - `make check` must pass. Tools are pinned in `tools/go.mod` and run with
   `go tool -modfile=tools/go.mod`.

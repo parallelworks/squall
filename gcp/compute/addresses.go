@@ -57,27 +57,21 @@ func addressPath(region, name string) string { return region + "/addresses/" + n
 type addressSet struct {
 	names  []string
 	byName map[string]*Address
-	byIP   map[string]string
 }
 
 func (set *addressSet) put(a *Address) {
-	if old, ok := set.byName[a.Name]; ok {
-		delete(set.byIP, old.Address)
-	} else {
+	if _, ok := set.byName[a.Name]; !ok {
 		i, _ := slices.BinarySearch(set.names, a.Name)
 		set.names = slices.Insert(set.names, i, a.Name)
 	}
 	set.byName[a.Name] = a
-	set.byIP[a.Address] = a.Name
 }
 
 func (set *addressSet) remove(name string) {
-	a, ok := set.byName[name]
-	if !ok {
+	if _, ok := set.byName[name]; !ok {
 		return
 	}
 	delete(set.byName, name)
-	delete(set.byIP, a.Address)
 	if i, found := slices.BinarySearch(set.names, name); found {
 		set.names = slices.Delete(set.names, i, i+1)
 	}
@@ -87,7 +81,7 @@ func (set *addressSet) remove(name string) {
 func (s *Server) region(region string) *addressSet {
 	set, ok := s.addresses[region]
 	if !ok {
-		set = &addressSet{byName: map[string]*Address{}, byIP: map[string]string{}}
+		set = &addressSet{byName: map[string]*Address{}}
 		s.addresses[region] = set
 	}
 	return set
@@ -187,24 +181,40 @@ func (s *Server) store(region string, a Address) (*Address, *apiError) {
 	a.Region = selfLinkBase + region
 	a.SelfLink = selfLinkBase + addressPath(region, a.Name)
 	a.LabelFingerprint = fingerprint(a.Labels)
+	path := addressPath(region, a.Name)
+	if old, ok := set.byName[a.Name]; ok {
+		delete(s.ipHolders, ipKey(region, old.AddressType, old.Address))
+	}
 	if a.Address == "" {
-		a.Address = s.allocate(set, a.AddressType)
+		a.Address = s.allocate(region, a.AddressType)
 	} else {
 		a.Address = netip.MustParseAddr(a.Address).String()
-		if holder, taken := set.byIP[a.Address]; taken && holder != a.Name {
+		if holder, taken := s.ipHolders[ipKey(region, a.AddressType, a.Address)]; taken && holder != path {
 			return nil, invalid("IP address '%s' is already being used by another resource.", a.Address)
 		}
 	}
+	s.ipHolders[ipKey(region, a.AddressType, a.Address)] = path
 	stored := a.clone()
 	set.put(&stored)
 	return &stored, nil
 }
 
-// allocate returns the next free address of addressType in set. The caller holds s.mu.
-func (s *Server) allocate(set *addressSet, addressType string) string {
+// ipKey identifies an IP address where it must be unique: an external address
+// across every project and region, as public addresses are, and an internal
+// one within its region. Real internal addresses are unique per subnetwork;
+// regions stand in for subnetworks here.
+func ipKey(region, addressType, ip string) string {
+	if addressType == addressExternal {
+		return ip
+	}
+	return region + "/" + ip
+}
+
+// allocate returns the next free address of addressType for region. The caller holds s.mu.
+func (s *Server) allocate(region, addressType string) string {
 	ip := s.nextIP[addressType]
 	for {
-		if _, taken := set.byIP[ip.String()]; !taken {
+		if _, taken := s.ipHolders[ipKey(region, addressType, ip.String())]; !taken {
 			break
 		}
 		ip = ip.Next()
@@ -221,7 +231,7 @@ func (s *Server) insertAddress(r *http.Request, opFault *apiError) (any, *apiErr
 	if err := validate(&want); err != nil {
 		return nil, err
 	}
-	reqID, err := requestID(r)
+	reqID, err := requestID(r, "insert")
 	if err != nil {
 		return nil, err
 	}
@@ -259,7 +269,7 @@ func (s *Server) getAddress(r *http.Request, _ *apiError) (any, *apiError) {
 }
 
 func (s *Server) deleteAddress(r *http.Request, opFault *apiError) (any, *apiError) {
-	reqID, err := requestID(r)
+	reqID, err := requestID(r, "delete")
 	if err != nil {
 		return nil, err
 	}
@@ -276,6 +286,7 @@ func (s *Server) deleteAddress(r *http.Request, opFault *apiError) (any, *apiErr
 	}
 	if opFault == nil {
 		s.addresses[region].remove(name)
+		delete(s.ipHolders, ipKey(region, a.AddressType, a.Address))
 	}
 	return s.finishOperation(reqID, region, "delete", path, a.ID, opFault), nil
 }
@@ -296,7 +307,7 @@ func (s *Server) setAddressLabels(r *http.Request, opFault *apiError) (any, *api
 	if err := validateLabels("labels", req.Labels); err != nil {
 		return nil, err
 	}
-	reqID, err := requestID(r)
+	reqID, err := requestID(r, "setLabels")
 	if err != nil {
 		return nil, err
 	}

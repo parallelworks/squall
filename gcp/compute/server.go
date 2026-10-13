@@ -10,9 +10,11 @@
 //
 // It covers regional addresses (get, list, insert, delete, setLabels) and the
 // region operations that report on them. Long-running operations finish
-// before the call returns. A call that repeats an earlier call's requestId
-// gets that call's operation back without taking effect again. Other methods
-// answer 404.
+// before the call returns, and the server keeps the last 10,000. A call that
+// repeats an earlier call's requestId in the same project, for the same
+// method, gets that call's operation back without taking effect again. An
+// external IP address is unique across every project and region, an internal
+// one within its region. Other methods answer 404.
 //
 // A lost response aborts the handler with [http.ErrAbortHandler] after
 // sending the response header, so the [http.Server] serving it closes the
@@ -20,6 +22,7 @@
 package compute
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,6 +35,9 @@ import (
 
 	"github.com/parallelworks/squall/fault"
 )
+
+// maxBody bounds a request body the server reads.
+const maxBody = 1 << 20
 
 // selfLinkBase prefixes every selfLink, as the real API does.
 const selfLinkBase = "https://www.googleapis.com/compute/v1/"
@@ -46,7 +52,10 @@ type Server struct {
 	mu         sync.Mutex
 	nextID     uint64
 	addresses  map[string]*addressSet
+	ipHolders  map[string]string
 	operations map[string]*operation
+	opOrder    []string
+	opNext     int
 	requests   map[string]*operation
 	nextIP     map[string]netip.Addr
 }
@@ -71,6 +80,7 @@ func New(opts ...Option) *Server {
 		now:        time.Now,
 		nextID:     1_000_000_000_000_000_000,
 		addresses:  map[string]*addressSet{},
+		ipHolders:  map[string]string{},
 		operations: map[string]*operation{},
 		requests:   map[string]*operation{},
 		nextIP: map[string]netip.Addr{
@@ -83,12 +93,12 @@ func New(opts ...Option) *Server {
 		opt(s)
 	}
 	const region = "/compute/v1/projects/{project}/regions/{region}"
-	s.route("GET "+region+"/addresses", "compute.addresses.list", "", s.listAddresses)
-	s.route("POST "+region+"/addresses", "compute.addresses.insert", "", s.insertAddress)
-	s.route("GET "+region+"/addresses/{name}", "compute.addresses.get", "", s.getAddress)
-	s.route("DELETE "+region+"/addresses/{name}", "compute.addresses.delete", "", s.deleteAddress)
-	s.route("POST "+region+"/addresses/{name}/setLabels", "compute.addresses.setLabels", "/setLabels", s.setAddressLabels)
-	s.route("GET "+region+"/operations/{name}", "compute.regionOperations.get", "", s.getOperation)
+	s.route("GET "+region+"/addresses", "compute.addresses.list", "", s.listAddresses, nil)
+	s.route("POST "+region+"/addresses", "compute.addresses.insert", "", s.insertAddress, withNameFromBody)
+	s.route("GET "+region+"/addresses/{name}", "compute.addresses.get", "", s.getAddress, nil)
+	s.route("DELETE "+region+"/addresses/{name}", "compute.addresses.delete", "", s.deleteAddress, nil)
+	s.route("POST "+region+"/addresses/{name}/setLabels", "compute.addresses.setLabels", "/setLabels", s.setAddressLabels, nil)
+	s.route("GET "+region+"/operations/{name}", "compute.regionOperations.get", "", s.getOperation, nil)
 	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, notFound(strings.TrimPrefix(r.URL.Path, "/compute/v1/")))
 	})
@@ -105,10 +115,29 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // taking effect.
 type handler func(r *http.Request, opFault *apiError) (any, *apiError)
 
-func (s *Server) route(pattern, method, verb string, h handler) {
+// withNameFromBody makes a call that creates a resource name the resource it
+// creates, from the request body, so a fault rule can target one name.
+func withNameFromBody(r *http.Request, collection string) string {
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody))
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	var named struct {
+		Name string `json:"name"`
+	}
+	if err != nil || json.Unmarshal(body, &named) != nil || named.Name == "" {
+		return collection
+	}
+	return collection + "/" + named.Name
+}
+
+// route registers h for pattern as method. A non-nil target names the call's
+// resource from the request, in place of its path.
+func (s *Server) route(pattern, method, verb string, h handler, target func(*http.Request, string) string) {
 	startsOperation := !strings.HasPrefix(pattern, http.MethodGet+" ")
 	s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 		resource := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/compute/v1/"), verb)
+		if target != nil {
+			resource = target(r, resource)
+		}
 		f, _ := s.faults.Decide(fault.Call{Method: method, Resource: resource})
 		if f.Delay > 0 {
 			select {
@@ -117,21 +146,21 @@ func (s *Server) route(pattern, method, verb string, h handler) {
 				return
 			}
 		}
-		if f.Mode == fault.Reject || f.Mode == fault.FailOperation && !startsOperation {
+		if f.Mode == fault.ModeReject || f.Mode == fault.ModeFailOperation && !startsOperation {
 			writeError(w, faultError(f))
 			return
 		}
 		var opFault *apiError
-		if f.Mode == fault.FailOperation {
+		if f.Mode == fault.ModeFailOperation {
 			opFault = faultError(f)
 		}
 		body, err := h(r, opFault)
 		switch {
-		case f.Mode == fault.LoseResponse:
+		case f.Mode == fault.ModeLoseResponse:
 			loseResponse(w)
 		case err != nil:
 			writeError(w, err)
-		case f.Mode == fault.FailAfter:
+		case f.Mode == fault.ModeFailAfter:
 			writeError(w, faultError(f))
 		default:
 			writeJSON(w, http.StatusOK, body)
@@ -150,7 +179,7 @@ func loseResponse(w http.ResponseWriter) {
 
 // decodeBody reads a JSON request body into v.
 func decodeBody(r *http.Request, v any) *apiError {
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody))
 	if err != nil {
 		return invalid("reading the request body: %v", err)
 	}
@@ -172,9 +201,10 @@ func (s *Server) newID() uint64 {
 // timestamp formats t as the API does.
 func timestamp(t time.Time) string { return t.Format("2006-01-02T15:04:05.000-07:00") }
 
-// requestID returns the call's requestId, which the API requires to be a
-// non-zero UUID.
-func requestID(r *http.Request) (string, *apiError) {
+// requestID returns the key a call's requestId replays under, scoped to its
+// project and method, or "" when the call has none. The API requires the ID to
+// be a non-zero UUID.
+func requestID(r *http.Request, method string) (string, *apiError) {
 	id := r.URL.Query().Get("requestId")
 	if id == "" {
 		return "", nil
@@ -182,7 +212,7 @@ func requestID(r *http.Request) (string, *apiError) {
 	if !validUUID(id) {
 		return "", invalid("Invalid value for field 'requestId': '%s'. The request ID must be a valid UUID other than the zero UUID.", id)
 	}
-	return id, nil
+	return r.PathValue("project") + "/" + method + "/" + id, nil
 }
 
 func validUUID(id string) bool {

@@ -1,13 +1,10 @@
 package compute_test
 
 import (
-	"context"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
-
-	gcompute "cloud.google.com/go/compute/apiv1"
-	"cloud.google.com/go/compute/apiv1/computepb"
-	"google.golang.org/api/option"
+	"strings"
 
 	"github.com/parallelworks/squall/fault"
 	"github.com/parallelworks/squall/gcp/compute"
@@ -15,24 +12,20 @@ import (
 
 // The first insert takes effect but its response is lost, so the caller sees
 // an error even though the address now exists. Code under test must find and
-// adopt it rather than fail or make another.
+// adopt it rather than fail or make another. Real tests point the official
+// client library at srv.URL with option.WithEndpoint.
 func Example() {
-	ctx := context.Background()
-	faults := fault.New().Add(fault.Rule{Method: "compute.addresses.insert", Nth: 1, Fault: fault.LostResponse()})
+	faults := fault.New().Add(fault.Rule{Method: "compute.addresses.insert", Nth: 1, Fault: fault.LoseResponse()})
 	s := compute.New(compute.WithFaults(faults))
 	srv := httptest.NewServer(s)
 	defer srv.Close()
 
-	client, err := gcompute.NewAddressesRESTClient(ctx, option.WithEndpoint(srv.URL), option.WithoutAuthentication())
-	if err != nil {
-		panic(err)
+	resp, err := http.Post(srv.URL+"/compute/v1/projects/my-project/regions/us-east1/addresses",
+		"application/json", strings.NewReader(`{"name":"web"}`))
+	if err == nil {
+		_, err = resp.Body.Read(make([]byte, 1<<10))
+		resp.Body.Close()
 	}
-	defer client.Close()
-
-	_, err = client.Insert(ctx, &computepb.InsertAddressRequest{
-		Project: "my-project", Region: "us-east1",
-		AddressResource: &computepb.Address{Name: new("web")},
-	})
 	fmt.Println("insert failed:", err != nil)
 
 	a, _ := s.LookupAddress("my-project", "us-east1", "web")
@@ -41,5 +34,5 @@ func Example() {
 	// Output:
 	// insert failed: true
 	// address exists: 100.64.0.1
-	// #1 compute.addresses.insert projects/my-project/regions/us-east1/addresses: lose response
+	// #1 compute.addresses.insert projects/my-project/regions/us-east1/addresses/web: lose response
 }

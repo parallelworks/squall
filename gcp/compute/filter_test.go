@@ -96,3 +96,16 @@ func FuzzParseFilter(f *testing.F) {
 		}
 	})
 }
+
+func TestUpperSnake(t *testing.T) {
+	for in, want := range map[string]string{
+		"backendError":          "BACKEND_ERROR",
+		"Internal Server Error": "INTERNAL_SERVER_ERROR",
+		"rateLimitExceeded":     "RATE_LIMIT_EXCEEDED",
+		"Forbidden":             "FORBIDDEN",
+	} {
+		if got := upperSnake(in); got != want {
+			t.Errorf("upperSnake(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
