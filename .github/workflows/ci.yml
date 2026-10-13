@@ -32,7 +32,9 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          # The latest patch release, so the vulnerability check sees the standard library a user would build with.
+          go-version: stable
+          check-latest: true
       - name: Verify go.mod is tidy
         run: |
           go mod tidy -diff
@@ -61,6 +63,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        go: [minimum, stable]
     runs-on: ${{ matrix.os }}
     # go test's own 10-minute timeout fires first and prints the goroutines.
     timeout-minutes: 20
@@ -70,7 +73,10 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          # The oldest Go go.mod allows, and the latest release.
+          go-version: ${{ matrix.go == 'stable' && 'stable' || '' }}
+          go-version-file: ${{ matrix.go == 'minimum' && 'go.mod' || '' }}
+          check-latest: ${{ matrix.go == 'stable' }}
       - name: Test
         run: go test -race -shuffle=on -cover -timeout 10m ./...
 
@@ -83,6 +89,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version: stable
+          check-latest: true
       - name: Fuzz the filter parser
         run: go test -run '^$' -fuzz '^FuzzParseFilter$' -fuzztime 60s ./gcp/compute/
