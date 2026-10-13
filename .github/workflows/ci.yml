@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [canary]
+  # The release workflow dispatches a run on release-please's branch: GitHub
+  # does not start pull_request workflows for PRs that GITHUB_TOKEN opened.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to a PR supersedes the run before it. Runs on canary are never
+# cancelled, so that every merged commit keeps its own result.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/canary' }}
+
+# Naming the shell adds pipefail, which the default shell leaves off.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy -diff
+          (cd tools && go mod tidy -diff)
+      - name: Lint
+        run: go tool -modfile=tools/go.mod golangci-lint run ./...
+      - name: Check for known vulnerabilities
+        run: go tool -modfile=tools/go.mod govulncheck ./...
+
+  # Audits the workflows themselves: unpinned actions, script injection,
+  # over-broad tokens, leaked credentials. Any finding fails the job.
+  workflows:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        with:
+          # Fail the job on a finding rather than upload it to code scanning.
+          advanced-security: false
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    # go test's own 10-minute timeout fires first and prints the goroutines.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Test
+        run: go test -race -shuffle=on -cover -timeout 10m ./...
+
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Fuzz the filter parser
+        run: go test -run '^$' -fuzz '^FuzzParseFilter$' -fuzztime 60s ./gcp/compute/

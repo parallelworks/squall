@@ -1,0 +1,7 @@
+coverage.out
+*.test
+*.prof
+/dist/
+.DS_Store
+.idea/
+.vscode/
