@@ -39,10 +39,15 @@ jobs:
         run: |
           go mod tidy -diff
           (cd tools && go mod tidy -diff)
+          (cd sdktest && go mod tidy -diff)
       - name: Lint
-        run: go tool -modfile=tools/go.mod golangci-lint run ./...
+        run: |
+          go tool -modfile=tools/go.mod golangci-lint run ./...
+          (cd sdktest && go tool -modfile=../tools/go.mod golangci-lint run ./...)
       - name: Check for known vulnerabilities
-        run: go tool -modfile=tools/go.mod govulncheck ./...
+        run: |
+          go tool -modfile=tools/go.mod govulncheck ./...
+          (cd sdktest && go tool -modfile=../tools/go.mod govulncheck ./...)
 
   # Audits the workflows themselves: unpinned actions, script injection,
   # over-broad tokens, leaked credentials. Any finding fails the job.
@@ -78,7 +83,9 @@ jobs:
           go-version-file: ${{ matrix.go == 'minimum' && 'go.mod' || '' }}
           check-latest: ${{ matrix.go == 'stable' }}
       - name: Test
-        run: go test -race -shuffle=on -cover -timeout 10m ./...
+        run: |
+          go test -race -shuffle=on -cover -timeout 10m ./...
+          (cd sdktest && go test -race -shuffle=on -coverpkg=github.com/parallelworks/squall/... -timeout 10m ./...)
 
   fuzz:
     runs-on: ubuntu-latest

@@ -17,6 +17,7 @@ func TestParseFilter(t *testing.T) {
 		{"(name = a) (status = RESERVED)", filter{{"name", "a", true}, {"status", "RESERVED", true}}},
 		{"(name = a) AND (labels.k != v)", filter{{"name", "a", true}, {"labels.k", "v", false}}},
 		{"name = a AND addressType = INTERNAL", filter{{"name", "a", true}, {"addressType", "INTERNAL", true}}},
+		{"( name = a ) AND ( status = b )", filter{{"name", "a", true}, {"status", "b", true}}},
 	} {
 		got, err := parseFilter(tc.in)
 		if err != nil {
@@ -45,6 +46,10 @@ func TestParseFilterRejectsWhatItDoesNotSupport(t *testing.T) {
 		"(name = a",
 		"name = a ANDstatus = b",
 		"name eq a.*",
+		"name = a AND",
+		"name = a AND ",
+		"name = ip-*",
+		`description = "*"`,
 	} {
 		if _, err := parseFilter(in); !errors.Is(err, errUnsupportedFilter) {
 			t.Errorf("parseFilter(%q) = %v, want errUnsupportedFilter", in, err)
@@ -90,4 +95,17 @@ func FuzzParseFilter(f *testing.F) {
 			}
 		}
 	})
+}
+
+func TestUpperSnake(t *testing.T) {
+	for in, want := range map[string]string{
+		"backendError":          "BACKEND_ERROR",
+		"Internal Server Error": "INTERNAL_SERVER_ERROR",
+		"rateLimitExceeded":     "RATE_LIMIT_EXCEEDED",
+		"Forbidden":             "FORBIDDEN",
+	} {
+		if got := upperSnake(in); got != want {
+			t.Errorf("upperSnake(%q) = %q, want %q", in, got, want)
+		}
+	}
 }

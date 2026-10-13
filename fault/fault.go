@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -21,7 +22,8 @@ type Call struct {
 	// Method is the API method ID, such as "compute.addresses.insert".
 	Method string
 	// Resource names what the call acts on, such as
-	// "projects/p/regions/r/addresses/a", or the collection for a list or insert.
+	// "projects/p/regions/r/addresses/a". An insert names the resource it
+	// creates; a list names the collection.
 	Resource string
 }
 
@@ -29,21 +31,28 @@ type Call struct {
 type Mode uint8
 
 const (
-	// Pass handles the call normally, after the fault's Delay.
-	Pass Mode = iota
-	// Reject fails the call before it takes effect.
-	Reject
-	// LoseResponse applies the call, then closes the connection without a response.
-	LoseResponse
-	// FailAfter applies the call, then answers with an error.
-	FailAfter
-	// FailOperation accepts the call and answers with a long-running operation
-	// that ends in an error, without the call taking effect. A method that
-	// returns no operation fails as Reject.
-	FailOperation
+	// ModePass handles the call normally, after the fault's Delay.
+	ModePass Mode = iota
+	// ModeReject fails the call before it takes effect.
+	ModeReject
+	// ModeLoseResponse applies the call, then closes the connection before the
+	// response is complete, whether the call succeeded or not.
+	ModeLoseResponse
+	// ModeFailAfter applies the call, then answers with an error.
+	ModeFailAfter
+	// ModeFailOperation accepts the call and answers with a long-running
+	// operation that ends in an error, without the call taking effect. A method
+	// that starts no operation, such as a get, fails as ModeReject.
+	ModeFailOperation
 )
 
-var modeNames = [...]string{Pass: "pass", Reject: "reject", LoseResponse: "lose response", FailAfter: "fail after", FailOperation: "fail operation"}
+var modeNames = [...]string{
+	ModePass:          "pass",
+	ModeReject:        "reject",
+	ModeLoseResponse:  "lose response",
+	ModeFailAfter:     "fail after",
+	ModeFailOperation: "fail operation",
+}
 
 func (m Mode) String() string {
 	if int(m) < len(modeNames) {
@@ -52,10 +61,12 @@ func (m Mode) String() string {
 	return fmt.Sprintf("Mode(%d)", m)
 }
 
-// Fault is what the server does to one call.
+// Fault is what the server does to one call. Build one with the functions
+// named after its mode, or as a literal.
 type Fault struct {
 	Mode Mode
-	// Status is the HTTP status of the error, for Reject, FailAfter and FailOperation.
+	// Status is the HTTP status of the error, for ModeReject, ModeFailAfter and
+	// ModeFailOperation.
 	Status int
 	// Reason is the machine-readable error reason, such as "backendError".
 	Reason string
@@ -78,33 +89,34 @@ func (f Fault) String() string {
 	return b.String()
 }
 
-// Unavailable rejects the call as a transient server error.
-func Unavailable() Fault {
-	return Fault{Mode: Reject, Status: http.StatusServiceUnavailable, Reason: "backendError"}
+// Reject fails the call with status and reason before it takes effect.
+func Reject(status int, reason string) Fault {
+	return Fault{Mode: ModeReject, Status: status, Reason: reason}
 }
+
+// Unavailable rejects the call as a transient server error.
+func Unavailable() Fault { return Reject(http.StatusServiceUnavailable, "backendError") }
 
 // RateLimited rejects the call as over quota.
-func RateLimited() Fault {
-	return Fault{Mode: Reject, Status: http.StatusTooManyRequests, Reason: "rateLimitExceeded"}
-}
+func RateLimited() Fault { return Reject(http.StatusTooManyRequests, "rateLimitExceeded") }
 
-// LostResponse applies the call and drops its response, as a timeout or a
+// LoseResponse applies the call and drops its response, as a timeout or a
 // broken connection after the server committed would.
-func LostResponse() Fault { return Fault{Mode: LoseResponse} }
+func LoseResponse() Fault { return Fault{Mode: ModeLoseResponse} }
 
-// ErrorAfterApply applies the call and answers with status anyway.
-func ErrorAfterApply(status int) Fault {
-	return Fault{Mode: FailAfter, Status: status, Reason: "backendError"}
+// FailAfter applies the call and answers with status anyway.
+func FailAfter(status int) Fault {
+	return Fault{Mode: ModeFailAfter, Status: status, Reason: "backendError"}
 }
 
-// OperationFailed accepts the call and ends its operation in an error with
+// FailOperation accepts the call and ends its operation in an error with
 // status, without the call taking effect.
-func OperationFailed(status int) Fault {
-	return Fault{Mode: FailOperation, Status: status, Reason: "backendError"}
+func FailOperation(status int) Fault {
+	return Fault{Mode: ModeFailOperation, Status: status, Reason: "backendError"}
 }
 
-// Slow delays the call by d and then handles it normally.
-func Slow(d time.Duration) Fault { return Fault{Delay: d} }
+// Delay holds the call for d and then handles it normally.
+func Delay(d time.Duration) Fault { return Fault{Delay: d} }
 
 // Rule scripts a fault for the calls it matches.
 type Rule struct {
@@ -113,7 +125,8 @@ type Rule struct {
 	Method string
 	// Resource, when set, matches only calls on that resource.
 	Resource string
-	// Nth, when set, fires on the nth matching call only (1-based).
+	// Nth, when set, fires on the nth call the rule matches only (1-based),
+	// counting calls an earlier rule decided.
 	Nth int
 	// Times limits how often the rule fires; 0 is unlimited. Ignored with Nth.
 	Times int
@@ -135,6 +148,13 @@ type rule struct {
 	matched, fired int
 }
 
+func (r *rule) due() bool {
+	if r.Nth > 0 {
+		return r.matched == r.Nth
+	}
+	return r.Times == 0 || r.fired < r.Times
+}
+
 // Injected records one fault the injector handed out.
 type Injected struct {
 	// Seq is the call's 1-based position among every call decided.
@@ -147,9 +167,10 @@ func (i Injected) String() string {
 	return fmt.Sprintf("#%d %s %s: %s", i.Seq, i.Call.Method, i.Call.Resource, i.Fault)
 }
 
-// Injector decides the fault for each call. A nil *Injector injects nothing.
-// It is safe for concurrent use; decisions are reproducible when calls arrive
-// in the same order.
+// Injector decides the fault for each call. A nil *Injector injects nothing,
+// and the zero value is an injector with no rules and seed 0. It is safe for
+// concurrent use; decisions are reproducible when calls arrive in the same
+// order.
 type Injector struct {
 	mu       sync.Mutex
 	seed     uint64
@@ -175,7 +196,6 @@ func New(opts ...Option) *Injector {
 	for _, opt := range opts {
 		opt(in)
 	}
-	in.rng = rand.New(rand.NewPCG(in.seed, 0x5eed))
 	return in
 }
 
@@ -203,7 +223,7 @@ func (in *Injector) Random(rate float64, faults ...Fault) *Injector {
 	in.mu.Lock()
 	defer in.mu.Unlock()
 	in.rate = rate
-	in.random = faults
+	in.random = slices.Clone(faults)
 	return in
 }
 
@@ -216,8 +236,13 @@ func (in *Injector) Decide(c Call) (Fault, bool) {
 	defer in.mu.Unlock()
 	in.calls++
 	f, ok := in.scripted(c)
-	if !ok && len(in.random) > 0 && in.rng.Float64() < in.rate {
-		f, ok = in.random[in.rng.IntN(len(in.random))], true
+	if !ok && len(in.random) > 0 {
+		if in.rng == nil {
+			in.rng = rand.New(rand.NewPCG(in.seed, 0x5eed))
+		}
+		if in.rng.Float64() < in.rate {
+			f, ok = in.random[in.rng.IntN(len(in.random))], true
+		}
 	}
 	if ok {
 		in.injected = append(in.injected, Injected{Seq: in.calls, Call: c, Fault: f})
@@ -226,21 +251,21 @@ func (in *Injector) Decide(c Call) (Fault, bool) {
 }
 
 func (in *Injector) scripted(c Call) (Fault, bool) {
+	var chosen *rule
 	for _, r := range in.rules {
 		if !r.matches(c) {
 			continue
 		}
 		r.matched++
-		switch {
-		case r.Nth > 0 && r.matched != r.Nth:
-			continue
-		case r.Nth == 0 && r.Times > 0 && r.fired >= r.Times:
-			continue
+		if chosen == nil && r.due() {
+			chosen = r
 		}
-		r.fired++
-		return r.Fault, true
 	}
-	return Fault{}, false
+	if chosen == nil {
+		return Fault{}, false
+	}
+	chosen.fired++
+	return chosen.Fault, true
 }
 
 // Injected returns the faults handed out so far, in call order.

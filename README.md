@@ -33,7 +33,7 @@ of more methods and services are welcome.
 faults := fault.New().Add(fault.Rule{
 	Method: "compute.addresses.insert",
 	Nth:    1,
-	Fault:  fault.LostResponse(), // takes effect, but the caller never hears back
+	Fault:  fault.LoseResponse(), // takes effect, but the caller never hears back
 })
 s := compute.New(compute.WithFaults(faults))
 srv := httptest.NewServer(s)
@@ -53,7 +53,7 @@ For a property test, inject random faults and check that every seed converges:
 ```go
 for seed := range uint64(100) {
 	faults := fault.New(fault.Seed(seed)).Random(0.3,
-		fault.Unavailable(), fault.LostResponse(), fault.ErrorAfterApply(500))
+		fault.Unavailable(), fault.LoseResponse(), fault.FailAfter(500))
 	// ... run the code under test against compute.New(compute.WithFaults(faults))
 	// and on failure report the seed and faults.Injected().
 }
@@ -66,15 +66,25 @@ methods it covers, and is tested through the official Go client library. Where
 it simplifies, the package documentation says so. For Compute Engine:
 
 - Long-running operations finish before the call that started them returns.
+- A call that repeats an earlier call's `requestId` in the same project, for the
+  same method, gets that call's operation back without taking effect again, as
+  the real API does for retries. The server keeps the last 10,000 operations.
 - List filters support `field = value` and `field != value` comparisons on
   name, description, status, address, addressType and labels, joined by AND or
-  in parentheses. Anything else is rejected with 400 rather than ignored.
+  in parentheses. Lists are ordered by name. Anything else, such as a wildcard
+  or `orderBy=creationTimestamp desc`, is rejected with 400 rather than ignored.
 - IP addresses come from 100.64.0.0/10 (external) and 10.0.0.0/8 (internal),
-  never from routable ranges.
+  never from routable ranges. An external address is unique across every
+  project and region; an internal one is unique within its region, which stands
+  in for its subnetwork.
+- A fault rule's `Resource` for an insert is the resource being created, so a
+  rule can target the insert of one name.
 
 ## Requirements
 
-Go 1.27 or later.
+Go 1.27 or later. The module requires nothing beyond the standard library; the
+tests that use the official client libraries live in the separate `sdktest`
+module.
 
 ## Contributing
 

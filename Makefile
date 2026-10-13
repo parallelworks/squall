@@ -16,18 +16,22 @@ check: lint vuln test ## Run linters, the vulnerability check and tests
 .PHONY: lint
 lint: ## Lint and check formatting
 	$(GOTOOL) golangci-lint run ./...
+	cd sdktest && go tool -modfile=../tools/go.mod golangci-lint run ./...
 
 .PHONY: fmt
 fmt: ## Format code
 	$(GOTOOL) golangci-lint fmt ./...
+	cd sdktest && go tool -modfile=../tools/go.mod golangci-lint fmt ./...
 
 .PHONY: vuln
 vuln: ## Check dependencies for known vulnerabilities
 	$(GOTOOL) govulncheck ./...
+	cd sdktest && go tool -modfile=../tools/go.mod govulncheck ./...
 
 .PHONY: test
 test: ## Run tests with the race detector
 	go test -race -shuffle=on -cover ./...
+	cd sdktest && go test -race -shuffle=on -coverpkg=github.com/parallelworks/squall/... ./...
 
 .PHONY: bench
 bench: ## Run benchmarks
@@ -41,3 +45,4 @@ fuzz: ## Fuzz the filter parser for a minute
 tidy: ## Tidy go.mod files
 	go mod tidy
 	cd tools && go mod tidy
+	cd sdktest && go mod tidy
