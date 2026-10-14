@@ -21,7 +21,9 @@
 //     account: the server keeps no owner IDs.
 //   - Subnet and security group IDs are not validated, and
 //     there are no VPCs: interfaces report no VPC ID, and their availability
-//     zone is the region with "a" appended. Private IP addresses are unique
+//     zone is the region with "a" appended. ReleaseAddress fails with
+//     InvalidIPAddress.InUse for an associated address, as in a nondefault
+//     VPC, rather than disassociating it. Private IP addresses are unique
 //     within a subnet and come from 10.0.0.0/8; public ones are unique across
 //     every region and come from 100.64.0.0/10, never from routable ranges.
 //   - Instances are not modeled. [Server.AttachNetworkInterface] marks an
@@ -62,18 +64,16 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/parallelworks/squall/fault"
+	"github.com/parallelworks/squall/internal/stub"
 )
 
 const (
 	apiVersion = "2016-11-15"
 	namespace  = "http://ec2.amazonaws.com/doc/" + apiVersion + "/"
 
-	// maxBody bounds a request body the server reads.
-	maxBody = 1 << 20
-	// maxTokens bounds how many client tokens the server remembers.
+	maxBody   = 1 << 20
 	maxTokens = 10_000
 )
 
@@ -144,7 +144,6 @@ func New(opts ...Option) *Server {
 	return s
 }
 
-// call is one request to an action.
 type call struct {
 	region string
 	p      *params
@@ -162,7 +161,6 @@ type meta struct {
 
 func (m *meta) setRequestID(id string) { m.RequestID = id }
 
-// returnResponse is the answer of an action that only reports success.
 type returnResponse struct {
 	meta
 	Return bool `xml:"return"`
@@ -192,32 +190,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f, _ := s.faults.Decide(fault.Call{Method: "ec2." + name, Resource: a.target(c)})
-	if f.Delay > 0 {
-		select {
-		case <-time.After(f.Delay):
-		case <-r.Context().Done():
-			return
+	reject := f.Mode == fault.ModeReject || f.Mode == fault.ModeFailOperation
+	stub.Serve(w, r, f, reject, "text/xml;charset=UTF-8", func() { writeError(w, requestID, faultError(f)) }, func() (func(), bool) {
+		body, err := a.handle(c)
+		if err != nil {
+			return func() { writeError(w, requestID, err) }, false
 		}
-	}
-	if f.Mode == fault.ModeReject || f.Mode == fault.ModeFailOperation {
-		writeError(w, requestID, faultError(f))
-		return
-	}
-	body, err := a.handle(c)
-	switch {
-	case f.Mode == fault.ModeLoseResponse:
-		loseResponse(w)
-	case err != nil:
-		writeError(w, requestID, err)
-	case f.Mode == fault.ModeFailAfter:
-		writeError(w, requestID, faultError(f))
-	default:
-		body.setRequestID(requestID)
-		writeXML(w, http.StatusOK, xml.StartElement{Name: xml.Name{Space: namespace, Local: name + "Response"}}, body)
-	}
+		return func() {
+			body.setRequestID(requestID)
+			writeXML(w, http.StatusOK, xml.StartElement{Name: xml.Name{Space: namespace, Local: name + "Response"}}, body)
+		}, true
+	})
 }
 
-// parse reads the call's action and region.
 func (s *Server) parse(w http.ResponseWriter, r *http.Request) (string, action, *call, *apiError) {
 	if r.URL.Path != "/" {
 		return "", action{}, nil, &apiError{http.StatusNotFound, "InvalidAction", "squall: no EC2 action is served at " + r.URL.Path}
@@ -278,27 +263,22 @@ func (s *Server) requestID() string {
 	return fmt.Sprintf("%08x-0000-4000-8000-%012x", n>>48, n&(1<<48-1))
 }
 
-// loseResponse ends the response partway through, as a connection lost after
-// the server committed would. Without the header on the wire, the client's
-// transport would silently retry an idempotent request on a reused connection.
-func loseResponse(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "text/xml;charset=UTF-8")
-	w.WriteHeader(http.StatusOK)
-	_ = http.NewResponseController(w).Flush()
-	panic(http.ErrAbortHandler)
-}
-
 // newID returns a fresh resource ID with prefix. The caller holds s.mu.
 func (s *Server) newID(prefix string) string {
 	s.nextID++
 	return fmt.Sprintf("%s-%017x", prefix, s.nextID)
 }
 
-// reserveID returns a fresh resource ID with prefix.
-func (s *Server) reserveID(prefix string) string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.newID(prefix)
+// unusedID returns a fresh resource ID with prefix that taken does not hold,
+// so a generated ID never replaces a resource put with an ID of the same form.
+// The caller holds s.mu.
+func unusedID[V any](s *Server, prefix string, taken map[string]V) string {
+	for {
+		id := s.newID(prefix)
+		if _, ok := taken[id]; !ok {
+			return id
+		}
+	}
 }
 
 // region returns the state of region, creating it. The caller holds s.mu.
@@ -311,7 +291,15 @@ func (s *Server) region(region string) *regionState {
 	return rs
 }
 
-// idempotent is what a client token replays.
+// lookupRegion returns the state of region without creating it: an empty,
+// read-only state when the server holds nothing there. The caller holds s.mu.
+func (s *Server) lookupRegion(region string) *regionState {
+	if rs, ok := s.regions[region]; ok {
+		return rs
+	}
+	return &regionState{}
+}
+
 type idempotent struct {
 	key         string
 	fingerprint string

@@ -2,6 +2,7 @@ package ec2
 
 import (
 	"maps"
+	"net/http"
 	"net/url"
 	"slices"
 	"strconv"
@@ -45,9 +46,12 @@ func (p *params) required(key string) (string, *apiError) {
 	return v, nil
 }
 
-func (p *params) bool(key string) (bool, *apiError) {
+// bool reads key, or returns absent when the call leaves it out.
+func (p *params) bool(key string, absent bool) (bool, *apiError) {
 	switch v := p.get(key); v {
-	case "", "false":
+	case "":
+		return absent, nil
+	case "false":
 		return false, nil
 	case "true":
 		return true, nil
@@ -94,11 +98,12 @@ func (p *params) done() *apiError {
 			return clientError("UnknownParameter", "The parameter %s is not recognized", k)
 		}
 	}
-	if dry, err := p.bool("DryRun"); err != nil || dry {
-		if err != nil {
-			return err
-		}
-		return &apiError{412, "DryRunOperation", "Request would have succeeded, but DryRun flag is set."}
+	dry, err := p.bool("DryRun", false)
+	if err != nil {
+		return err
+	}
+	if dry {
+		return &apiError{http.StatusPreconditionFailed, "DryRunOperation", "Request would have succeeded, but DryRun flag is set."}
 	}
 	return nil
 }
@@ -209,39 +214,42 @@ func tagFilter(tags map[string]string, name string) ([]string, bool) {
 
 // wildcard matches s against an EC2 filter value, in which * is any run of
 // characters, ? is any one character, and a backslash escapes either.
+// A mismatch backtracks only to the last *, which bounds a match by
+// len(pattern)*len(s) steps however many * the pattern has.
 func wildcard(pattern, s string) bool {
-	for len(pattern) > 0 {
-		c, size := utf8.DecodeRuneInString(pattern)
-		switch c {
-		case '*':
-			rest := pattern[size:]
-			for i := 0; ; {
-				if wildcard(rest, s[i:]) {
-					return true
+	p, i := 0, 0
+	star, retry := -1, 0
+	for i < len(s) {
+		if p < len(pattern) {
+			c, size := utf8.DecodeRuneInString(pattern[p:])
+			_, n := utf8.DecodeRuneInString(s[i:])
+			switch c {
+			case '*':
+				p += size
+				star, retry = p, i
+				continue
+			case '?':
+				p, i = p+size, i+n
+				continue
+			case '\\':
+				if next, m := utf8.DecodeRuneInString(pattern[p+size:]); m > 0 && (next == '*' || next == '?' || next == '\\') {
+					c, size = next, size+m
 				}
-				if i == len(s) {
-					return false
-				}
-				_, n := utf8.DecodeRuneInString(s[i:])
-				i += n
 			}
-		case '?':
-			if s == "" {
-				return false
-			}
-			_, n := utf8.DecodeRuneInString(s)
-			pattern, s = pattern[size:], s[n:]
-			continue
-		case '\\':
-			if next, n := utf8.DecodeRuneInString(pattern[size:]); n > 0 && (next == '*' || next == '?' || next == '\\') {
-				c, size = next, size+n
+			if got, _ := utf8.DecodeRuneInString(s[i:]); got == c {
+				p, i = p+size, i+n
+				continue
 			}
 		}
-		got, n := utf8.DecodeRuneInString(s)
-		if n == 0 || got != c {
+		if star < 0 {
 			return false
 		}
-		pattern, s = pattern[size:], s[n:]
+		_, n := utf8.DecodeRuneInString(s[retry:])
+		retry += n
+		p, i = star, retry
 	}
-	return s == ""
+	for p < len(pattern) && pattern[p] == '*' {
+		p++
+	}
+	return p == len(pattern)
 }

@@ -170,13 +170,20 @@ func (s *Server) storeInterface(region string, ni NetworkInterface) (*NetworkInt
 		if ni.InstanceID != "" {
 			ni.Status = statusInUse
 		}
-	case statusAvailable, statusInUse:
+	case statusAvailable:
+		if ni.InstanceID != "" {
+			return nil, invalidValue("A network interface attached to instance '%s' cannot be available.", ni.InstanceID)
+		}
+	case statusInUse:
 	default:
 		return nil, invalidValue("Invalid network interface status '%s'.", ni.Status)
 	}
+	if ni.NetworkInterfaceID != "" && !strings.HasPrefix(ni.NetworkInterfaceID, "eni-") {
+		return nil, invalidValue("Invalid network interface ID '%s'.", ni.NetworkInterfaceID)
+	}
 	rs := s.region(region)
 	if ni.NetworkInterfaceID == "" {
-		ni.NetworkInterfaceID = s.newID("eni")
+		ni.NetworkInterfaceID = unusedID(s, "eni", rs.interfaces)
 	}
 	if ni.PrivateIPAddress != "" {
 		ip, err := netip.ParseAddr(ni.PrivateIPAddress)
@@ -241,15 +248,14 @@ type createNetworkInterfaceResponse struct {
 }
 
 func (s *Server) createInterfaceTarget(c *call) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if token := c.p.values.Get("ClientToken"); token != "" {
-		s.mu.Lock()
-		t, ok := s.tokens[c.region+"/"+token]
-		s.mu.Unlock()
-		if ok {
+		if t, ok := s.tokens[c.region+"/"+token]; ok {
 			return c.region + "/" + t.created.NetworkInterfaceID
 		}
 	}
-	c.id = s.reserveID("eni")
+	c.id = unusedID(s, "eni", s.lookupRegion(c.region).interfaces)
 	return c.region + "/" + c.id
 }
 
@@ -324,7 +330,7 @@ func (s *Server) describeNetworkInterfaces(c *call) (response, *apiError) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rs := s.region(c.region)
+	rs := s.lookupRegion(c.region)
 	for _, id := range ids {
 		if _, ok := rs.interfaces[id]; !ok {
 			return nil, interfaceNotFound(id)
@@ -362,7 +368,7 @@ func (s *Server) deleteNetworkInterface(c *call) (response, *apiError) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rs := s.region(c.region)
+	rs := s.lookupRegion(c.region)
 	ni, ok := rs.interfaces[id]
 	if !ok {
 		return nil, interfaceNotFound(id)
@@ -397,7 +403,7 @@ func (s *Server) NetworkInterfaces() []NetworkInterface {
 func (s *Server) LookupNetworkInterface(region, id string) (NetworkInterface, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ni, ok := s.region(region).interfaces[id]
+	ni, ok := s.lookupRegion(region).interfaces[id]
 	if !ok {
 		return NetworkInterface{}, false
 	}
@@ -426,9 +432,12 @@ var ErrNotFound = errors.New("ec2: resource not found")
 // instanceID, as attaching it to an instance would: its status becomes
 // "in-use", so it cannot be deleted until [Server.DetachNetworkInterface].
 func (s *Server) AttachNetworkInterface(region, id, instanceID string) error {
+	if instanceID == "" {
+		return errors.New("ec2: attaching a network interface needs an instance ID")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ni, ok := s.region(region).interfaces[id]
+	ni, ok := s.lookupRegion(region).interfaces[id]
 	if !ok {
 		return fmt.Errorf("network interface %s in %s: %w", id, region, ErrNotFound)
 	}
@@ -441,7 +450,7 @@ func (s *Server) AttachNetworkInterface(region, id, instanceID string) error {
 func (s *Server) DetachNetworkInterface(region, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ni, ok := s.region(region).interfaces[id]
+	ni, ok := s.lookupRegion(region).interfaces[id]
 	if !ok {
 		return fmt.Errorf("network interface %s in %s: %w", id, region, ErrNotFound)
 	}

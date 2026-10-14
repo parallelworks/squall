@@ -117,3 +117,14 @@ func TestFilterWildcards(t *testing.T) {
 		}
 	}
 }
+
+func TestFilterWildcardsDoNotBacktrackExponentially(t *testing.T) {
+	s := ec2.New()
+	if _, err := s.PutAddress("us-east-1", ec2.Address{Tags: map[string]string{"Name": strings.Repeat("a", 256)}}); err != nil {
+		t.Fatal(err)
+	}
+	_, body := do(t, s, authorization, form("DescribeAddresses", "Filter.1.Name", "tag:Name", "Filter.1.Value.1", strings.Repeat("*a", 8)+"*b"))
+	if strings.Contains(body, "<allocationId>") {
+		t.Fatalf("a pattern ending in b matched a value of only a: %s", body)
+	}
+}

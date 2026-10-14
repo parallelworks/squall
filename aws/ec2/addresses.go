@@ -140,7 +140,7 @@ func (rs *regionState) addressWithIP(ip string) *Address {
 
 // associate associates a with ni, disassociating whatever address ni had.
 // The caller holds s.mu.
-func (s *Server) associate(rs *regionState, a *Address, ni *NetworkInterface) {
+func (s *Server) associate(rs *regionState, a *Address, ni *NetworkInterface, id string) {
 	for _, other := range rs.addresses {
 		if other != a && other.NetworkInterfaceID == ni.NetworkInterfaceID {
 			other.disassociate()
@@ -148,7 +148,17 @@ func (s *Server) associate(rs *regionState, a *Address, ni *NetworkInterface) {
 	}
 	a.NetworkInterfaceID = ni.NetworkInterfaceID
 	a.PrivateIPAddress = ni.PrivateIPAddress
-	a.AssociationID = s.newID("eipassoc")
+	a.AssociationID = cmp.Or(id, unusedID(s, "eipassoc", rs.associations()))
+}
+
+func (rs *regionState) associations() map[string]*Address {
+	associations := map[string]*Address{}
+	for _, a := range rs.addresses {
+		if a.AssociationID != "" {
+			associations[a.AssociationID] = a
+		}
+	}
+	return associations
 }
 
 // storeAddress fills in what a leaves empty and stores it in region,
@@ -162,14 +172,13 @@ func (s *Server) storeAddress(region string, a Address) (*Address, *apiError) {
 	}
 	rs := s.region(region)
 	if a.AllocationID == "" {
-		a.AllocationID = s.newID("eipalloc")
+		a.AllocationID = unusedID(s, "eipalloc", rs.addresses)
 	}
 	if a.PublicIP != "" {
-		ip, err := netip.ParseAddr(a.PublicIP)
-		if err != nil || !ip.Is4() {
-			return nil, clientError("InvalidAddress.Malformed", "Invalid IPv4 address: %s", a.PublicIP)
+		var err *apiError
+		if a.PublicIP, err = parsePublicIP(a.PublicIP); err != nil {
+			return nil, err
 		}
-		a.PublicIP = ip.String()
 		if holder, taken := s.publicIPs[a.PublicIP]; taken && holder != region+"/"+a.AllocationID {
 			return nil, clientError("InvalidIPAddress.InUse", "Address '%s' is in use.", a.PublicIP)
 		}
@@ -179,6 +188,9 @@ func (s *Server) storeAddress(region string, a Address) (*Address, *apiError) {
 		var ok bool
 		if ni, ok = rs.interfaces[a.NetworkInterfaceID]; !ok {
 			return nil, interfaceNotFound(a.NetworkInterfaceID)
+		}
+		if holder, taken := rs.associations()[a.AssociationID]; a.AssociationID != "" && taken && holder.AllocationID != a.AllocationID {
+			return nil, invalidValue("Association ID '%s' is in use.", a.AssociationID)
 		}
 	}
 	if old, ok := rs.addresses[a.AllocationID]; ok {
@@ -196,10 +208,16 @@ func (s *Server) storeAddress(region string, a Address) (*Address, *apiError) {
 		stored.disassociate()
 		return stored, nil
 	}
-	assoc := stored.AssociationID
-	s.associate(rs, stored, ni)
-	stored.AssociationID = cmp.Or(assoc, stored.AssociationID)
+	s.associate(rs, stored, ni, stored.AssociationID)
 	return stored, nil
+}
+
+func parsePublicIP(s string) (string, *apiError) {
+	ip, err := netip.ParseAddr(s)
+	if err != nil || !ip.Is4() {
+		return "", clientError("InvalidAddress.Malformed", "Invalid IPv4 address: %s", s)
+	}
+	return ip.String(), nil
 }
 
 // allocatePublic returns the next free public IP address. The caller holds s.mu.
@@ -222,7 +240,9 @@ type allocateAddressResponse struct {
 }
 
 func (s *Server) allocateTarget(c *call) string {
-	c.id = s.reserveID("eipalloc")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c.id = unusedID(s, "eipalloc", s.lookupRegion(c.region).addresses)
 	return c.region + "/" + c.id
 }
 
@@ -258,8 +278,8 @@ type describeAddressesResponse struct {
 func (s *Server) describeAddresses(c *call) (response, *apiError) {
 	ids, ips := c.p.list("AllocationId"), c.p.list("PublicIp")
 	for _, ip := range ips {
-		if _, err := netip.ParseAddr(ip); err != nil {
-			return nil, clientError("InvalidAddress.Malformed", "Invalid IPv4 address: %s", ip)
+		if _, err := parsePublicIP(ip); err != nil {
+			return nil, err
 		}
 	}
 	filters, err := c.p.filters(addressFields(&Address{}, ""))
@@ -271,7 +291,7 @@ func (s *Server) describeAddresses(c *call) (response, *apiError) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rs := s.region(c.region)
+	rs := s.lookupRegion(c.region)
 	for _, id := range ids {
 		if _, ok := rs.addresses[id]; !ok {
 			return nil, allocationNotFound(id)
@@ -305,7 +325,7 @@ func (s *Server) releaseAddress(c *call) (response, *apiError) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rs := s.region(c.region)
+	rs := s.lookupRegion(c.region)
 	a, ok := rs.addresses[id]
 	if !ok {
 		return nil, allocationNotFound(id)
@@ -333,7 +353,7 @@ func (s *Server) associateAddress(c *call) (response, *apiError) {
 	if err != nil {
 		return nil, err
 	}
-	reassociate, err := c.p.bool("AllowReassociation")
+	reassociate, err := c.p.bool("AllowReassociation", true)
 	if err != nil {
 		return nil, err
 	}
@@ -342,7 +362,7 @@ func (s *Server) associateAddress(c *call) (response, *apiError) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rs := s.region(c.region)
+	rs := s.lookupRegion(c.region)
 	a, ok := rs.addresses[id]
 	if !ok {
 		return nil, allocationNotFound(id)
@@ -355,7 +375,7 @@ func (s *Server) associateAddress(c *call) (response, *apiError) {
 		if a.AssociationID != "" && !reassociate {
 			return nil, clientError("Resource.AlreadyAssociated", "resource %s is already associated with associate-id %s", id, a.AssociationID)
 		}
-		s.associate(rs, a, ni)
+		s.associate(rs, a, ni, "")
 	}
 	return &associateAddressResponse{Return: true, AssociationID: a.AssociationID}, nil
 }
@@ -370,7 +390,7 @@ func (s *Server) disassociateAddress(c *call) (response, *apiError) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, a := range s.region(c.region).addresses {
+	for _, a := range s.lookupRegion(c.region).addresses {
 		if a.AssociationID == id {
 			a.disassociate()
 			return &returnResponse{Return: true}, nil
@@ -398,7 +418,7 @@ func (s *Server) Addresses() []Address {
 func (s *Server) LookupAddress(region, allocationID string) (Address, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	a, ok := s.region(region).addresses[allocationID]
+	a, ok := s.lookupRegion(region).addresses[allocationID]
 	if !ok {
 		return Address{}, false
 	}

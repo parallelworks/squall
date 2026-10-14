@@ -200,6 +200,10 @@ func TestAddressErrors(t *testing.T) {
 			_, err := describeAddresses(t, c, &awsec2.DescribeAddressesInput{PublicIps: []string{"100.127.0.1"}})
 			return err
 		}, "InvalidAddress.NotFound"},
+		{"describe a public IP that is not IPv4", func() error {
+			_, err := describeAddresses(t, c, &awsec2.DescribeAddressesInput{PublicIps: []string{"2001:db8::1"}})
+			return err
+		}, "InvalidAddress.Malformed"},
 		{"describe with an unknown filter", func() error {
 			_, err := describeAddresses(t, c, &awsec2.DescribeAddressesInput{Filters: []types.Filter{filter("creation-time", "x")}})
 			return err
@@ -254,13 +258,14 @@ func TestAddressErrors(t *testing.T) {
 }
 
 func TestAddressLimit(t *testing.T) {
-	c := newClient(t, ec2.New(ec2.WithAddressLimit(2)))
+	s := ec2.New(ec2.WithAddressLimit(2))
+	c := newClient(t, s)
 	allocate(t, c)
 	allocate(t, c)
 	if _, err := c.AllocateAddress(t.Context(), &awsec2.AllocateAddressInput{}); code(err) != "AddressLimitExceeded" {
 		t.Fatalf("a third allocation = %v, want AddressLimitExceeded", err)
 	}
-	other := clientAt(serve(t, ec2.New(ec2.WithAddressLimit(2))), "eu-west-1", withRetries(1))
+	other := clientAt(serve(t, s), "eu-west-1", withRetries(1))
 	if _, err := other.AllocateAddress(t.Context(), &awsec2.AllocateAddressInput{}); err != nil {
 		t.Fatalf("the limit is per region: %v", err)
 	}
@@ -293,9 +298,9 @@ func TestAssociateAndDisassociate(t *testing.T) {
 		t.Fatalf("interface association = %+v", as)
 	}
 
-	moved, err := associate(t, c, id, secondID, true)
-	if err != nil || moved == assoc {
-		t.Fatalf("reassociating = %q, %v", moved, err)
+	moved, err := c.AssociateAddress(t.Context(), &awsec2.AssociateAddressInput{AllocationId: aws.String(id), NetworkInterfaceId: aws.String(secondID)})
+	if err != nil || aws.ToString(moved.AssociationId) == assoc {
+		t.Fatalf("reassociating, which is automatic unless AllowReassociation is false = %+v, %v", moved, err)
 	}
 	if a, _ := s.LookupAddress(region, id); a.NetworkInterfaceID != secondID {
 		t.Fatalf("after reassociating, the address is on %s", a.NetworkInterfaceID)
@@ -359,7 +364,6 @@ func TestCreateDescribeDeleteInterface(t *testing.T) {
 	if a, ok := s.LookupAddress(region, eip); !ok || a.AssociationID != "" {
 		t.Fatalf("deleting the interface left its address %+v, %v; want it allocated and disassociated", a, ok)
 	}
-	// A freed private IP can be taken again.
 	again, err := c.CreateNetworkInterface(t.Context(), &awsec2.CreateNetworkInterfaceInput{SubnetId: aws.String(subnet), PrivateIpAddress: aws.String("10.0.0.4")})
 	if err != nil || aws.ToString(again.NetworkInterface.PrivateIpAddress) != "10.0.0.4" {
 		t.Fatalf("reusing the freed IP = %v", err)
@@ -570,7 +574,6 @@ func TestClientToken(t *testing.T) {
 	if _, err := c.CreateNetworkInterface(t.Context(), in); code(err) != "IdempotentParameterMismatch" {
 		t.Fatalf("the token with other parameters = %v, want IdempotentParameterMismatch", err)
 	}
-	// Tokens are per region.
 	west := clientAt(serve(t, s), "us-west-2", withRetries(1))
 	in.Description = nil
 	if _, err := west.CreateNetworkInterface(t.Context(), in); err != nil {
@@ -718,8 +721,12 @@ func TestEndpointFromTheEnvironment(t *testing.T) {
 			t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
 			t.Setenv("AWS_SECRET_ACCESS_KEY", "SECRET")
 			t.Setenv("AWS_REGION", "eu-west-1")
-			t.Setenv("AWS_ENDPOINT_URL_EC2", "")
-			t.Setenv("AWS_ENDPOINT_URL", "")
+			for _, unset := range []string{
+				"AWS_ENDPOINT_URL_EC2", "AWS_ENDPOINT_URL", "AWS_IGNORE_CONFIGURED_ENDPOINT_URLS", "AWS_PROFILE",
+				"AWS_DEFAULT_PROFILE", "AWS_USE_FIPS_ENDPOINT", "AWS_USE_DUALSTACK_ENDPOINT", "AWS_CA_BUNDLE",
+			} {
+				t.Setenv(unset, "")
+			}
 			t.Setenv(variable, url)
 			cfg, err := config.LoadDefaultConfig(t.Context())
 			if err != nil {
@@ -766,10 +773,61 @@ func TestPutHelpersSetUpState(t *testing.T) {
 		{},
 		{SubnetID: subnet, PrivateIPAddress: ni.PrivateIPAddress},
 		{SubnetID: subnet, Status: "attaching"},
+		{SubnetID: subnet, Status: "available", InstanceID: "i-1"},
+		{SubnetID: subnet, NetworkInterfaceID: "interface-1"},
 	} {
 		if _, err := s.PutNetworkInterface(region, bad); err == nil {
 			t.Errorf("PutNetworkInterface accepted %+v", bad)
 		}
+	}
+	if err := s.AttachNetworkInterface(region, ni.NetworkInterfaceID, ""); err == nil {
+		t.Error("AttachNetworkInterface accepted no instance ID")
+	}
+}
+
+func TestCreatesDoNotReplacePutResources(t *testing.T) {
+	s := ec2.New()
+	if _, err := s.PutAddress(region, ec2.Address{AllocationID: "eipalloc-00000000000000001"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PutNetworkInterface(region, ec2.NetworkInterface{NetworkInterfaceID: "eni-00000000000000003", SubnetID: subnet}); err != nil {
+		t.Fatal(err)
+	}
+	c := newClient(t, s)
+	allocate(t, c)
+	createInterface(t, c)
+	if got := s.Addresses(); len(got) != 2 {
+		t.Errorf("addresses = %+v, want the one put and the one allocated", got)
+	}
+	if got := s.NetworkInterfaces(); len(got) != 2 {
+		t.Errorf("interfaces = %+v, want the one put and the one created", got)
+	}
+}
+
+func TestAssociationIDsStayUnique(t *testing.T) {
+	s := ec2.New()
+	first, err := s.PutNetworkInterface(region, ec2.NetworkInterface{SubnetID: subnet})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.PutNetworkInterface(region, ec2.NetworkInterface{SubnetID: subnet})
+	if err != nil {
+		t.Fatal(err)
+	}
+	put, err := s.PutAddress(region, ec2.Address{NetworkInterfaceID: first.NetworkInterfaceID, AssociationID: "eipassoc-00000000000000003"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PutAddress(region, ec2.Address{NetworkInterfaceID: second.NetworkInterfaceID, AssociationID: put.AssociationID}); err == nil {
+		t.Error("a second address put with an association ID in use was accepted")
+	}
+	c := newClient(t, s)
+	assoc, err := associate(t, c, aws.ToString(allocate(t, c).AllocationId), second.NetworkInterfaceID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assoc == put.AssociationID {
+		t.Errorf("a new association took the ID %s another address holds", put.AssociationID)
 	}
 }
 

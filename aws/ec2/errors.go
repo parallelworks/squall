@@ -9,7 +9,6 @@ import (
 	"github.com/parallelworks/squall/fault"
 )
 
-// apiError is an error in the shape EC2 answers with.
 type apiError struct {
 	Status  int
 	Code    string
