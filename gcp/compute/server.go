@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/parallelworks/squall/fault"
+	"github.com/parallelworks/squall/internal/stub"
 )
 
 // maxBody bounds a request body the server reads.
@@ -139,42 +140,19 @@ func (s *Server) route(pattern, method, verb string, h handler, target func(*htt
 			resource = target(r, resource)
 		}
 		f, _ := s.faults.Decide(fault.Call{Method: method, Resource: resource})
-		if f.Delay > 0 {
-			select {
-			case <-time.After(f.Delay):
-			case <-r.Context().Done():
-				return
+		reject := f.Mode == fault.ModeReject || f.Mode == fault.ModeFailOperation && !startsOperation
+		stub.Serve(w, r, f, reject, "", func() { writeError(w, faultError(f)) }, func() (func(), bool) {
+			var opFault *apiError
+			if f.Mode == fault.ModeFailOperation {
+				opFault = faultError(f)
 			}
-		}
-		if f.Mode == fault.ModeReject || f.Mode == fault.ModeFailOperation && !startsOperation {
-			writeError(w, faultError(f))
-			return
-		}
-		var opFault *apiError
-		if f.Mode == fault.ModeFailOperation {
-			opFault = faultError(f)
-		}
-		body, err := h(r, opFault)
-		switch {
-		case f.Mode == fault.ModeLoseResponse:
-			loseResponse(w)
-		case err != nil:
-			writeError(w, err)
-		case f.Mode == fault.ModeFailAfter:
-			writeError(w, faultError(f))
-		default:
-			writeJSON(w, http.StatusOK, body)
-		}
+			body, err := h(r, opFault)
+			if err != nil {
+				return func() { writeError(w, err) }, false
+			}
+			return func() { writeJSON(w, http.StatusOK, body) }, true
+		})
 	})
-}
-
-// loseResponse ends the response partway through, as a connection lost after
-// the server committed would. Without the header on the wire, the client's
-// transport would silently retry an idempotent request on a reused connection.
-func loseResponse(w http.ResponseWriter) {
-	w.WriteHeader(http.StatusOK)
-	_ = http.NewResponseController(w).Flush()
-	panic(http.ErrAbortHandler)
 }
 
 // decodeBody reads a JSON request body into v.
