@@ -11,7 +11,7 @@ Code that creates cloud resources has to cope with calls that fail after they
 took effect: an insert that succeeded but whose response was lost, an operation
 that ended in an error, a retry that finds the resource already there. Those
 paths are where leaked resources and stuck records come from, and they are
-hard to reach against a real cloud. A squall server answers the same REST
+hard to reach against a real cloud. A squall server answers the same API
 calls the official client libraries make, keeps the resources in memory, and
 fails exactly the calls you choose, or a seeded random share of them, so a
 failure replays from its seed.
@@ -21,6 +21,7 @@ failure replays from its seed.
 | Package | What it does |
 | --- | --- |
 | [`fault`](https://pkg.go.dev/github.com/parallelworks/squall/fault) | Decides which calls fail and how: rejected, applied with the response lost, applied with an error, an operation that ends in an error, or slow. Scripted rules and a seeded random rate. |
+| [`aws/ec2`](https://pkg.go.dev/github.com/parallelworks/squall/aws/ec2) | Amazon EC2: Elastic IP addresses (allocate, describe with filters, release, associate, disassociate) and network interfaces (create with client tokens, describe with filters and pages, delete). |
 | [`gcp/compute`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/compute) | Compute Engine: regional addresses (get, list with filters, insert, delete, setLabels) and region operations. |
 
 Coverage grows with use: each stand-in implements the methods someone needed,
@@ -61,7 +62,7 @@ for seed := range uint64(100) {
 
 ## Faithfulness
 
-Each stand-in follows the real API's paths, JSON shapes and error codes for the
+Each stand-in follows the real API's requests, response shapes and error codes for the
 methods it covers, and is tested through the official Go client library. Where
 it simplifies, the package documentation says so. For Compute Engine:
 
@@ -79,6 +80,26 @@ it simplifies, the package documentation says so. For Compute Engine:
   in for its subnetwork.
 - A fault rule's `Resource` for an insert is the resource being created, so a
   rule can target the insert of one name.
+
+For Amazon EC2:
+
+- Signatures are not checked. The region comes from the SigV4 credential
+  scope, and each region keeps its own resources.
+- Subnet and security group IDs are not validated, there are no VPCs, and
+  instances are not modeled: a test marks an interface attached to an instance
+  ID of its choosing.
+- A `CreateNetworkInterface` that repeats a `ClientToken` with the same
+  parameters gets the interface it first created, as the real API does for
+  retries; with other parameters it fails with `IdempotentParameterMismatch`.
+- Filters take EC2's `*` and `?` wildcards. Filter names and parameters the
+  stand-in does not support are rejected with 400 rather than ignored.
+- Public IP addresses come from 100.64.0.0/10 and private ones from
+  10.0.0.0/8. There is no address quota unless the test sets one.
+- EC2 has no long-running operations, so a failed operation fails the call
+  before it takes effect. A fault's reason is the EC2 error code it answers
+  with, and the generic ones become `InternalError`, `Unavailable` and
+  `RequestLimitExceeded`. A fault rule's `Resource` is the region and ID, such
+  as `us-east-1/eipalloc-…`, and for a create, the resource being created.
 
 ## Requirements
 
