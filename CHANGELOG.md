@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/parallelworks/squall/compare/v0.1.0...v0.2.0) (2026-10-14)
+
+
+### Features
+
+* Amazon EC2 Elastic IP addresses and network interfaces ([#4](https://github.com/parallelworks/squall/issues/4)) ([87db7bb](https://github.com/parallelworks/squall/commit/87db7bb547ed7c8ca60e968a36e70855f72bedb0))
+
 ## 0.1.0 (2026-10-13)
 
 
