@@ -21,7 +21,7 @@ failure replays from its seed.
 | Package | What it does |
 | --- | --- |
 | [`fault`](https://pkg.go.dev/github.com/parallelworks/squall/fault) | Decides which calls fail and how: rejected, applied with the response lost, applied with an error, an operation that ends in an error, or slow. Scripted rules and a seeded random rate. |
-| [`aws/ec2`](https://pkg.go.dev/github.com/parallelworks/squall/aws/ec2) | Amazon EC2: Elastic IP addresses (allocate, describe with filters, release, associate, disassociate) and network interfaces (create with client tokens, describe with filters and pages, delete). |
+| [`aws/ec2`](https://pkg.go.dev/github.com/parallelworks/squall/aws/ec2) | Amazon EC2: instances (run with client tokens, describe with filters and pages, start, stop, terminate, change type), images, instance types, EBS volumes (create, describe, attach, detach, delete), placement groups, tags, Elastic IP addresses (allocate, describe, release, associate with an interface or instance, disassociate) and network interfaces (create with client tokens, describe, delete). |
 | [`gcp/compute`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/compute) | Compute Engine: regional addresses (get, list with filters, insert, delete, setLabels) and region operations. |
 
 Coverage grows with use: each stand-in implements the methods someone needed,
@@ -85,12 +85,22 @@ For Amazon EC2:
 
 - Signatures are not checked. The region comes from the SigV4 credential
   scope, and each region keeps its own resources.
-- Subnet and security group IDs are not validated, there are no VPCs, and
-  instances are not modeled: a test marks an interface attached to an instance
-  ID of its choosing.
-- A `CreateNetworkInterface` that repeats a `ClientToken` with the same
-  parameters gets the interface it first created, as the real API does for
-  retries; with other parameters it fails with `IdempotentParameterMismatch`.
+- Subnet and security group IDs are not validated, and there are no VPCs,
+  default or otherwise: `RunInstances` needs a subnet or a network interface.
+  Images are registered by the test with `PutImage`; instance types come from
+  a small built-in set or `PutInstanceType`.
+- Instances and volumes move through EC2's states when describes see them. By
+  default the first `DescribeInstances` or `DescribeVolumes` after a change
+  shows the state it settles in, so the SDK's waiters return at once;
+  `WithSettleAfter` holds them in transition for more describes, or until the
+  test calls `Settle`. Describes are consistent at once, not eventually.
+- Terminated instances stay visible, as in EC2, until the test calls
+  `ForgetInstance`. Termination deletes the interface and volumes marked to
+  delete on termination and releases the rest.
+- A `CreateNetworkInterface`, `RunInstances` or `CreateVolume` that repeats a
+  `ClientToken` with the same parameters gets what the first call created, as
+  the real API does for retries; with other parameters it fails with
+  `IdempotentParameterMismatch`.
 - Filters take EC2's `*` and `?` wildcards. Filter names and parameters the
   stand-in does not support are rejected with 400 rather than ignored.
 - Public IP addresses come from 100.64.0.0/10 and private ones from
@@ -99,7 +109,9 @@ For Amazon EC2:
   before it takes effect. A fault's reason is the EC2 error code it answers
   with, and the generic ones become `InternalError`, `Unavailable` and
   `RequestLimitExceeded`. A fault rule's `Resource` is the region and ID, such
-  as `us-east-1/eipalloc-…`, and for a create, the resource being created.
+  as `us-east-1/eipalloc-…`, and for a create, the resource being created (the
+  first instance, for `RunInstances`). A rejected call has no effect, so a
+  rejected describe does not move an instance along.
 
 ## Requirements
 

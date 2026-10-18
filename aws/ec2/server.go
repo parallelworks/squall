@@ -10,10 +10,16 @@
 // so tests can check that code which retries converges.
 //
 // It covers Elastic IP addresses (AllocateAddress, DescribeAddresses,
-// ReleaseAddress, AssociateAddress, DisassociateAddress) and network
-// interfaces (CreateNetworkInterface, DescribeNetworkInterfaces,
-// DeleteNetworkInterface), with the real API's error codes. Other actions
-// answer 404 with the code InvalidAction. Where it differs from EC2:
+// ReleaseAddress, AssociateAddress, DisassociateAddress), network interfaces
+// (CreateNetworkInterface, DescribeNetworkInterfaces, DeleteNetworkInterface),
+// instances (RunInstances, DescribeInstances, StartInstances, StopInstances,
+// TerminateInstances, ModifyInstanceAttribute for the instance type), images
+// (DescribeImages), instance types (DescribeInstanceTypes), EBS volumes
+// (CreateVolume, DescribeVolumes, DeleteVolume, AttachVolume, DetachVolume),
+// placement groups (CreatePlacementGroup, DescribePlacementGroups,
+// DeletePlacementGroup) and tags (CreateTags, DeleteTags), with the real API's
+// error codes. Other actions answer 404 with the code InvalidAction. Where it
+// differs from EC2:
 //
 //   - Signatures are not checked. The region comes from the credential scope
 //     of the SigV4 Authorization header (or the X-Amz-Credential query
@@ -21,35 +27,83 @@
 //     account: the server keeps no owner IDs.
 //   - Subnet and security group IDs are not validated, and
 //     there are no VPCs: interfaces report no VPC ID, and their availability
-//     zone is the region with "a" appended. ReleaseAddress fails with
+//     zone is the region with "a" appended unless an instance launched in
+//     another. ReleaseAddress fails with
 //     InvalidIPAddress.InUse for an associated address, as in a nondefault
 //     VPC, rather than disassociating it. Private IP addresses are unique
 //     within a subnet and come from 10.0.0.0/8; public ones are unique across
 //     every region and come from 100.64.0.0/10, never from routable ranges.
-//   - Instances are not modeled. [Server.AttachNetworkInterface] marks an
-//     interface in use by an instance ID of the caller's choosing.
-//   - There is no quota on addresses unless [WithAddressLimit] sets one.
+//   - There is no quota on addresses unless [WithAddressLimit] sets one, and
+//     no capacity or instance limit: a fault rule with a code such as
+//     InsufficientInstanceCapacity stands in for one.
 //   - Each interface has one private IP address; an address associates with
 //     it. Associating an address with an interface that already has another
 //     disassociates the other, and associating it again with the interface it
-//     is on returns its current association.
-//   - A CreateNetworkInterface that repeats a ClientToken in the same region
-//     with the same parameters gets the interface it created, as first
-//     created, without taking effect again; with other parameters it fails
-//     with IdempotentParameterMismatch. The server keeps the last 10,000
-//     tokens.
+//     is on returns its current association. AssociateAddress with an
+//     InstanceId associates with the instance's primary interface, and fails
+//     with InvalidInstanceID unless the instance is running or stopped.
+//   - A CreateNetworkInterface, RunInstances or CreateVolume that repeats a
+//     ClientToken in the same region with the same parameters gets what the
+//     first call created without taking effect again: the interface or volume
+//     as first created, or the reservation's instances as they are now. With
+//     other parameters it fails with IdempotentParameterMismatch. The server
+//     keeps the last 10,000 tokens.
 //   - Filter values take the * and ? wildcards. A filter name the server does
 //     not support, like any parameter it does not support, is rejected with
 //     400 rather than ignored.
 //
+// Instances:
+//
+//   - There is no default VPC: RunInstances needs a SubnetId or one network
+//     interface at device index 0, either new or an existing available one,
+//     and fails with VPCIdNotSpecified without. Instances are EBS-backed HVM
+//     instances with one network interface; launch templates, spot options,
+//     instance profiles, metadata options and the like are rejected as
+//     unknown parameters.
+//   - An instance's image must be registered with [Server.PutImage], and its
+//     type must be one [Server.PutInstanceType] added or one of a small
+//     built-in set, which DescribeInstanceTypes lists, that runs the image's
+//     architecture. The default type is m1.small, as in EC2.
+//   - Instances move through EC2's states, pending to running, stopping to
+//     stopped, and shutting-down to terminated, when describes see them: by
+//     default the first DescribeInstances after a change shows the state it
+//     settles in, so the SDK's waiters return at once. [WithSettleAfter]
+//     holds them in transition for more describes, or until [Server.Settle].
+//     Describes are consistent at once; EC2's are eventually consistent.
+//   - A terminated instance stays visible, as in EC2, until
+//     [Server.ForgetInstance] removes it. On termination it releases its
+//     interface and volumes and deletes those marked to delete on
+//     termination: a new interface and the image's volumes by default, an
+//     existing interface not.
+//   - An instance launched with AssociatePublicIpAddress gets a public IP
+//     address, released while it is stopped or has an Elastic IP address and
+//     assigned again when it starts or the Elastic IP is disassociated.
+//   - DescribeImages lists only registered images. ExecutableBy is not
+//     supported; the owner "self" matches images with no OwnerID, and other
+//     owners match the OwnerID or OwnerAlias. Unknown image IDs fail with
+//     InvalidAMIID.NotFound.
+//   - Volumes go from creating to available, and attachments from attaching
+//     to attached and from detaching to detached, the same way instances
+//     move. Snapshots are not modeled: a snapshot ID is recorded, not read,
+//     and a volume from one without a size is 8 GiB. Volumes and placement
+//     groups are deleted at once rather than passing through a deleting
+//     state.
+//   - CreateTags and DeleteTags work on instances, volumes, images, placement
+//     groups (by group ID), network interfaces and Elastic IP addresses, and
+//     change nothing unless every resource exists.
+//
 // Fault method names are "ec2." and the action, such as "ec2.AllocateAddress".
 // A call's resource is the region and the ID it acts on, such as
-// "us-east-1/eipalloc-00000000000000001"; a create call names the resource it
-// creates, and a describe call names the collection, such as
-// "us-east-1/addresses". EC2 has no long-running operations, so
-// [fault.ModeFailOperation] fails a call as [fault.ModeReject] does. A fault's
+// "us-east-1/eipalloc-00000000000000001", or the first of them for a call
+// that takes several; a create call names the resource it creates (the first
+// instance, for RunInstances), placement group calls name the group by name,
+// and a describe call names the collection, such as "us-east-1/addresses".
+// EC2 has no long-running operations, so [fault.ModeFailOperation] fails a
+// call as [fault.ModeReject] does. A fault's
 // Reason is the error code, except that the fault package's generic reasons
-// become InternalError, Unavailable (for 503) and RequestLimitExceeded.
+// become InternalError, Unavailable (for 503) and RequestLimitExceeded. A call
+// a fault rejects has no effect, so a rejected describe does not move an
+// instance along.
 //
 // A lost response aborts the handler with [http.ErrAbortHandler] after
 // sending the response header, so the [http.Server] serving it closes the
@@ -59,6 +113,7 @@ package ec2
 import (
 	"encoding/xml"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/netip"
 	"strings"
@@ -82,24 +137,30 @@ const (
 type Server struct {
 	faults       *fault.Injector
 	addressLimit int
+	settleAfter  int
 	actions      map[string]action
 	requests     atomic.Uint64
 
-	mu         sync.Mutex
-	nextID     uint64
-	regions    map[string]*regionState
-	publicIPs  map[string]string
-	privateIPs map[string]string
-	nextPublic netip.Addr
-	nextLocal  netip.Addr
-	tokens     map[string]*idempotent
-	tokenOrder []string
-	tokenNext  int
+	mu            sync.Mutex
+	nextID        uint64
+	regions       map[string]*regionState
+	instanceTypes map[string]InstanceType
+	publicIPs     map[string]string
+	privateIPs    map[string]string
+	nextPublic    netip.Addr
+	nextLocal     netip.Addr
+	tokens        map[string]*idempotent
+	tokenOrder    []string
+	tokenNext     int
 }
 
 type regionState struct {
-	addresses  map[string]*Address
-	interfaces map[string]*NetworkInterface
+	addresses       map[string]*Address
+	interfaces      map[string]*NetworkInterface
+	instances       map[string]*Instance
+	images          map[string]*Image
+	volumes         map[string]*Volume
+	placementGroups map[string]*PlacementGroup
 }
 
 // Option configures a [Server].
@@ -117,6 +178,16 @@ func WithAddressLimit(n int) Option {
 	return func(s *Server) { s.addressLimit = n }
 }
 
+// WithSettleAfter sets how many describes see an instance or volume in a
+// transitional state, such as pending or stopping, before one shows the state
+// it settles in: DescribeInstances calls for an instance, DescribeVolumes calls
+// for a volume, counting each call that names it or names no IDs. The
+// default, 0, settles it on the first describe, so the SDK's waiters return
+// at once. A negative n settles it only on [Server.Settle].
+func WithSettleAfter(n int) Option {
+	return func(s *Server) { s.settleAfter = n }
+}
+
 // New returns an empty server.
 func New(opts ...Option) *Server {
 	s := &Server{
@@ -124,9 +195,10 @@ func New(opts ...Option) *Server {
 		publicIPs:  map[string]string{},
 		privateIPs: map[string]string{},
 		// Neither range is routable on the internet, so a test cannot reach a real host by mistake.
-		nextPublic: netip.MustParseAddr("100.64.0.1"),
-		nextLocal:  netip.MustParseAddr("10.0.0.4"),
-		tokens:     map[string]*idempotent{},
+		nextPublic:    netip.MustParseAddr("100.64.0.1"),
+		nextLocal:     netip.MustParseAddr("10.0.0.4"),
+		tokens:        map[string]*idempotent{},
+		instanceTypes: maps.Clone(builtinInstanceTypes),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -140,6 +212,24 @@ func New(opts ...Option) *Server {
 		"CreateNetworkInterface":    {s.createInterfaceTarget, s.createNetworkInterface},
 		"DescribeNetworkInterfaces": {collection("network-interfaces"), s.describeNetworkInterfaces},
 		"DeleteNetworkInterface":    {named("NetworkInterfaceId"), s.deleteNetworkInterface},
+		"RunInstances":              {s.runTarget, s.runInstances},
+		"DescribeInstances":         {collection("instances"), s.describeInstances},
+		"StartInstances":            {named("InstanceId.1"), s.startInstances},
+		"StopInstances":             {named("InstanceId.1"), s.stopInstances},
+		"TerminateInstances":        {named("InstanceId.1"), s.terminateInstances},
+		"ModifyInstanceAttribute":   {named("InstanceId"), s.modifyInstanceAttribute},
+		"DescribeInstanceTypes":     {collection("instance-types"), s.describeInstanceTypes},
+		"DescribeImages":            {collection("images"), s.describeImages},
+		"CreateVolume":              {s.createVolumeTarget, s.createVolume},
+		"DescribeVolumes":           {collection("volumes"), s.describeVolumes},
+		"DeleteVolume":              {named("VolumeId"), s.deleteVolume},
+		"AttachVolume":              {named("VolumeId"), s.attachVolume},
+		"DetachVolume":              {named("VolumeId"), s.detachVolume},
+		"CreatePlacementGroup":      {named("GroupName"), s.createPlacementGroup},
+		"DescribePlacementGroups":   {collection("placement-groups"), s.describePlacementGroups},
+		"DeletePlacementGroup":      {named("GroupName"), s.deletePlacementGroup},
+		"CreateTags":                {named("ResourceId.1"), s.createTags},
+		"DeleteTags":                {named("ResourceId.1"), s.deleteTags},
 	}
 	return s
 }
@@ -285,7 +375,10 @@ func unusedID[V any](s *Server, prefix string, taken map[string]V) string {
 func (s *Server) region(region string) *regionState {
 	rs, ok := s.regions[region]
 	if !ok {
-		rs = &regionState{addresses: map[string]*Address{}, interfaces: map[string]*NetworkInterface{}}
+		rs = &regionState{
+			addresses: map[string]*Address{}, interfaces: map[string]*NetworkInterface{}, instances: map[string]*Instance{},
+			images: map[string]*Image{}, volumes: map[string]*Volume{}, placementGroups: map[string]*PlacementGroup{},
+		}
 		s.regions[region] = rs
 	}
 	return rs
@@ -300,14 +393,53 @@ func (s *Server) lookupRegion(region string) *regionState {
 	return &regionState{}
 }
 
+// idempotent is a call that used a client token: id names what it created,
+// for fault rules, and created is what a repeat answers with.
 type idempotent struct {
 	key         string
 	fingerprint string
-	created     NetworkInterface
+	id          string
+	created     any
 }
 
-// rememberToken keeps the call that used a client token. The caller holds s.mu.
-func (s *Server) rememberToken(t *idempotent) {
+// replay returns the call that first used token in region for kind, and
+// whether a call with fingerprint may repeat it. The caller holds s.mu.
+func (s *Server) replay(region, kind, token, fingerprint string) (*idempotent, *apiError) {
+	if token == "" {
+		return nil, nil
+	}
+	t, ok := s.tokens[region+"/"+kind+"/"+token]
+	if !ok {
+		return nil, nil
+	}
+	if t.fingerprint != fingerprint {
+		return nil, clientError("IdempotentParameterMismatch",
+			"The client token '%s' was already used for a request with different parameters.", token)
+	}
+	return t, nil
+}
+
+// tokenTarget returns what the call that first used the client token of c
+// for kind created. The caller holds s.mu.
+func (s *Server) tokenTarget(c *call, kind string) (string, bool) {
+	token := c.p.values.Get("ClientToken")
+	if token == "" {
+		return "", false
+	}
+	t, ok := s.tokens[c.region+"/"+kind+"/"+token]
+	if !ok {
+		return "", false
+	}
+	return t.id, true
+}
+
+// remember keeps the call that used token in region for kind, unless it had
+// none. The caller holds s.mu.
+func (s *Server) remember(region, kind, token, fingerprint, id string, created any) {
+	if token == "" {
+		return
+	}
+	t := &idempotent{key: region + "/" + kind + "/" + token, fingerprint: fingerprint, id: id, created: created}
 	s.tokens[t.key] = t
 	// tokenOrder is a ring of the kept tokens; tokenNext is the oldest once it is full.
 	if len(s.tokenOrder) < maxTokens {

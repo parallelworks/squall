@@ -64,7 +64,7 @@ func TestRequestsTheServerCannotRead(t *testing.T) {
 		{"a malformed credential scope", "AWS4-HMAC-SHA256 Credential=AKID/us-east-1", form("DescribeAddresses"), http.StatusBadRequest, "IncompleteSignature"},
 		{"no action", authorization, url.Values{"Version": {"2016-11-15"}}, http.StatusBadRequest, "MissingAction"},
 		{"another version", authorization, url.Values{"Action": {"DescribeAddresses"}, "Version": {"2014-10-01"}}, http.StatusBadRequest, "NoSuchVersion"},
-		{"an unimplemented action", authorization, form("RunInstances"), http.StatusNotFound, "InvalidAction"},
+		{"an unimplemented action", authorization, form("CreateSnapshot"), http.StatusNotFound, "InvalidAction"},
 		{"an unknown parameter", authorization, form("DescribeAddresses", "Bogus", "1"), http.StatusBadRequest, "UnknownParameter"},
 		{"a missing parameter", authorization, form("CreateNetworkInterface"), http.StatusBadRequest, "MissingParameter"},
 		{"a filter without values", authorization, form("DescribeAddresses", "Filter.1.Name", "domain"), http.StatusBadRequest, "InvalidParameterValue"},

@@ -122,12 +122,21 @@ func (p *params) fingerprint() string {
 
 // tags reads TagSpecification.N for resourceType.
 func (p *params) tags(resourceType string) (map[string]string, *apiError) {
-	var tags map[string]string
+	specs, err := p.tagSpecs(resourceType)
+	return specs[resourceType], err
+}
+
+// tagSpecs reads TagSpecification.N, keyed by resource type, for the resource
+// types a call can tag.
+func (p *params) tagSpecs(resourceTypes ...string) (map[string]map[string]string, *apiError) {
+	out := map[string]map[string]string{}
 	for _, n := range p.indexes("TagSpecification") {
 		spec := "TagSpecification." + n
-		if t := p.get(spec + ".ResourceType"); t != resourceType {
+		t := p.get(spec + ".ResourceType")
+		if !slices.Contains(resourceTypes, t) {
 			return nil, invalidValue("'%s' is not a valid taggable resource type for this operation.", t)
 		}
+		tags := out[t]
 		for _, m := range p.indexes(spec + ".Tag") {
 			key, value := p.get(spec+".Tag."+m+".Key"), p.get(spec+".Tag."+m+".Value")
 			if _, dup := tags[key]; dup {
@@ -138,8 +147,61 @@ func (p *params) tags(resourceType string) (map[string]string, *apiError) {
 			}
 			tags[key] = value
 		}
+		if err := validateTags(tags); err != nil {
+			return nil, err
+		}
+		out[t] = tags
 	}
-	return tags, validateTags(tags)
+	return out, nil
+}
+
+// int reads key as an integer, or returns 0 when the call leaves it out.
+func (p *params) int(key string) (int, *apiError) {
+	v := p.get(key)
+	if v == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, invalidValue("Value (%s) for parameter %s is invalid. Expected an integer.", v, key)
+	}
+	return n, nil
+}
+
+// page reads MaxResults, up to most, and NextToken, which is an ID with
+// prefix when prefix is set. A call that names IDs in idsParam cannot page.
+func (p *params) page(idsParam string, named bool, most int, prefix string) (limit int, after string, err *apiError) {
+	if v := p.get("MaxResults"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < minResults || n > most {
+			return 0, "", invalidValue("Value ( %s ) for parameter maxResults is invalid. Expecting a value between %d and %d.", v, minResults, most)
+		}
+		if named {
+			return 0, "", clientError("InvalidParameterCombination", "The parameter %s cannot be used with the parameter MaxResults", idsParam)
+		}
+		limit = n
+	}
+	after = p.get("NextToken")
+	if after != "" && prefix != "" && !strings.HasPrefix(after, prefix+"-") {
+		return 0, "", clientError("InvalidPaginationToken", "Invalid pagination token %s", after)
+	}
+	return limit, after, nil
+}
+
+// paginate returns the items, ordered by key, whose key sorts after after, up
+// to limit when it is set, and the key to continue after when more remain.
+func paginate[T any](items []T, key func(T) string, after string, limit int) ([]T, string) {
+	var out []T
+	for _, item := range items {
+		if key(item) <= after {
+			continue
+		}
+		if limit > 0 && len(out) == limit {
+			return out, key(out[limit-1])
+		}
+		out = append(out, item)
+	}
+	return out, ""
 }
 
 func validateTags(tags map[string]string) *apiError {
