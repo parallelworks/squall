@@ -325,18 +325,18 @@ func (s *Server) describeNetworkInterfaces(c *call) (response, *apiError) {
 		}
 	}
 	associated := rs.publicAddresses()
-	resp := &describeNetworkInterfacesResponse{}
+	var matched []*NetworkInterface
 	for _, id := range slices.Sorted(maps.Keys(rs.interfaces)) {
 		ni := rs.interfaces[id]
-		a := associated[id]
-		if id <= after || len(ids) > 0 && !slices.Contains(ids, id) || !matchFilters(filters, interfaceFields(ni, a)) {
+		if len(ids) > 0 && !slices.Contains(ids, id) || !matchFilters(filters, interfaceFields(ni, associated[id])) {
 			continue
 		}
-		if limit > 0 && len(resp.NetworkInterfaces) == limit {
-			resp.NextToken = resp.NetworkInterfaces[limit-1].NetworkInterfaceID
-			break
-		}
-		resp.NetworkInterfaces = append(resp.NetworkInterfaces, ni.xml(a))
+		matched = append(matched, ni)
+	}
+	page, next := paginate(matched, func(ni *NetworkInterface) string { return ni.NetworkInterfaceID }, after, limit)
+	resp := &describeNetworkInterfacesResponse{NextToken: next}
+	for _, ni := range page {
+		resp.NetworkInterfaces = append(resp.NetworkInterfaces, ni.xml(associated[ni.NetworkInterfaceID]))
 	}
 	return resp, nil
 }

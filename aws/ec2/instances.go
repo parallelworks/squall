@@ -45,6 +45,7 @@ type Instance struct {
 	State            string
 	AvailabilityZone string
 	PlacementGroup   string
+	PlacementGroupID string
 	// NetworkInterfaceID, SubnetID and PrivateIPAddress are the primary
 	// interface's, until the instance is terminated.
 	NetworkInterfaceID string
@@ -191,7 +192,7 @@ func (v *regionView) instanceXML(inst *Instance) instanceXML {
 		LaunchTime:     inst.LaunchTime.UTC().Format(timeFormat),
 		Placement: placementXML{
 			AvailabilityZone: inst.AvailabilityZone, GroupName: inst.PlacementGroup,
-			GroupID: v.rs.placementGroups[inst.PlacementGroup].id(), Tenancy: "default",
+			GroupID: inst.PlacementGroupID, Tenancy: "default",
 		},
 		Monitoring:         monitoringXML{"disabled"},
 		SubnetID:           inst.SubnetID,
@@ -585,11 +586,11 @@ func (l *launch) devicesFor(image *Image) ([]BlockDeviceMapping, *apiError) {
 				return nil, clientError("InvalidBlockDeviceMapping", "The device '%s' needs a volume size or a snapshot ID.", d.DeviceName)
 			}
 			m := d.BlockDeviceMapping
+			if err := checkVolume(m); err != nil {
+				return nil, err
+			}
 			if m.VolumeSize == 0 {
 				m.VolumeSize = defaultVolumeSize
-			}
-			if !d.setDelete {
-				m.DeleteOnTermination = true
 			}
 			out = append(out, m)
 			continue
@@ -605,6 +606,16 @@ func (l *launch) devicesFor(image *Image) ([]BlockDeviceMapping, *apiError) {
 		if d.VolumeType != "" && d.VolumeType != m.VolumeType {
 			m.VolumeType, m.Iops, m.Throughput = d.VolumeType, 0, 0
 		}
+		given := BlockDeviceMapping{VolumeType: m.VolumeType, Iops: d.Iops, Throughput: d.Throughput}
+		if m.VolumeType == "io1" || m.VolumeType == "io2" {
+			given.Iops = cmp.Or(d.Iops, m.Iops)
+		}
+		if err := checkVolume(given); err != nil {
+			return nil, err
+		}
+		if m.VolumeType == "gp2" {
+			m.Iops = 0
+		}
 		m.Iops, m.Throughput = cmp.Or(d.Iops, m.Iops), cmp.Or(d.Throughput, m.Throughput)
 		if d.setDelete {
 			m.DeleteOnTermination = d.DeleteOnTermination
@@ -614,9 +625,7 @@ func (l *launch) devicesFor(image *Image) ([]BlockDeviceMapping, *apiError) {
 		}
 	}
 	for i := range out {
-		if err := volumeDefaults(&out[i]); err != nil {
-			return nil, err
-		}
+		fillVolume(&out[i])
 	}
 	return out, nil
 }
@@ -685,7 +694,7 @@ func (s *Server) runInstances(c *call) (response, *apiError) {
 		inst := &Instance{
 			Region: c.region, InstanceID: id, ReservationID: reservation, ImageID: image.ImageID,
 			InstanceType: l.instanceType, Architecture: image.Architecture, AvailabilityZone: zone,
-			PlacementGroup: l.group, NetworkInterfaceID: attached.NetworkInterfaceID, SubnetID: attached.SubnetID,
+			PlacementGroup: l.group, PlacementGroupID: l.groupID, NetworkInterfaceID: attached.NetworkInterfaceID, SubnetID: attached.SubnetID,
 			PrivateIPAddress: attached.PrivateIPAddress, RootDeviceName: image.RootDeviceName, KeyName: l.keyName,
 			ClientToken: l.token, UserData: l.userData, EBSOptimized: l.ebsOptimized, LaunchIndex: i, LaunchTime: now,
 			Tags: maps.Clone(l.tags["instance"]), assignPublic: l.public,
@@ -712,7 +721,7 @@ func (s *Server) checkLaunch(rs *regionState, region string, l *launch) (*Image,
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	if err := s.checkInstanceType(l.instanceType, image.Architecture); err != nil {
+	if err := s.checkInstanceType(l.instanceType, image.Architecture, "InvalidParameterValue"); err != nil {
 		return nil, nil, nil, err
 	}
 	if l.group != "" || l.groupID != "" {
@@ -720,7 +729,7 @@ func (s *Server) checkLaunch(rs *regionState, region string, l *launch) (*Image,
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		l.group = pg.GroupName
+		l.group, l.groupID = pg.GroupName, pg.GroupID
 	}
 	if l.zone != "" && !strings.HasPrefix(l.zone, region) {
 		return nil, nil, nil, invalidValue("Invalid availability zone: [%s]", l.zone)
@@ -873,11 +882,20 @@ func (s *Server) startInstances(c *call) (response, *apiError) {
 	})
 }
 
-func (s *Server) stopInstances(c *call) (response, *apiError) {
+// readShutdownFlags reads the Force and SkipOsShutdown flags of a stop or
+// terminate, which change nothing here: no instance runs an OS to shut down.
+func readShutdownFlags(p *params) *apiError {
 	for _, key := range []string{"Force", "SkipOsShutdown"} {
-		if _, err := c.p.bool(key, false); err != nil {
-			return nil, err
+		if _, err := p.bool(key, false); err != nil {
+			return err
 		}
+	}
+	return nil
+}
+
+func (s *Server) stopInstances(c *call) (response, *apiError) {
+	if err := readShutdownFlags(c.p); err != nil {
+		return nil, err
 	}
 	return s.changeStates(c, func(inst *Instance) *apiError {
 		switch inst.State {
@@ -894,10 +912,8 @@ func (s *Server) stopInstances(c *call) (response, *apiError) {
 }
 
 func (s *Server) terminateInstances(c *call) (response, *apiError) {
-	for _, key := range []string{"Force", "SkipOsShutdown"} {
-		if _, err := c.p.bool(key, false); err != nil {
-			return nil, err
-		}
+	if err := readShutdownFlags(c.p); err != nil {
+		return nil, err
 	}
 	return s.changeStates(c, func(*Instance) *apiError { return nil }, func(_ *regionState, inst *Instance) {
 		if inst.State != stateShuttingDown && inst.State != stateTerminated {
@@ -931,7 +947,7 @@ func (s *Server) modifyInstanceAttribute(c *call) (response, *apiError) {
 	if err != nil {
 		return nil, err
 	}
-	if err := s.checkInstanceType(instanceType, inst.Architecture); err != nil {
+	if err := s.checkInstanceType(instanceType, inst.Architecture, "InvalidInstanceAttributeValue"); err != nil {
 		return nil, err
 	}
 	if inst.State != stateStopped {

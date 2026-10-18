@@ -342,11 +342,11 @@ func TestInstanceStateErrors(t *testing.T) {
 	if got := describeInstance(t, c, stopping); got.InstanceType != types.InstanceTypeM5Large {
 		t.Fatalf("type = %s", got.InstanceType)
 	}
-	for _, bad := range []string{"t4g.micro", "x9.huge"} {
+	for bad, want := range map[string]string{"t4g.micro": "InvalidParameterValue", "x9.huge": "InvalidInstanceAttributeValue"} {
 		if _, err := c.ModifyInstanceAttribute(t.Context(), &awsec2.ModifyInstanceAttributeInput{
 			InstanceId: aws.String(stopping), InstanceType: &types.AttributeValue{Value: aws.String(bad)},
-		}); code(err) != "InvalidParameterValue" {
-			t.Errorf("changing the type to %s = %v", bad, err)
+		}); code(err) != want {
+			t.Errorf("changing the type to %s = %v, want %s", bad, err, want)
 		}
 	}
 }
@@ -618,6 +618,14 @@ func TestExistingInterfaceAndPublicIPs(t *testing.T) {
 	if got := describeInstance(t, c, publicID); got.PublicIpAddress == nil || aws.ToString(got.PublicIpAddress) == aws.ToString(alloc.PublicIp) {
 		t.Fatalf("public IP after disassociating = %v, want a new one EC2 assigned", got.PublicIpAddress)
 	}
+	for _, target := range []string{publicID, attachedID} {
+		if _, err := c.AssociateAddress(t.Context(), &awsec2.AssociateAddressInput{AllocationId: alloc.AllocationId, InstanceId: aws.String(target)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := describeInstance(t, c, publicID); got.PublicIpAddress == nil || aws.ToString(got.PublicIpAddress) == aws.ToString(alloc.PublicIp) {
+		t.Fatalf("public IP after the Elastic IP moved to another instance = %v, want a new one EC2 assigned", got.PublicIpAddress)
+	}
 	if _, err := c.StopInstances(t.Context(), &awsec2.StopInstancesInput{InstanceIds: []string{publicID}}); err != nil {
 		t.Fatal(err)
 	}
@@ -644,7 +652,8 @@ func TestExistingInterfaceAndPublicIPs(t *testing.T) {
 func TestAssociateAddressWithInstanceErrors(t *testing.T) {
 	s := ec2.New(ec2.WithSettleAfter(-1))
 	c := newClient(t, s)
-	id := ids(run(t, c, runInput(putImage(t, s, ec2.Image{}))))[0]
+	launched := run(t, c, runInput(putImage(t, s, ec2.Image{})))[0]
+	id := aws.ToString(launched.InstanceId)
 	alloc := allocate(t, c).AllocationId
 	for _, tc := range []struct {
 		name string
@@ -652,6 +661,9 @@ func TestAssociateAddressWithInstanceErrors(t *testing.T) {
 		code string
 	}{
 		{"a pending instance", &awsec2.AssociateAddressInput{AllocationId: alloc, InstanceId: aws.String(id)}, "InvalidInstanceID"},
+		{"the interface of a pending instance", &awsec2.AssociateAddressInput{
+			AllocationId: alloc, NetworkInterfaceId: launched.NetworkInterfaces[0].NetworkInterfaceId,
+		}, "IncorrectInstanceState"},
 		{"an unknown instance", &awsec2.AssociateAddressInput{AllocationId: alloc, InstanceId: aws.String("i-0000000000000dead")}, "InvalidInstanceID.NotFound"},
 		{"no target", &awsec2.AssociateAddressInput{AllocationId: alloc}, "MissingParameter"},
 		{"two targets", &awsec2.AssociateAddressInput{AllocationId: alloc, InstanceId: aws.String(id), NetworkInterfaceId: aws.String("eni-1")}, "InvalidParameterCombination"},
@@ -750,6 +762,9 @@ func TestInstanceTypes(t *testing.T) {
 	if err := s.PutInstanceType(ec2.InstanceType{InstanceType: "p5.48xlarge", VCPUs: 192, MemoryMiB: 2097152}); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.PutInstanceType(ec2.InstanceType{InstanceType: "x9.huge", Architectures: []string{"x86-64"}}); err == nil {
+		t.Fatal("PutInstanceType accepted an unknown architecture")
+	}
 	out, err := c.DescribeInstanceTypes(t.Context(), &awsec2.DescribeInstanceTypesInput{InstanceTypes: []types.InstanceType{"p5.48xlarge", types.InstanceTypeT4gMicro}})
 	if err != nil || len(out.InstanceTypes) != 2 {
 		t.Fatalf("describe = %+v, %v", out, err)
@@ -846,6 +861,14 @@ func TestPlacementGroups(t *testing.T) {
 			_, err := names(&awsec2.DescribePlacementGroupsInput{GroupNames: []string{"missing"}})
 			return err
 		}, "InvalidPlacementGroup.Unknown"},
+		{"describe an unknown group ID", func() error {
+			_, err := names(&awsec2.DescribePlacementGroupsInput{GroupIds: []string{"pg-0000000000000dead"}})
+			return err
+		}, "InvalidPlacementGroup.Unknown"},
+		{"describe a malformed group ID", func() error {
+			_, err := names(&awsec2.DescribePlacementGroupsInput{GroupIds: []string{"group-1"}})
+			return err
+		}, "InvalidPlacementGroupId.Malformed"},
 		{"delete an unknown group", func() error {
 			_, err := c.DeletePlacementGroup(t.Context(), &awsec2.DeletePlacementGroupInput{GroupName: aws.String("missing")})
 			return err
@@ -871,6 +894,12 @@ func TestPlacementGroups(t *testing.T) {
 	}
 	if got := s.PlacementGroups(); len(got) != 1 || got[0].GroupName != "spread" || got[0].SpreadLevel != "rack" {
 		t.Fatalf("groups = %+v", got)
+	}
+	if _, err := c.CreatePlacementGroup(t.Context(), &awsec2.CreatePlacementGroupInput{GroupName: aws.String("pack"), Strategy: types.PlacementStrategyCluster}); err != nil {
+		t.Fatal(err)
+	}
+	if got := describeInstance(t, c, id); aws.ToString(got.Placement.GroupId) != aws.ToString(pg.GroupId) {
+		t.Fatalf("a terminated instance's group = %s, want the deleted %s, not the new group of the same name", aws.ToString(got.Placement.GroupId), aws.ToString(pg.GroupId))
 	}
 }
 
@@ -905,7 +934,7 @@ func TestVolumes(t *testing.T) {
 		t.Fatalf("waiting for the volume: %v", err)
 	}
 	id := ids(run(t, c, runInput(putImage(t, s, ec2.Image{}))))[0]
-	if _, err := c.AttachVolume(t.Context(), &awsec2.AttachVolumeInput{Device: aws.String("/dev/sdf"), InstanceId: aws.String(id), VolumeId: aws.String(vol)}); code(err) != "IncorrectInstanceState" {
+	if _, err := c.AttachVolume(t.Context(), &awsec2.AttachVolumeInput{Device: aws.String("/dev/sdf"), InstanceId: aws.String(id), VolumeId: aws.String(vol)}); code(err) != "IncorrectState" {
 		t.Fatalf("attaching to a pending instance = %v", err)
 	}
 	s.Settle()
@@ -1075,20 +1104,16 @@ func TestCreateAndDeleteTags(t *testing.T) {
 }
 
 func TestInstanceFaults(t *testing.T) {
-	s := ec2.New()
+	faults := fault.New()
+	s := ec2.New(ec2.WithFaults(faults))
 	c := newClient(t, s)
 	image := putImage(t, s, ec2.Image{})
 	keep := ids(run(t, c, runInput(image)))[0]
 	target := ids(run(t, c, runInput(image)))[0]
-	faults := fault.New().Add(
+	faults.Add(
 		fault.Rule{Method: "ec2.TerminateInstances", Resource: region + "/" + target, Fault: fault.Unavailable()},
 		fault.Rule{Method: "ec2.DescribeInstances", Nth: 1, Fault: fault.Unavailable()},
 	)
-	s = ec2.New(ec2.WithFaults(faults))
-	c = newClient(t, s)
-	image = putImage(t, s, ec2.Image{})
-	run(t, c, runInput(image))
-	run(t, c, runInput(image))
 	if _, err := describeInstances(t, c, &awsec2.DescribeInstancesInput{}); code(err) != "Unavailable" {
 		t.Fatalf("the first describe = %v, want Unavailable", err)
 	}
@@ -1100,5 +1125,47 @@ func TestInstanceFaults(t *testing.T) {
 	}
 	if _, err := c.TerminateInstances(t.Context(), &awsec2.TerminateInstancesInput{InstanceIds: []string{target}}); code(err) != "Unavailable" {
 		t.Fatalf("terminating the targeted instance = %v, want Unavailable", err)
+	}
+}
+
+func TestVolumeIopsAndThroughputAreCheckedNotAdjusted(t *testing.T) {
+	s := ec2.New()
+	c := newClient(t, s)
+	zone := aws.String(region + "a")
+	for _, tc := range []struct {
+		name string
+		in   awsec2.CreateVolumeInput
+		want string
+	}{
+		{"gp2 takes no IOPS", awsec2.CreateVolumeInput{VolumeType: types.VolumeTypeGp2, Iops: aws.Int32(500)}, "InvalidParameterCombination"},
+		{"gp3 IOPS below the minimum", awsec2.CreateVolumeInput{VolumeType: types.VolumeTypeGp3, Iops: aws.Int32(2000)}, "InvalidParameterValue"},
+		{"gp3 throughput below the minimum", awsec2.CreateVolumeInput{VolumeType: types.VolumeTypeGp3, Throughput: aws.Int32(100)}, "InvalidParameterValue"},
+		{"throughput on io1", awsec2.CreateVolumeInput{VolumeType: types.VolumeTypeIo1, Iops: aws.Int32(1000), Throughput: aws.Int32(200)}, "InvalidParameterCombination"},
+		{"io1 without IOPS", awsec2.CreateVolumeInput{VolumeType: types.VolumeTypeIo1}, "InvalidParameterCombination"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := tc.in
+			in.AvailabilityZone, in.Size = zone, aws.Int32(100)
+			if _, err := c.CreateVolume(t.Context(), &in); code(err) != tc.want {
+				t.Fatalf("CreateVolume = %v, want %s", err, tc.want)
+			}
+		})
+	}
+	io1, err := c.CreateVolume(t.Context(), &awsec2.CreateVolumeInput{AvailabilityZone: zone, Size: aws.Int32(100), VolumeType: types.VolumeTypeIo1, Iops: aws.Int32(1000)})
+	if err != nil || aws.ToInt32(io1.Iops) != 1000 {
+		t.Fatalf("io1 = %+v, %v", io1, err)
+	}
+
+	image := putImage(t, s, ec2.Image{})
+	in := runInput(image)
+	in.BlockDeviceMappings = []types.BlockDeviceMapping{{DeviceName: aws.String("/dev/xvda"), Ebs: &types.EbsBlockDevice{VolumeType: types.VolumeTypeGp2, Iops: aws.Int32(500)}}}
+	if _, err := c.RunInstances(t.Context(), in); code(err) != "InvalidParameterCombination" {
+		t.Fatalf("IOPS on a gp2 root = %v", err)
+	}
+	in.BlockDeviceMappings = []types.BlockDeviceMapping{{DeviceName: aws.String("/dev/xvda"), Ebs: &types.EbsBlockDevice{VolumeType: types.VolumeTypeGp2, VolumeSize: aws.Int32(400)}}}
+	id := ids(run(t, c, in))[0]
+	vols, err := c.DescribeVolumes(t.Context(), &awsec2.DescribeVolumesInput{Filters: []types.Filter{filter("attachment.instance-id", id)}})
+	if err != nil || len(vols.Volumes) != 1 || aws.ToInt32(vols.Volumes[0].Iops) != 1200 {
+		t.Fatalf("a larger gp2 root reports 3 IOPS per GiB: %+v, %v", vols, err)
 	}
 }

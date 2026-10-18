@@ -270,9 +270,10 @@ func (s *Server) PutImage(region string, img Image) (Image, error) {
 		if m.VolumeSize == 0 {
 			m.VolumeSize = defaultVolumeSize
 		}
-		if err := volumeDefaults(m); err != nil {
+		if err := checkVolume(*m); err != nil {
 			return Image{}, err
 		}
+		fillVolume(m)
 	}
 	if img.CreationDate.IsZero() {
 		img.CreationDate = time.Now()
@@ -340,6 +341,11 @@ func (s *Server) PutInstanceType(t InstanceType) error {
 	if len(t.Architectures) == 0 {
 		t.Architectures = []string{archX86}
 	}
+	for _, arch := range t.Architectures {
+		if !slices.Contains(architectures, arch) {
+			return invalidValue("Invalid architecture '%s'.", arch)
+		}
+	}
 	t.Architectures = slices.Clone(t.Architectures)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -347,11 +353,12 @@ func (s *Server) PutInstanceType(t InstanceType) error {
 	return nil
 }
 
-// checkInstanceType checks that name is a known type that runs arch. The caller holds s.mu.
-func (s *Server) checkInstanceType(name, arch string) *apiError {
+// checkInstanceType checks that name is a known type that runs arch, failing
+// with unknownCode for a type it does not know. The caller holds s.mu.
+func (s *Server) checkInstanceType(name, arch, unknownCode string) *apiError {
 	t, ok := s.instanceTypes[name]
 	if !ok {
-		return invalidValue("Invalid value '%s' for InstanceType.", name)
+		return clientError(unknownCode, "Invalid value '%s' for InstanceType.", name)
 	}
 	if !slices.Contains(t.Architectures, arch) {
 		return invalidValue("The architecture '%s' of the specified instance type does not match the architecture '%s' of the specified AMI.",

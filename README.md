@@ -85,8 +85,9 @@ For Amazon EC2:
 
 - Signatures are not checked. The region comes from the SigV4 credential
   scope, and each region keeps its own resources.
-- Subnet and security group IDs are not validated, and there are no VPCs,
-  default or otherwise: `RunInstances` needs a subnet or a network interface.
+- Subnet and security group IDs and key pair names are not validated, and
+  there are no VPCs, default or otherwise: `RunInstances` needs a subnet or a
+  network interface.
   Images are registered by the test with `PutImage`; instance types come from
   a small built-in set or `PutInstanceType`.
 - Instances and volumes move through EC2's states when describes see them. By

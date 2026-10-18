@@ -1,6 +1,7 @@
 package ec2
 
 import (
+	"cmp"
 	"maps"
 	"slices"
 	"strconv"
@@ -90,22 +91,53 @@ func (s *Server) advanceVolume(vol *Volume) {
 	vol.settle()
 }
 
-// volumeDefaults checks m's volume type, gp2 unless set, and fills in the
-// type's default IOPS and throughput.
-func volumeDefaults(m *BlockDeviceMapping) *apiError {
+// checkVolume rejects IOPS and throughput that m's volume type does not take, as EC2 does, rather than adjusting them.
+func checkVolume(m BlockDeviceMapping) *apiError {
 	if m.VolumeType == "" {
 		m.VolumeType = defaultVolumeType
 	}
 	if !slices.Contains(volumeTypes, m.VolumeType) {
 		return invalidValue("Value (%s) for parameter volumeType is invalid.", m.VolumeType)
 	}
+	if m.Throughput != 0 {
+		if m.VolumeType != "gp3" {
+			return clientError("InvalidParameterCombination", "Throughput is only valid for gp3 volume types.")
+		}
+		if m.Throughput < 125 || m.Throughput > 1000 {
+			return invalidValue("Throughput (%d) is out of range for gp3 volumes.", m.Throughput)
+		}
+	}
 	switch m.VolumeType {
 	case "gp3":
-		m.Iops, m.Throughput = max(m.Iops, 3000), max(m.Throughput, 125)
+		if m.Iops != 0 && (m.Iops < 3000 || m.Iops > 16000) {
+			return invalidValue("Volume iops of %d is out of range for gp3 volumes.", m.Iops)
+		}
+	case "io1", "io2":
+		if m.Iops == 0 {
+			return clientError("InvalidParameterCombination", "The parameter iops must be specified for %s volumes.", m.VolumeType)
+		}
+		if m.Iops < 100 || m.Iops > 64000 {
+			return invalidValue("Volume iops of %d is out of range for %s volumes.", m.Iops, m.VolumeType)
+		}
+	default:
+		if m.Iops != 0 {
+			return clientError("InvalidParameterCombination", "The parameter iops is not supported for %s volumes.", m.VolumeType)
+		}
+	}
+	return nil
+}
+
+// fillVolume sets the type, gp2 unless set, and the IOPS and throughput EC2 reports for it.
+func fillVolume(m *BlockDeviceMapping) {
+	if m.VolumeType == "" {
+		m.VolumeType = defaultVolumeType
+	}
+	switch m.VolumeType {
+	case "gp3":
+		m.Iops, m.Throughput = cmp.Or(m.Iops, 3000), cmp.Or(m.Throughput, 125)
 	case "gp2":
 		m.Iops = min(max(3*m.VolumeSize, 100), 16000)
 	}
-	return nil
 }
 
 // newVolume stores a volume with id, or a fresh ID, created from m in zone.
@@ -266,9 +298,10 @@ func (s *Server) createVolume(c *call) (response, *apiError) {
 	if !strings.HasPrefix(zone, c.region) {
 		return nil, invalidValue("Invalid availability zone: [%s]", zone)
 	}
-	if err := volumeDefaults(&m); err != nil {
+	if err := checkVolume(m); err != nil {
 		return nil, err
 	}
+	fillVolume(&m)
 	fingerprint := c.p.fingerprint()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -392,7 +425,7 @@ func (s *Server) attachVolume(c *call) (response, *apiError) {
 	case vol.State != statusAvailable:
 		return nil, clientError("IncorrectState", "Volume '%s' is in the '%s' state.", id, vol.State)
 	case inst.State != stateRunning && inst.State != stateStopped:
-		return nil, clientError("IncorrectInstanceState", "Instance '%s' is not 'running' or 'stopped'.", instanceID)
+		return nil, clientError("IncorrectState", "Instance '%s' is not 'running'.", instanceID)
 	case vol.AvailabilityZone != inst.AvailabilityZone:
 		return nil, clientError("InvalidVolume.ZoneMismatch", "The volume '%s' is not in the same availability zone as instance '%s'", id, instanceID)
 	}

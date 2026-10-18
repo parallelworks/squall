@@ -26,13 +26,6 @@ func (pg *PlacementGroup) clone() PlacementGroup {
 	return c
 }
 
-func (pg *PlacementGroup) id() string {
-	if pg == nil {
-		return ""
-	}
-	return pg.GroupID
-}
-
 type placementGroupXML struct {
 	GroupName      string   `xml:"groupName"`
 	GroupID        string   `xml:"groupId"`
@@ -77,6 +70,9 @@ func (rs *regionState) placementGroup(name, id string) (*PlacementGroup, *apiErr
 			return pg, nil
 		}
 		return nil, placementGroupUnknown(name)
+	}
+	if !validID("pg", id) {
+		return nil, clientError("InvalidPlacementGroupId.Malformed", "Invalid id: %q (expecting \"pg-...\")", id)
 	}
 	for _, pg := range rs.placementGroups {
 		if pg.GroupID == id {
@@ -187,11 +183,12 @@ func (s *Server) deletePlacementGroup(c *call) (response, *apiError) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rs := s.lookupRegion(c.region)
-	if _, err := rs.placementGroup(name, ""); err != nil {
+	pg, err := rs.placementGroup(name, "")
+	if err != nil {
 		return nil, err
 	}
 	for _, inst := range rs.instances {
-		if inst.PlacementGroup == name && inst.State != stateTerminated {
+		if inst.PlacementGroupID == pg.GroupID && inst.State != stateTerminated {
 			return nil, clientError("InvalidPlacementGroup.InUse", "The placement group '%s' is in use and may not be deleted.", name)
 		}
 	}

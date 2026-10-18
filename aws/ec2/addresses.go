@@ -168,19 +168,24 @@ func (rs *regionState) addressWithIP(ip string) *Address {
 	return nil
 }
 
-// associate associates a with ni, disassociating whatever address ni had.
-// The caller holds s.mu.
+// associate associates a with ni, disassociating whatever address ni had, and
+// assigns the instance a moves away from a public IP address again. The
+// caller holds s.mu.
 func (s *Server) associate(rs *regionState, a *Address, ni *NetworkInterface, id string) {
 	for _, other := range rs.addresses {
 		if other != a && other.NetworkInterfaceID == ni.NetworkInterfaceID {
 			other.disassociate()
 		}
 	}
+	left := rs.instances[rs.instanceOf(a)]
 	a.NetworkInterfaceID = ni.NetworkInterfaceID
 	a.PrivateIPAddress = ni.PrivateIPAddress
 	a.AssociationID = cmp.Or(id, unusedID(s, "eipassoc", rs.associations()))
 	if inst, ok := rs.instances[ni.InstanceID]; ok {
 		s.releasePublicIP(inst)
+	}
+	if left != nil && left.NetworkInterfaceID != ni.NetworkInterfaceID {
+		s.assignPublicIP(rs, left)
 	}
 }
 
@@ -417,6 +422,10 @@ func (s *Server) associateAddress(c *call) (response, *apiError) {
 	if !ok {
 		return nil, interfaceNotFound(niID)
 	}
+	if inst, ok := rs.instances[ni.InstanceID]; ok && inst.State == statePending {
+		return nil, clientError("IncorrectInstanceState",
+			"The pending-instance-creation instance to which '%s' is attached is not in a valid state for this operation", niID)
+	}
 	if a.NetworkInterfaceID != niID {
 		if a.AssociationID != "" && !reassociate {
 			return nil, clientError("Resource.AlreadyAssociated", "resource %s is already associated with associate-id %s", id, a.AssociationID)
@@ -439,12 +448,10 @@ func (s *Server) disassociateAddress(c *call) (response, *apiError) {
 	rs := s.lookupRegion(c.region)
 	for _, a := range rs.addresses {
 		if a.AssociationID == id {
-			ni := rs.interfaces[a.NetworkInterfaceID]
+			inst := rs.instances[rs.instanceOf(a)]
 			a.disassociate()
-			if ni != nil {
-				if inst, ok := rs.instances[ni.InstanceID]; ok {
-					s.assignPublicIP(rs, inst)
-				}
+			if inst != nil {
+				s.assignPublicIP(rs, inst)
 			}
 			return &returnResponse{Return: true}, nil
 		}

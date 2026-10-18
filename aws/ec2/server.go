@@ -25,7 +25,7 @@
 //     of the SigV4 Authorization header (or the X-Amz-Credential query
 //     parameter), and each region keeps its own resources. There is one
 //     account: the server keeps no owner IDs.
-//   - Subnet and security group IDs are not validated, and
+//   - Subnet and security group IDs and key pair names are not validated, and
 //     there are no VPCs: interfaces report no VPC ID, and their availability
 //     zone is the region with "a" appended unless an instance launched in
 //     another. ReleaseAddress fails with
@@ -41,7 +41,9 @@
 //     disassociates the other, and associating it again with the interface it
 //     is on returns its current association. AssociateAddress with an
 //     InstanceId associates with the instance's primary interface, and fails
-//     with InvalidInstanceID unless the instance is running or stopped.
+//     with InvalidInstanceID unless the instance is running or stopped; with
+//     a NetworkInterfaceId it fails with IncorrectInstanceState while the
+//     interface's instance is pending.
 //   - A CreateNetworkInterface, RunInstances or CreateVolume that repeats a
 //     ClientToken in the same region with the same parameters gets what the
 //     first call created without taking effect again: the interface or volume
@@ -87,7 +89,8 @@
 //     move. Snapshots are not modeled: a snapshot ID is recorded, not read,
 //     and a volume from one without a size is 8 GiB. Volumes and placement
 //     groups are deleted at once rather than passing through a deleting
-//     state.
+//     state. CreatePlacementGroup needs a GroupName and a Strategy, which
+//     EC2 makes optional.
 //   - CreateTags and DeleteTags work on instances, volumes, images, placement
 //     groups (by group ID), network interfaces and Elastic IP addresses, and
 //     change nothing unless every resource exists.
@@ -402,13 +405,20 @@ type idempotent struct {
 	created     any
 }
 
+// usedToken returns the call that first used token in region for kind. The
+// caller holds s.mu.
+func (s *Server) usedToken(region, kind, token string) (*idempotent, bool) {
+	if token == "" {
+		return nil, false
+	}
+	t, ok := s.tokens[region+"/"+kind+"/"+token]
+	return t, ok
+}
+
 // replay returns the call that first used token in region for kind, and
 // whether a call with fingerprint may repeat it. The caller holds s.mu.
 func (s *Server) replay(region, kind, token, fingerprint string) (*idempotent, *apiError) {
-	if token == "" {
-		return nil, nil
-	}
-	t, ok := s.tokens[region+"/"+kind+"/"+token]
+	t, ok := s.usedToken(region, kind, token)
 	if !ok {
 		return nil, nil
 	}
@@ -422,11 +432,7 @@ func (s *Server) replay(region, kind, token, fingerprint string) (*idempotent, *
 // tokenTarget returns what the call that first used the client token of c
 // for kind created. The caller holds s.mu.
 func (s *Server) tokenTarget(c *call, kind string) (string, bool) {
-	token := c.p.values.Get("ClientToken")
-	if token == "" {
-		return "", false
-	}
-	t, ok := s.tokens[c.region+"/"+kind+"/"+token]
+	t, ok := s.usedToken(c.region, kind, c.p.values.Get("ClientToken"))
 	if !ok {
 		return "", false
 	}
