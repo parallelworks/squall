@@ -7,7 +7,6 @@ import (
 	"maps"
 	"net/netip"
 	"slices"
-	"strconv"
 	"strings"
 )
 
@@ -36,6 +35,8 @@ type NetworkInterface struct {
 	// AttachmentID and InstanceID are set while the interface is attached.
 	AttachmentID string
 	InstanceID   string
+	// DeleteOnTermination is whether terminating the instance deletes the interface.
+	DeleteOnTermination bool
 }
 
 func (ni *NetworkInterface) clone() NetworkInterface {
@@ -68,16 +69,18 @@ type groupXML struct {
 }
 
 type attachmentXML struct {
-	AttachmentID string `xml:"attachmentId"`
-	InstanceID   string `xml:"instanceId"`
-	DeviceIndex  int    `xml:"deviceIndex"`
-	Status       string `xml:"status"`
+	AttachmentID        string `xml:"attachmentId"`
+	InstanceID          string `xml:"instanceId,omitempty"`
+	DeviceIndex         int    `xml:"deviceIndex"`
+	Status              string `xml:"status"`
+	DeleteOnTermination bool   `xml:"deleteOnTermination"`
 }
 
 type associationXML struct {
 	PublicIP      string `xml:"publicIp"`
-	AllocationID  string `xml:"allocationId"`
-	AssociationID string `xml:"associationId"`
+	IPOwnerID     string `xml:"ipOwnerId,omitempty"`
+	AllocationID  string `xml:"allocationId,omitempty"`
+	AssociationID string `xml:"associationId,omitempty"`
 }
 
 type privateIPXML struct {
@@ -104,11 +107,10 @@ func (ni *NetworkInterface) xml(a *Address) interfaceXML {
 		out.Groups = append(out.Groups, groupXML{g})
 	}
 	if ni.InstanceID != "" {
-		out.Attachment = &attachmentXML{AttachmentID: ni.AttachmentID, InstanceID: ni.InstanceID, Status: "attached"}
+		out.Attachment = &attachmentXML{AttachmentID: ni.AttachmentID, InstanceID: ni.InstanceID, Status: "attached", DeleteOnTermination: ni.DeleteOnTermination}
 	}
-	if a != nil {
-		out.Association = &associationXML{PublicIP: a.PublicIP, AllocationID: a.AllocationID, AssociationID: a.AssociationID}
-	}
+	out.Association = a.association()
+
 	out.PrivateIPAddresses = []privateIPXML{{PrivateIPAddress: ni.PrivateIPAddress, Primary: true, Association: out.Association}}
 	return out
 }
@@ -213,7 +215,7 @@ func (s *Server) storeInterface(region string, ni NetworkInterface) (*NetworkInt
 		ni.AttachmentID = s.newID("eni-attach")
 	}
 	if ni.InstanceID == "" {
-		ni.AttachmentID = ""
+		ni.AttachmentID, ni.DeleteOnTermination = "", false
 	}
 	stored := ni.clone()
 	rs.interfaces[ni.NetworkInterfaceID] = &stored
@@ -250,10 +252,8 @@ type createNetworkInterfaceResponse struct {
 func (s *Server) createInterfaceTarget(c *call) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if token := c.p.values.Get("ClientToken"); token != "" {
-		if t, ok := s.tokens[c.region+"/"+token]; ok {
-			return c.region + "/" + t.created.NetworkInterfaceID
-		}
+	if id, ok := s.tokenTarget(c, "interfaces"); ok {
+		return c.region + "/" + id
 	}
 	c.id = unusedID(s, "eni", s.lookupRegion(c.region).interfaces)
 	return c.region + "/" + c.id
@@ -278,23 +278,22 @@ func (s *Server) createNetworkInterface(c *call) (response, *apiError) {
 	if err := c.p.done(); err != nil {
 		return nil, err
 	}
-	key, fingerprint := c.region+"/"+token, c.p.fingerprint()
+	fingerprint := c.p.fingerprint()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if t, ok := s.tokens[key]; ok && token != "" {
-		if t.fingerprint != fingerprint {
-			return nil, clientError("IdempotentParameterMismatch",
-				"The client token '%s' was already used for a request with different parameters.", token)
-		}
-		return &createNetworkInterfaceResponse{NetworkInterface: t.created.xml(nil), ClientToken: token}, nil
+	t, err := s.replay(c.region, "interfaces", token, fingerprint)
+	if err != nil {
+		return nil, err
+	}
+	if t != nil {
+		created := t.created.(NetworkInterface)
+		return &createNetworkInterfaceResponse{NetworkInterface: created.xml(nil), ClientToken: token}, nil
 	}
 	ni, err := s.storeInterface(c.region, want)
 	if err != nil {
 		return nil, err
 	}
-	if token != "" {
-		s.rememberToken(&idempotent{key: key, fingerprint: fingerprint, created: ni.clone()})
-	}
+	s.remember(c.region, "interfaces", token, fingerprint, ni.NetworkInterfaceID, ni.clone())
 	return &createNetworkInterfaceResponse{NetworkInterface: ni.xml(nil), ClientToken: token}, nil
 }
 
@@ -310,20 +309,9 @@ func (s *Server) describeNetworkInterfaces(c *call) (response, *apiError) {
 	if err != nil {
 		return nil, err
 	}
-	limit := 0
-	if v := c.p.get("MaxResults"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < minResults || n > maxResults {
-			return nil, invalidValue("Value ( %s ) for parameter maxResults is invalid. Expecting a value between %d and %d.", v, minResults, maxResults)
-		}
-		if len(ids) > 0 {
-			return nil, clientError("InvalidParameterCombination", "The parameter NetworkInterfaceIds cannot be used with the parameter MaxResults")
-		}
-		limit = n
-	}
-	after := c.p.get("NextToken")
-	if after != "" && !strings.HasPrefix(after, "eni-") {
-		return nil, clientError("InvalidPaginationToken", "Invalid pagination token %s", after)
+	limit, after, err := c.p.page("NetworkInterfaceIds", len(ids) > 0, maxResults, "eni")
+	if err != nil {
+		return nil, err
 	}
 	if err := c.p.done(); err != nil {
 		return nil, err
@@ -336,24 +324,19 @@ func (s *Server) describeNetworkInterfaces(c *call) (response, *apiError) {
 			return nil, interfaceNotFound(id)
 		}
 	}
-	associated := map[string]*Address{}
-	for _, a := range rs.addresses {
-		if a.NetworkInterfaceID != "" {
-			associated[a.NetworkInterfaceID] = a
-		}
-	}
-	resp := &describeNetworkInterfacesResponse{}
+	associated := rs.publicAddresses()
+	var matched []*NetworkInterface
 	for _, id := range slices.Sorted(maps.Keys(rs.interfaces)) {
 		ni := rs.interfaces[id]
-		a := associated[id]
-		if id <= after || len(ids) > 0 && !slices.Contains(ids, id) || !matchFilters(filters, interfaceFields(ni, a)) {
+		if len(ids) > 0 && !slices.Contains(ids, id) || !matchFilters(filters, interfaceFields(ni, associated[id])) {
 			continue
 		}
-		if limit > 0 && len(resp.NetworkInterfaces) == limit {
-			resp.NextToken = resp.NetworkInterfaces[limit-1].NetworkInterfaceID
-			break
-		}
-		resp.NetworkInterfaces = append(resp.NetworkInterfaces, ni.xml(a))
+		matched = append(matched, ni)
+	}
+	page, next := paginate(matched, func(ni *NetworkInterface) string { return ni.NetworkInterfaceID }, after, limit)
+	resp := &describeNetworkInterfacesResponse{NextToken: next}
+	for _, ni := range page {
+		resp.NetworkInterfaces = append(resp.NetworkInterfaces, ni.xml(associated[ni.NetworkInterfaceID]))
 	}
 	return resp, nil
 }
@@ -376,12 +359,17 @@ func (s *Server) deleteNetworkInterface(c *call) (response, *apiError) {
 	if ni.Status == statusInUse {
 		return nil, clientError("InvalidNetworkInterface.InUse", "The network interface '%s' is currently in use.", id)
 	}
-	if a := rs.addressOn(id); a != nil {
+	s.removeInterface(rs, ni)
+	return &returnResponse{Return: true}, nil
+}
+
+// removeInterface deletes ni, disassociating its address. The caller holds s.mu.
+func (s *Server) removeInterface(rs *regionState, ni *NetworkInterface) {
+	if a := rs.addressOn(ni.NetworkInterfaceID); a != nil {
 		a.disassociate()
 	}
-	delete(rs.interfaces, id)
-	delete(s.privateIPs, privateKey(c.region, ni.SubnetID, ni.PrivateIPAddress))
-	return &returnResponse{Return: true}, nil
+	delete(rs.interfaces, ni.NetworkInterfaceID)
+	delete(s.privateIPs, privateKey(ni.Region, ni.SubnetID, ni.PrivateIPAddress))
 }
 
 // NetworkInterfaces returns every network interface the server holds,
@@ -454,6 +442,6 @@ func (s *Server) DetachNetworkInterface(region, id string) error {
 	if !ok {
 		return fmt.Errorf("network interface %s in %s: %w", id, region, ErrNotFound)
 	}
-	ni.Status, ni.InstanceID, ni.AttachmentID = statusAvailable, "", ""
+	ni.Status, ni.InstanceID, ni.AttachmentID, ni.DeleteOnTermination = statusAvailable, "", "", false
 	return nil
 }

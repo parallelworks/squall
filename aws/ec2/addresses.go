@@ -84,6 +84,36 @@ func one(v string) []string {
 	return []string{v}
 }
 
+// association renders a as an interface's association, or nothing for no
+// address. An address with no allocation ID is one EC2 assigned an instance.
+func (a *Address) association() *associationXML {
+	if a == nil {
+		return nil
+	}
+	out := &associationXML{PublicIP: a.PublicIP, AllocationID: a.AllocationID, AssociationID: a.AssociationID}
+	if a.AllocationID == "" {
+		out.IPOwnerID = "amazon"
+	}
+	return out
+}
+
+// publicAddresses returns the public address of each interface that has one,
+// by interface ID. The caller holds s.mu.
+func (rs *regionState) publicAddresses() map[string]*Address {
+	out := map[string]*Address{}
+	for _, inst := range rs.instances {
+		if inst.PublicIPAddress != "" && inst.NetworkInterfaceID != "" {
+			out[inst.NetworkInterfaceID] = &Address{PublicIP: inst.PublicIPAddress}
+		}
+	}
+	for _, a := range rs.addresses {
+		if a.NetworkInterfaceID != "" {
+			out[a.NetworkInterfaceID] = a
+		}
+	}
+	return out
+}
+
 // addressFields returns the values of a's DescribeAddresses filters, where
 // the address's interface is attached to instanceID.
 func addressFields(a *Address, instanceID string) func(string) ([]string, bool) {
@@ -138,17 +168,25 @@ func (rs *regionState) addressWithIP(ip string) *Address {
 	return nil
 }
 
-// associate associates a with ni, disassociating whatever address ni had.
-// The caller holds s.mu.
+// associate associates a with ni, disassociating whatever address ni had, and
+// assigns the instance a moves away from a public IP address again. The
+// caller holds s.mu.
 func (s *Server) associate(rs *regionState, a *Address, ni *NetworkInterface, id string) {
 	for _, other := range rs.addresses {
 		if other != a && other.NetworkInterfaceID == ni.NetworkInterfaceID {
 			other.disassociate()
 		}
 	}
+	left := rs.instances[rs.instanceOf(a)]
 	a.NetworkInterfaceID = ni.NetworkInterfaceID
 	a.PrivateIPAddress = ni.PrivateIPAddress
 	a.AssociationID = cmp.Or(id, unusedID(s, "eipassoc", rs.associations()))
+	if inst, ok := rs.instances[ni.InstanceID]; ok {
+		s.releasePublicIP(inst)
+	}
+	if left != nil && left.NetworkInterfaceID != ni.NetworkInterfaceID {
+		s.assignPublicIP(rs, left)
+	}
 }
 
 func (rs *regionState) associations() map[string]*Address {
@@ -349,9 +387,12 @@ func (s *Server) associateAddress(c *call) (response, *apiError) {
 	if err != nil {
 		return nil, err
 	}
-	niID, err := c.p.required("NetworkInterfaceId")
-	if err != nil {
-		return nil, err
+	niID, instanceID := c.p.get("NetworkInterfaceId"), c.p.get("InstanceId")
+	switch {
+	case niID == "" && instanceID == "":
+		return nil, missing("InstanceId")
+	case niID != "" && instanceID != "":
+		return nil, clientError("InvalidParameterCombination", "You may specify an instance ID or a network interface ID, but not both.")
 	}
 	reassociate, err := c.p.bool("AllowReassociation", true)
 	if err != nil {
@@ -367,9 +408,23 @@ func (s *Server) associateAddress(c *call) (response, *apiError) {
 	if !ok {
 		return nil, allocationNotFound(id)
 	}
+	if instanceID != "" {
+		inst, err := rs.instance(instanceID)
+		if err != nil {
+			return nil, err
+		}
+		if inst.State != stateRunning && inst.State != stateStopped || inst.NetworkInterfaceID == "" {
+			return nil, clientError("InvalidInstanceID", "The %s instance '%s' is not in a valid state for this operation.", inst.State, instanceID)
+		}
+		niID = inst.NetworkInterfaceID
+	}
 	ni, ok := rs.interfaces[niID]
 	if !ok {
 		return nil, interfaceNotFound(niID)
+	}
+	if inst, ok := rs.instances[ni.InstanceID]; ok && inst.State == statePending {
+		return nil, clientError("IncorrectInstanceState",
+			"The pending-instance-creation instance to which '%s' is attached is not in a valid state for this operation", niID)
 	}
 	if a.NetworkInterfaceID != niID {
 		if a.AssociationID != "" && !reassociate {
@@ -390,9 +445,14 @@ func (s *Server) disassociateAddress(c *call) (response, *apiError) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, a := range s.lookupRegion(c.region).addresses {
+	rs := s.lookupRegion(c.region)
+	for _, a := range rs.addresses {
 		if a.AssociationID == id {
+			inst := rs.instances[rs.instanceOf(a)]
 			a.disassociate()
+			if inst != nil {
+				s.assignPublicIP(rs, inst)
+			}
 			return &returnResponse{Return: true}, nil
 		}
 	}
