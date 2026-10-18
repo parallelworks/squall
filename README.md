@@ -90,6 +90,10 @@ For Amazon EC2:
   network interface.
   Images are registered by the test with `PutImage`; instance types come from
   a small built-in set or `PutInstanceType`.
+- `RunInstances` records metadata, private DNS name and CPU options, and the
+  primary interface's type (`interface` or `efa`) and network card index (only
+  0); `DescribeInstances` returns them. EFA and AMD SEV-SNP are not checked
+  against the instance type, and CPU options are checked against its vCPUs.
 - Instances and volumes move through EC2's states when describes see them. By
   default the first `DescribeInstances` or `DescribeVolumes` after a change
   shows the state it settles in, so the SDK's waiters return at once;

@@ -64,6 +64,11 @@ type Instance struct {
 	LaunchIndex  int
 	LaunchTime   time.Time
 	Tags         map[string]string
+	// MetadataOptions, PrivateDNSNameOptions and CPUOptions are as launched,
+	// with EC2's defaults for what the launch left out.
+	MetadataOptions       MetadataOptions
+	PrivateDNSNameOptions PrivateDNSNameOptions
+	CPUOptions            CPUOptions
 
 	assignPublic bool
 	wait         int
@@ -138,6 +143,9 @@ type instanceXML struct {
 	Hypervisor         string                   `xml:"hypervisor"`
 	NetworkInterfaces  []interfaceXML           `xml:"networkInterfaceSet>item"`
 	EBSOptimized       bool                     `xml:"ebsOptimized"`
+	CPUOptions         cpuOptionsXML            `xml:"cpuOptions"`
+	MetadataOptions    metadataOptionsXML       `xml:"metadataOptions"`
+	PrivateDNSOptions  privateDNSNameOptionsXML `xml:"privateDnsNameOptions"`
 }
 
 type reservationXML struct {
@@ -206,9 +214,16 @@ func (v *regionView) instanceXML(inst *Instance) instanceXML {
 		Tags:               tagSet(inst.Tags),
 		Hypervisor:         "xen",
 		EBSOptimized:       inst.EBSOptimized,
+		CPUOptions:         cpuOptionsXML(inst.CPUOptions),
+		MetadataOptions:    inst.MetadataOptions.xml(inst.State),
+		PrivateDNSOptions:  privateDNSNameOptionsXML(inst.PrivateDNSNameOptions),
 	}
-	if inst.PrivateIPAddress != "" {
-		out.PrivateDNSName = privateDNSName(inst.Region, inst.PrivateIPAddress)
+	switch {
+	case inst.PrivateIPAddress == "":
+	case inst.PrivateDNSNameOptions.HostnameType == hostnameResourceName:
+		out.PrivateDNSName = privateDNSName(inst.Region, inst.InstanceID)
+	default:
+		out.PrivateDNSName = privateDNSName(inst.Region, "ip-"+strings.ReplaceAll(inst.PrivateIPAddress, ".", "-"))
 	}
 	switch inst.State {
 	case statePending:
@@ -232,8 +247,7 @@ func (v *regionView) instanceXML(inst *Instance) instanceXML {
 	return out
 }
 
-func privateDNSName(region, ip string) string {
-	host := "ip-" + strings.ReplaceAll(ip, ".", "-")
+func privateDNSName(region, host string) string {
 	if region == "us-east-1" {
 		return host + ".ec2.internal"
 	}
@@ -423,6 +437,10 @@ type launch struct {
 	ebsOptimized            bool
 	tags                    map[string]map[string]string
 	token                   string
+	interfaceType           string
+	metadata                MetadataOptions
+	dnsName                 PrivateDNSNameOptions
+	cpu                     CPUOptions
 }
 
 // deviceOverride is a RunInstances block device mapping; the set fields say
@@ -494,6 +512,15 @@ func parseLaunch(p *params) (*launch, *apiError) {
 	if l.tags, err = p.tagSpecs("instance", "volume", "network-interface"); err != nil {
 		return nil, err
 	}
+	if l.metadata, err = readMetadataOptions(p); err != nil {
+		return nil, err
+	}
+	if l.dnsName, err = readPrivateDNSNameOptions(p); err != nil {
+		return nil, err
+	}
+	if l.cpu, err = readCPUOptions(p); err != nil {
+		return nil, err
+	}
 	l.token = p.get("ClientToken")
 	return l, p.done()
 }
@@ -533,14 +560,24 @@ func (l *launch) readInterface(p *params) *apiError {
 	l.interfaceID, l.subnet, l.privateIP = p.get(n+"NetworkInterfaceId"), p.get(n+"SubnetId"), p.get(n+"PrivateIpAddress")
 	l.desc, l.groups = p.get(n+"Description"), p.list(n+"SecurityGroupId")
 	var err *apiError
+	if l.interfaceType, err = p.enum(n+"InterfaceType", "", interfaceTypes...); err != nil {
+		return err
+	}
+	card, err := p.int(n + "NetworkCardIndex")
+	if err != nil {
+		return err
+	}
+	if card != 0 {
+		return invalidValue("Invalid network card index %d. The primary network interface must be on network card index 0.", card)
+	}
 	if l.public, err = p.bool(n+"AssociatePublicIpAddress", false); err != nil {
 		return err
 	}
 	if l.deleteInterface, err = p.bool(n+"DeleteOnTermination", l.interfaceID == ""); err != nil {
 		return err
 	}
-	if l.interfaceID != "" && (l.subnet != "" || l.privateIP != "" || l.desc != "" || len(l.groups) > 0 || l.public) {
-		return clientError("InvalidParameterCombination", "A network interface ID cannot be specified with a subnet, private IP address, description, security groups or public IP address.")
+	if l.interfaceID != "" && (l.subnet != "" || l.privateIP != "" || l.desc != "" || len(l.groups) > 0 || l.public || l.interfaceType != "") {
+		return clientError("InvalidParameterCombination", "A network interface ID cannot be specified with a subnet, private IP address, description, security groups, public IP address or interface type.")
 	}
 	return nil
 }
@@ -655,7 +692,7 @@ func (s *Server) runInstances(c *call) (response, *apiError) {
 		return resp, nil
 	}
 	rs := s.lookupRegion(c.region)
-	image, devices, ni, err := s.checkLaunch(rs, c.region, l)
+	image, devices, ni, cpu, err := s.checkLaunch(rs, c.region, l)
 	if err != nil {
 		return nil, err
 	}
@@ -677,6 +714,7 @@ func (s *Server) runInstances(c *call) (response, *apiError) {
 			created, err := s.storeInterface(c.region, NetworkInterface{
 				SubnetID: l.subnet, AvailabilityZone: zone, Description: l.desc, PrivateIPAddress: l.privateIP,
 				SecurityGroupIDs: l.groups, Tags: maps.Clone(l.tags["network-interface"]), InstanceID: id,
+				InterfaceType: l.interfaceType,
 			})
 			if err != nil {
 				return nil, err
@@ -697,7 +735,8 @@ func (s *Server) runInstances(c *call) (response, *apiError) {
 			PlacementGroup: l.group, PlacementGroupID: l.groupID, NetworkInterfaceID: attached.NetworkInterfaceID, SubnetID: attached.SubnetID,
 			PrivateIPAddress: attached.PrivateIPAddress, RootDeviceName: image.RootDeviceName, KeyName: l.keyName,
 			ClientToken: l.token, UserData: l.userData, EBSOptimized: l.ebsOptimized, LaunchIndex: i, LaunchTime: now,
-			Tags: maps.Clone(l.tags["instance"]), assignPublic: l.public,
+			Tags: maps.Clone(l.tags["instance"]), MetadataOptions: l.metadata, PrivateDNSNameOptions: l.dnsName,
+			CPUOptions: cpu, assignPublic: l.public,
 		}
 		s.transition(inst, statePending)
 		rs.instances[id] = inst
@@ -715,53 +754,57 @@ func (s *Server) runInstances(c *call) (response, *apiError) {
 
 // checkLaunch checks everything a launch could fail on before it changes
 // anything, and returns the image, the block devices and the existing
-// interface to attach, if any. The caller holds s.mu.
-func (s *Server) checkLaunch(rs *regionState, region string, l *launch) (*Image, []BlockDeviceMapping, *NetworkInterface, *apiError) {
+// interface to attach, if any, and the CPU options. The caller holds s.mu.
+func (s *Server) checkLaunch(rs *regionState, region string, l *launch) (*Image, []BlockDeviceMapping, *NetworkInterface, CPUOptions, *apiError) {
 	image, err := rs.image(l.image)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, CPUOptions{}, err
 	}
 	if err := s.checkInstanceType(l.instanceType, image.Architecture, "InvalidParameterValue"); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, CPUOptions{}, err
+	}
+	cpu, err := cpuOptionsFor(l.cpu, s.instanceTypes[l.instanceType])
+	if err != nil {
+		return nil, nil, nil, CPUOptions{}, err
 	}
 	if l.group != "" || l.groupID != "" {
 		pg, err := rs.placementGroup(l.group, l.groupID)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, CPUOptions{}, err
 		}
 		l.group, l.groupID = pg.GroupName, pg.GroupID
 	}
 	if l.zone != "" && !strings.HasPrefix(l.zone, region) {
-		return nil, nil, nil, invalidValue("Invalid availability zone: [%s]", l.zone)
+		return nil, nil, nil, CPUOptions{}, invalidValue("Invalid availability zone: [%s]", l.zone)
 	}
 	if l.count > 1 && (l.interfaceID != "" || l.privateIP != "") {
-		return nil, nil, nil, clientError("InvalidParameterCombination", "A network interface ID or private IP address cannot be specified when launching more than one instance.")
+		return nil, nil, nil, CPUOptions{}, clientError("InvalidParameterCombination", "A network interface ID or private IP address cannot be specified when launching more than one instance.")
 	}
 	var ni *NetworkInterface
 	switch {
 	case l.interfaceID != "":
 		var ok bool
 		if ni, ok = rs.interfaces[l.interfaceID]; !ok {
-			return nil, nil, nil, interfaceNotFound(l.interfaceID)
+			return nil, nil, nil, CPUOptions{}, interfaceNotFound(l.interfaceID)
 		}
 		if ni.Status != statusAvailable {
-			return nil, nil, nil, clientError("InvalidNetworkInterface.InUse", "Interface: [%s] in use.", l.interfaceID)
+			return nil, nil, nil, CPUOptions{}, clientError("InvalidNetworkInterface.InUse", "Interface: [%s] in use.", l.interfaceID)
 		}
 		if l.zone != "" && l.zone != ni.AvailabilityZone {
-			return nil, nil, nil, clientError("InvalidParameterCombination", "The network interface '%s' is in %s, not %s.", ni.NetworkInterfaceID, ni.AvailabilityZone, l.zone)
+			return nil, nil, nil, CPUOptions{}, clientError("InvalidParameterCombination", "The network interface '%s' is in %s, not %s.", ni.NetworkInterfaceID, ni.AvailabilityZone, l.zone)
 		}
 	case l.subnet == "":
-		return nil, nil, nil, clientError("VPCIdNotSpecified", "No default VPC for this user. GroupName is only supported for EC2-Classic and default VPC.")
+		return nil, nil, nil, CPUOptions{}, clientError("VPCIdNotSpecified", "No default VPC for this user. GroupName is only supported for EC2-Classic and default VPC.")
 	case l.privateIP != "":
 		if _, taken := s.privateIPs[privateKey(region, l.subnet, l.privateIP)]; taken {
-			return nil, nil, nil, clientError("InvalidIPAddress.InUse", "Address %s is in use.", l.privateIP)
+			return nil, nil, nil, CPUOptions{}, clientError("InvalidIPAddress.InUse", "Address %s is in use.", l.privateIP)
 		}
 	}
 	devices, err := l.devicesFor(image)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, CPUOptions{}, err
 	}
-	return image, devices, ni, nil
+	return image, devices, ni, cpu, nil
 }
 
 type describeInstancesResponse struct {
@@ -954,6 +997,8 @@ func (s *Server) modifyInstanceAttribute(c *call) (response, *apiError) {
 		return nil, clientError("IncorrectInstanceState", "The instance '%s' is not in the 'stopped' state.", id)
 	}
 	inst.InstanceType = instanceType
+	inst.CPUOptions = CPUOptions{AmdSevSnp: inst.CPUOptions.AmdSevSnp}
+	inst.CPUOptions, _ = cpuOptionsFor(inst.CPUOptions, s.instanceTypes[instanceType])
 	return &returnResponse{Return: true}, nil
 }
 
