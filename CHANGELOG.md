@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/parallelworks/squall/compare/v0.2.0...v0.3.0) (2026-10-18)
+
+
+### Features
+
+* Amazon EC2 instances, images, placement groups and volumes ([#6](https://github.com/parallelworks/squall/issues/6)) ([68d9083](https://github.com/parallelworks/squall/commit/68d908310be1a7a53c0cd03af7af15abb4fa6e4d))
+
 ## [0.2.0](https://github.com/parallelworks/squall/compare/v0.1.0...v0.2.0) (2026-10-14)
 
 
