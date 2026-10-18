@@ -60,6 +60,19 @@ func (p *params) bool(key string, absent bool) (bool, *apiError) {
 	}
 }
 
+// enum reads key, which must be one of allowed, or returns absent when the
+// call leaves it out.
+func (p *params) enum(key, absent string, allowed ...string) (string, *apiError) {
+	v := p.get(key)
+	switch {
+	case v == "":
+		return absent, nil
+	case !slices.Contains(allowed, v):
+		return "", invalidValue("Value (%s) for parameter %s is invalid. Valid values are: %s.", v, key, strings.Join(allowed, ", "))
+	}
+	return v, nil
+}
+
 // indexes returns, in order, the N of every parameter named prefix.N or
 // prefix.N.something.
 func (p *params) indexes(prefix string) []string {
@@ -114,6 +127,10 @@ func (p *params) fingerprint() string {
 	v := maps.Clone(p.values)
 	for k := range v {
 		if k == "ClientToken" || k == "DryRun" || strings.HasPrefix(k, "X-Amz-") {
+			delete(v, k)
+		}
+		// Sending a parameter's documented default is the same request as leaving it out.
+		if strings.HasSuffix(k, ".NetworkCardIndex") && v.Get(k) == "0" {
 			delete(v, k)
 		}
 	}

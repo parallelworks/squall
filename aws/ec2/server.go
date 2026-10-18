@@ -65,11 +65,17 @@
 //     CpuOptions, with EC2's defaults for what it leaves out, and
 //     DescribeInstances returns them. A resource-name hostname type makes the
 //     private DNS name the instance ID's. The primary interface's
-//     InterfaceType may be "interface" or "efa" and its NetworkCardIndex only
-//     0. EFA and AMD SEV-SNP are not checked against the instance type. CPU
-//     options are checked against the type's vCPUs: x86 types with an even
-//     number run 2 threads per core, others 1, and a type change resets the
-//     core count and threads to the new type's.
+//     InterfaceType may be "interface" or "efa", or with an existing interface
+//     only that interface's type, and its NetworkCardIndex only 0, which
+//     counts as the same launch as leaving it out. Metadata options read
+//     pending until the instance first settles. EFA and AMD SEV-SNP are not
+//     checked against the instance type.
+//     CpuOptions needs both CoreCount and ThreadsPerCore or neither, and
+//     takes up to the type's default cores and threads per core, which
+//     DescribeInstanceTypes reports. Any core count from 1 up to the default
+//     is accepted, where EC2 accepts only the counts it lists for each type.
+//     A type change resets the core count and threads to the new type's
+//     defaults.
 //   - An instance's image must be registered with [Server.PutImage], and its
 //     type must be one [Server.PutInstanceType] added or one of a small
 //     built-in set, which DescribeInstanceTypes lists, that runs the image's

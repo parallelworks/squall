@@ -2,6 +2,7 @@ package ec2
 
 import (
 	"errors"
+	"fmt"
 	"maps"
 	"slices"
 	"strconv"
@@ -310,30 +311,35 @@ type InstanceType struct {
 	Architectures []string
 	VCPUs         int
 	MemoryMiB     int
+	// ThreadsPerCore is how many threads each core runs by default, 1 or 2.
+	ThreadsPerCore int
 }
 
 var builtinInstanceTypes = map[string]InstanceType{}
 
 func init() {
 	for _, t := range []InstanceType{
-		{defaultInstanceType, []string{"i386", archX86}, 1, 1740},
-		{"t3.micro", []string{archX86}, 2, 1024},
-		{"t3.small", []string{archX86}, 2, 2048},
-		{"t3.medium", []string{archX86}, 2, 4096},
-		{"t3.large", []string{archX86}, 2, 8192},
-		{"m5.large", []string{archX86}, 2, 8192},
-		{"m5.xlarge", []string{archX86}, 4, 16384},
-		{"c5.large", []string{archX86}, 2, 4096},
-		{"c5.xlarge", []string{archX86}, 4, 8192},
-		{"t4g.micro", []string{"arm64"}, 2, 1024},
-		{"c7g.large", []string{"arm64"}, 2, 4096},
+		{defaultInstanceType, []string{"i386", archX86}, 1, 1740, 1},
+		{"t3.micro", []string{archX86}, 2, 1024, 2},
+		{"t3.small", []string{archX86}, 2, 2048, 2},
+		{"t3.medium", []string{archX86}, 2, 4096, 2},
+		{"t3.large", []string{archX86}, 2, 8192, 2},
+		{"m5.large", []string{archX86}, 2, 8192, 2},
+		{"m5.xlarge", []string{archX86}, 4, 16384, 2},
+		{"c5.large", []string{archX86}, 2, 4096, 2},
+		{"c5.xlarge", []string{archX86}, 4, 8192, 2},
+		{"t4g.micro", []string{"arm64"}, 2, 1024, 1},
+		{"c7g.large", []string{"arm64"}, 2, 4096, 1},
 	} {
 		builtinInstanceTypes[t.InstanceType] = t
 	}
 }
 
 // PutInstanceType adds t to the instance types the server knows, replacing
-// one with the same name. Its architecture is "x86_64" unless set.
+// one with the same name. Its architecture is "x86_64" unless set. Unless
+// set, its threads per core are 2 for an x86 type with an even number of
+// vCPUs and 1 otherwise; set 1 for x86 types that EC2 runs without
+// simultaneous multithreading, such as m7a.
 func (s *Server) PutInstanceType(t InstanceType) error {
 	if t.InstanceType == "" {
 		return errors.New("ec2: an instance type needs a name")
@@ -345,6 +351,15 @@ func (s *Server) PutInstanceType(t InstanceType) error {
 		if !slices.Contains(architectures, arch) {
 			return invalidValue("Invalid architecture '%s'.", arch)
 		}
+	}
+	if t.ThreadsPerCore == 0 {
+		t.ThreadsPerCore = 1
+		if slices.Contains(t.Architectures, archX86) && t.VCPUs >= 2 && t.VCPUs%2 == 0 {
+			t.ThreadsPerCore = 2
+		}
+	}
+	if t.ThreadsPerCore < 1 || t.ThreadsPerCore > 2 || t.VCPUs%t.ThreadsPerCore != 0 {
+		return fmt.Errorf("ec2: instance type %s cannot run %d threads per core on %d vCPUs", t.InstanceType, t.ThreadsPerCore, t.VCPUs)
 	}
 	t.Architectures = slices.Clone(t.Architectures)
 	s.mu.Lock()
@@ -371,7 +386,11 @@ type instanceTypeXML struct {
 	InstanceType      string `xml:"instanceType"`
 	CurrentGeneration bool   `xml:"currentGeneration"`
 	VCPUInfo          struct {
-		DefaultVCPUs int `xml:"defaultVCpus"`
+		DefaultVCPUs          int   `xml:"defaultVCpus"`
+		DefaultCores          int   `xml:"defaultCores"`
+		DefaultThreadsPerCore int   `xml:"defaultThreadsPerCore"`
+		ValidCores            []int `xml:"validCores>item"`
+		ValidThreadsPerCore   []int `xml:"validThreadsPerCore>item"`
 	} `xml:"vCpuInfo"`
 	MemoryInfo struct {
 		SizeInMiB int `xml:"sizeInMiB"`
@@ -446,7 +465,10 @@ func (s *Server) describeInstanceTypes(c *call) (response, *apiError) {
 			InstanceType: t.InstanceType, CurrentGeneration: t.InstanceType != defaultInstanceType,
 			SupportedRootDeviceTypes: []string{"ebs"}, SupportedVirtualizationTypes: []string{"hvm"},
 		}
+		d := t.defaultCPUOptions()
 		out.VCPUInfo.DefaultVCPUs, out.MemoryInfo.SizeInMiB = t.VCPUs, t.MemoryMiB
+		out.VCPUInfo.DefaultCores, out.VCPUInfo.DefaultThreadsPerCore = d.CoreCount, d.ThreadsPerCore
+		out.VCPUInfo.ValidCores, out.VCPUInfo.ValidThreadsPerCore = oneTo(d.CoreCount), oneTo(d.ThreadsPerCore)
 		out.ProcessorInfo.SupportedArchitectures = t.Architectures
 		resp.InstanceTypes = append(resp.InstanceTypes, out)
 	}

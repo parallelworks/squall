@@ -91,9 +91,13 @@ For Amazon EC2:
   Images are registered by the test with `PutImage`; instance types come from
   a small built-in set or `PutInstanceType`.
 - `RunInstances` records metadata, private DNS name and CPU options, and the
-  primary interface's type (`interface` or `efa`) and network card index (only
-  0); `DescribeInstances` returns them. EFA and AMD SEV-SNP are not checked
-  against the instance type, and CPU options are checked against its vCPUs.
+  primary interface's type (`interface` or `efa`; with an existing interface,
+  only that interface's type) and network card index (only 0, the same launch
+  as leaving it out); `DescribeInstances` returns them, with metadata options
+  pending until the instance first settles. EFA and AMD SEV-SNP are not checked
+  against the instance type. CPU options take up to the type's default cores
+  and threads per core, which `DescribeInstanceTypes` reports, and any core
+  count from 1 up, where EC2 accepts only the counts it lists for each type.
 - Instances and volumes move through EC2's states when describes see them. By
   default the first `DescribeInstances` or `DescribeVolumes` after a change
   shows the state it settles in, so the SDK's waiters return at once;

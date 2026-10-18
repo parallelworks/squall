@@ -1,10 +1,6 @@
 package ec2
 
-import (
-	"cmp"
-	"slices"
-	"strings"
-)
+import "cmp"
 
 const (
 	enabled  = "enabled"
@@ -69,19 +65,6 @@ type cpuOptionsXML struct {
 	AmdSevSnp      string `xml:"amdSevSnp,omitempty"`
 }
 
-// enum reads key, which must be one of allowed, or returns absent when the
-// call leaves it out.
-func (p *params) enum(key, absent string, allowed ...string) (string, *apiError) {
-	v := p.get(key)
-	switch {
-	case v == "":
-		return absent, nil
-	case !slices.Contains(allowed, v):
-		return "", invalidValue("Value (%s) for parameter %s is invalid. Valid values are: %s.", v, key, strings.Join(allowed, ", "))
-	}
-	return v, nil
-}
-
 func readMetadataOptions(p *params) (MetadataOptions, *apiError) {
 	const k = "MetadataOptions."
 	var m MetadataOptions
@@ -132,6 +115,9 @@ func readCPUOptions(p *params) (CPUOptions, *apiError) {
 	const k = "CpuOptions."
 	var c CPUOptions
 	var err *apiError
+	if p.values.Has(k+"CoreCount") != p.values.Has(k+"ThreadsPerCore") {
+		return c, clientError("MissingParameter", "When specifying CpuOptions you must specify both CoreCount and ThreadsPerCore.")
+	}
 	for _, f := range []struct {
 		key string
 		v   *int
@@ -149,19 +135,18 @@ func readCPUOptions(p *params) (CPUOptions, *apiError) {
 	return c, nil
 }
 
-// defaultThreadsPerCore is 2 for x86 types with an even number of vCPUs,
-// which run with simultaneous multithreading, and 1 otherwise.
-func (t InstanceType) defaultThreadsPerCore() int {
-	if slices.Contains(t.Architectures, archX86) && t.VCPUs >= 2 && t.VCPUs%2 == 0 {
-		return 2
-	}
-	return 1
-}
-
 // defaultCPUOptions are the CPU options of t when a launch leaves them out.
 func (t InstanceType) defaultCPUOptions() CPUOptions {
-	threads := t.defaultThreadsPerCore()
+	threads := max(t.ThreadsPerCore, 1)
 	return CPUOptions{CoreCount: max(t.VCPUs/threads, 1), ThreadsPerCore: threads}
+}
+
+func oneTo(n int) []int {
+	out := make([]int, n)
+	for i := range out {
+		out[i] = i + 1
+	}
+	return out
 }
 
 // cpuOptionsFor fills in c with t's defaults and checks that t can run it.
@@ -179,10 +164,10 @@ func cpuOptionsFor(c CPUOptions, t InstanceType) (CPUOptions, *apiError) {
 	return out, nil
 }
 
-func (m MetadataOptions) xml(state string) metadataOptionsXML {
-	s := "applied"
-	if state == statePending {
-		s = "pending"
+func (m MetadataOptions) xml(applied bool) metadataOptionsXML {
+	s := "pending"
+	if applied {
+		s = "applied"
 	}
 	return metadataOptionsXML{s, m.HTTPTokens, m.HTTPPutResponseHopLimit, m.HTTPEndpoint, m.HTTPProtocolIPv6, m.InstanceMetadataTags}
 }
