@@ -64,9 +64,15 @@ type Instance struct {
 	LaunchIndex  int
 	LaunchTime   time.Time
 	Tags         map[string]string
+	// MetadataOptions, PrivateDNSNameOptions and CPUOptions are as launched,
+	// with EC2's defaults for what the launch left out.
+	MetadataOptions       MetadataOptions
+	PrivateDNSNameOptions PrivateDNSNameOptions
+	CPUOptions            CPUOptions
 
-	assignPublic bool
-	wait         int
+	assignPublic    bool
+	metadataApplied bool
+	wait            int
 }
 
 func (inst *Instance) clone() Instance {
@@ -138,6 +144,9 @@ type instanceXML struct {
 	Hypervisor         string                   `xml:"hypervisor"`
 	NetworkInterfaces  []interfaceXML           `xml:"networkInterfaceSet>item"`
 	EBSOptimized       bool                     `xml:"ebsOptimized"`
+	CPUOptions         cpuOptionsXML            `xml:"cpuOptions"`
+	MetadataOptions    metadataOptionsXML       `xml:"metadataOptions"`
+	PrivateDNSOptions  privateDNSNameOptionsXML `xml:"privateDnsNameOptions"`
 }
 
 type reservationXML struct {
@@ -206,9 +215,16 @@ func (v *regionView) instanceXML(inst *Instance) instanceXML {
 		Tags:               tagSet(inst.Tags),
 		Hypervisor:         "xen",
 		EBSOptimized:       inst.EBSOptimized,
+		CPUOptions:         cpuOptionsXML(inst.CPUOptions),
+		MetadataOptions:    inst.MetadataOptions.xml(inst.metadataApplied),
+		PrivateDNSOptions:  privateDNSNameOptionsXML(inst.PrivateDNSNameOptions),
 	}
-	if inst.PrivateIPAddress != "" {
-		out.PrivateDNSName = privateDNSName(inst.Region, inst.PrivateIPAddress)
+	switch {
+	case inst.PrivateIPAddress == "":
+	case inst.PrivateDNSNameOptions.HostnameType == hostnameResourceName:
+		out.PrivateDNSName = privateDNSName(inst.Region, inst.InstanceID)
+	default:
+		out.PrivateDNSName = privateDNSName(inst.Region, "ip-"+strings.ReplaceAll(inst.PrivateIPAddress, ".", "-"))
 	}
 	switch inst.State {
 	case statePending:
@@ -232,8 +248,7 @@ func (v *regionView) instanceXML(inst *Instance) instanceXML {
 	return out
 }
 
-func privateDNSName(region, ip string) string {
-	host := "ip-" + strings.ReplaceAll(ip, ".", "-")
+func privateDNSName(region, host string) string {
 	if region == "us-east-1" {
 		return host + ".ec2.internal"
 	}
@@ -366,6 +381,7 @@ func (s *Server) settle(rs *regionState, inst *Instance) {
 		return
 	}
 	inst.State, inst.wait = next, 0
+	inst.metadataApplied = true
 	if next != stateTerminated {
 		return
 	}
@@ -423,6 +439,10 @@ type launch struct {
 	ebsOptimized            bool
 	tags                    map[string]map[string]string
 	token                   string
+	interfaceType           string
+	metadata                MetadataOptions
+	dnsName                 PrivateDNSNameOptions
+	cpu                     CPUOptions
 }
 
 // deviceOverride is a RunInstances block device mapping; the set fields say
@@ -494,6 +514,15 @@ func parseLaunch(p *params) (*launch, *apiError) {
 	if l.tags, err = p.tagSpecs("instance", "volume", "network-interface"); err != nil {
 		return nil, err
 	}
+	if l.metadata, err = readMetadataOptions(p); err != nil {
+		return nil, err
+	}
+	if l.dnsName, err = readPrivateDNSNameOptions(p); err != nil {
+		return nil, err
+	}
+	if l.cpu, err = readCPUOptions(p); err != nil {
+		return nil, err
+	}
 	l.token = p.get("ClientToken")
 	return l, p.done()
 }
@@ -533,6 +562,19 @@ func (l *launch) readInterface(p *params) *apiError {
 	l.interfaceID, l.subnet, l.privateIP = p.get(n+"NetworkInterfaceId"), p.get(n+"SubnetId"), p.get(n+"PrivateIpAddress")
 	l.desc, l.groups = p.get(n+"Description"), p.list(n+"SecurityGroupId")
 	var err *apiError
+	if p.get(n+"InterfaceType") == "efa-only" {
+		return invalidValue("An efa-only network interface cannot be the primary network interface (device index 0).")
+	}
+	if l.interfaceType, err = p.enum(n+"InterfaceType", "", interfaceTypes...); err != nil {
+		return err
+	}
+	card, err := p.int(n + "NetworkCardIndex")
+	if err != nil {
+		return err
+	}
+	if card != 0 {
+		return invalidValue("Invalid network card index %d. The primary network interface must be assigned to network card index 0.", card)
+	}
 	if l.public, err = p.bool(n+"AssociatePublicIpAddress", false); err != nil {
 		return err
 	}
@@ -677,6 +719,7 @@ func (s *Server) runInstances(c *call) (response, *apiError) {
 			created, err := s.storeInterface(c.region, NetworkInterface{
 				SubnetID: l.subnet, AvailabilityZone: zone, Description: l.desc, PrivateIPAddress: l.privateIP,
 				SecurityGroupIDs: l.groups, Tags: maps.Clone(l.tags["network-interface"]), InstanceID: id,
+				InterfaceType: l.interfaceType,
 			})
 			if err != nil {
 				return nil, err
@@ -697,7 +740,8 @@ func (s *Server) runInstances(c *call) (response, *apiError) {
 			PlacementGroup: l.group, PlacementGroupID: l.groupID, NetworkInterfaceID: attached.NetworkInterfaceID, SubnetID: attached.SubnetID,
 			PrivateIPAddress: attached.PrivateIPAddress, RootDeviceName: image.RootDeviceName, KeyName: l.keyName,
 			ClientToken: l.token, UserData: l.userData, EBSOptimized: l.ebsOptimized, LaunchIndex: i, LaunchTime: now,
-			Tags: maps.Clone(l.tags["instance"]), assignPublic: l.public,
+			Tags: maps.Clone(l.tags["instance"]), MetadataOptions: l.metadata, PrivateDNSNameOptions: l.dnsName,
+			CPUOptions: l.cpu, assignPublic: l.public,
 		}
 		s.transition(inst, statePending)
 		rs.instances[id] = inst
@@ -715,13 +759,17 @@ func (s *Server) runInstances(c *call) (response, *apiError) {
 
 // checkLaunch checks everything a launch could fail on before it changes
 // anything, and returns the image, the block devices and the existing
-// interface to attach, if any. The caller holds s.mu.
+// interface to attach, if any. It fills in l's CPU options with the instance
+// type's defaults. The caller holds s.mu.
 func (s *Server) checkLaunch(rs *regionState, region string, l *launch) (*Image, []BlockDeviceMapping, *NetworkInterface, *apiError) {
 	image, err := rs.image(l.image)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	if err := s.checkInstanceType(l.instanceType, image.Architecture, "InvalidParameterValue"); err != nil {
+		return nil, nil, nil, err
+	}
+	if l.cpu, err = cpuOptionsFor(l.cpu, s.instanceTypes[l.instanceType]); err != nil {
 		return nil, nil, nil, err
 	}
 	if l.group != "" || l.groupID != "" {
@@ -746,6 +794,9 @@ func (s *Server) checkLaunch(rs *regionState, region string, l *launch) (*Image,
 		}
 		if ni.Status != statusAvailable {
 			return nil, nil, nil, clientError("InvalidNetworkInterface.InUse", "Interface: [%s] in use.", l.interfaceID)
+		}
+		if l.interfaceType != "" && l.interfaceType != cmp.Or(ni.InterfaceType, interfaceTypeDefault) {
+			return nil, nil, nil, clientError("InvalidParameterCombination", "The network interface '%s' is of type %s, not %s.", ni.NetworkInterfaceID, cmp.Or(ni.InterfaceType, interfaceTypeDefault), l.interfaceType)
 		}
 		if l.zone != "" && l.zone != ni.AvailabilityZone {
 			return nil, nil, nil, clientError("InvalidParameterCombination", "The network interface '%s' is in %s, not %s.", ni.NetworkInterfaceID, ni.AvailabilityZone, l.zone)
@@ -953,7 +1004,9 @@ func (s *Server) modifyInstanceAttribute(c *call) (response, *apiError) {
 	if inst.State != stateStopped {
 		return nil, clientError("IncorrectInstanceState", "The instance '%s' is not in the 'stopped' state.", id)
 	}
-	inst.InstanceType = instanceType
+	cpu := s.instanceTypes[instanceType].defaultCPUOptions()
+	cpu.AmdSevSnp = inst.CPUOptions.AmdSevSnp
+	inst.InstanceType, inst.CPUOptions = instanceType, cpu
 	return &returnResponse{Return: true}, nil
 }
 

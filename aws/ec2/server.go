@@ -60,8 +60,22 @@
 //     interface at device index 0, either new or an existing available one,
 //     and fails with VPCIdNotSpecified without. Instances are EBS-backed HVM
 //     instances with one network interface; launch templates, spot options,
-//     instance profiles, metadata options and the like are rejected as
-//     unknown parameters.
+//     instance profiles and the like are rejected as unknown parameters.
+//   - RunInstances records MetadataOptions, PrivateDnsNameOptions and
+//     CpuOptions, with EC2's defaults for what it leaves out, and
+//     DescribeInstances returns them. A resource-name hostname type makes the
+//     private DNS name the instance ID's. The primary interface's
+//     InterfaceType may be "interface" or "efa", or with an existing interface
+//     only that interface's type, and its NetworkCardIndex only 0, which
+//     counts as the same launch as leaving it out. Metadata options read
+//     pending until the instance first settles. EFA and AMD SEV-SNP are not
+//     checked against the instance type.
+//     CpuOptions needs both CoreCount and ThreadsPerCore or neither, and
+//     takes up to the type's default cores and threads per core, which
+//     DescribeInstanceTypes reports. Any core count from 1 up to the default
+//     is accepted, where EC2 accepts only the counts it lists for each type.
+//     A type change resets the core count and threads to the new type's
+//     defaults.
 //   - An instance's image must be registered with [Server.PutImage], and its
 //     type must be one [Server.PutInstanceType] added or one of a small
 //     built-in set, which DescribeInstanceTypes lists, that runs the image's

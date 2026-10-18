@@ -1,6 +1,7 @@
 package ec2
 
 import (
+	"cmp"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -37,6 +38,8 @@ type NetworkInterface struct {
 	InstanceID   string
 	// DeleteOnTermination is whether terminating the instance deletes the interface.
 	DeleteOnTermination bool
+	// InterfaceType is "interface", the default, or "efa".
+	InterfaceType string
 }
 
 func (ni *NetworkInterface) clone() NetworkInterface {
@@ -72,6 +75,7 @@ type attachmentXML struct {
 	AttachmentID        string `xml:"attachmentId"`
 	InstanceID          string `xml:"instanceId,omitempty"`
 	DeviceIndex         int    `xml:"deviceIndex"`
+	NetworkCardIndex    int    `xml:"networkCardIndex"`
 	Status              string `xml:"status"`
 	DeleteOnTermination bool   `xml:"deleteOnTermination"`
 }
@@ -101,7 +105,7 @@ func (ni *NetworkInterface) xml(a *Address) interfaceXML {
 		PrivateIPAddress:   ni.PrivateIPAddress,
 		SourceDestCheck:    true,
 		Tags:               tagSet(ni.Tags),
-		InterfaceType:      "interface",
+		InterfaceType:      cmp.Or(ni.InterfaceType, interfaceTypeDefault),
 	}
 	for _, g := range ni.SecurityGroupIDs {
 		out.Groups = append(out.Groups, groupXML{g})
@@ -179,6 +183,9 @@ func (s *Server) storeInterface(region string, ni NetworkInterface) (*NetworkInt
 	case statusInUse:
 	default:
 		return nil, invalidValue("Invalid network interface status '%s'.", ni.Status)
+	}
+	if ni.InterfaceType != "" && !slices.Contains(interfaceTypes, ni.InterfaceType) {
+		return nil, invalidValue("Invalid network interface type '%s'.", ni.InterfaceType)
 	}
 	if ni.NetworkInterfaceID != "" && !strings.HasPrefix(ni.NetworkInterfaceID, "eni-") {
 		return nil, invalidValue("Invalid network interface ID '%s'.", ni.NetworkInterfaceID)
