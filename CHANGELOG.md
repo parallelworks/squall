@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/parallelworks/squall/compare/v0.3.0...v0.4.0) (2026-10-18)
+
+
+### Features
+
+* EC2 launches take metadata, private DNS name, CPU and network card options ([#8](https://github.com/parallelworks/squall/issues/8)) ([01bcf71](https://github.com/parallelworks/squall/commit/01bcf7133e4d58edc5ae0ccc7bc16b1305714eed))
+
 ## [0.3.0](https://github.com/parallelworks/squall/compare/v0.2.0...v0.3.0) (2026-10-18)
 
 
