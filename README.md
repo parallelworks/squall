@@ -22,6 +22,7 @@ failure replays from its seed.
 | --- | --- |
 | [`fault`](https://pkg.go.dev/github.com/parallelworks/squall/fault) | Decides which calls fail and how: rejected, applied with the response lost, applied with an error, an operation that ends in an error, or slow. Scripted rules and a seeded random rate. |
 | [`aws/ec2`](https://pkg.go.dev/github.com/parallelworks/squall/aws/ec2) | Amazon EC2: instances (run with client tokens, describe with filters and pages, start, stop, terminate, change type), images, instance types, EBS volumes (create, describe, attach, detach, delete), placement groups, tags, Elastic IP addresses (allocate, describe, release, associate with an interface or instance, disassociate) and network interfaces (create with client tokens, describe, delete). |
+| [`azure/arm`](https://pkg.go.dev/github.com/parallelworks/squall/azure/arm) | Azure Resource Manager: resource groups (get, create or update, list with tag filters, delete with everything in them), virtual machines (create or update, get, list, instance view, deallocate, start, delete), Uniform scale sets (create or update, update, get, list, delete, delete instances) and their VMs, network security groups, network interfaces and public IP addresses, the IP configurations of scale set VMs, private DNS zones, virtual network links and A record sets, and long-running operations to poll. |
 | [`gcp/compute`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/compute) | Compute Engine: instances (bulkInsert, insert, get, list, aggregatedList, delete, stop, start, setLabels, setMachineType, addAccessConfig, attachDisk, detachDisk), disks (get, list, aggregatedList, insert, delete), zones, regional addresses (get, list, insert, delete, setLabels), resource policies, instance templates, routes, and zone, region and global operations (get, wait). |
 
 Coverage grows with use: each stand-in implements the methods someone needed,
@@ -149,6 +150,37 @@ For Amazon EC2:
   as `us-east-1/eipalloc-…`, and for a create, the resource being created (the
   first instance, for `RunInstances`). A rejected call has no effect, so a
   rejected describe does not move an instance along.
+
+For Azure Resource Manager:
+
+- Long-running operations finish within the call that starts them, so the
+  SDK's pollers are done at once. `WithSettleAfter(n)` answers with an
+  `Azure-AsyncOperation` URL instead (and a `Location` URL for actions and
+  deletes, the only one for a resource group deletion), keeping the resource
+  `Creating`, `Updating` or `Deleting` for `n` more reads of it or its
+  operation, or until the test calls `Settle`. Polls carry a `retry-after-ms`
+  of 10. A fault in `FailOperation` mode ends the operation in its error
+  without the call taking effect.
+- PUT and DELETE are idempotent, as in Azure: a retried create answers 200 with
+  the resource, and deleting what is not there answers 204. A change to a
+  resource with another in progress finishes that one first; a change in a
+  resource group being deleted fails with `ResourceGroupBeingDeleted`.
+- Resource names, subscription IDs, locations and tags are not validated, and
+  names match without regard to case. Fields it does not know are rejected
+  with `InvalidRequestContent`; values it does not model, such as a Flexible
+  scale set or a VM with `networkInterfaceConfigurations`, with `BadRequest`.
+- Virtual networks and subnets are not modeled; their IDs are recorded. Private
+  addresses come from 10.0.0.0/8, unique within a subnet ID, and public ones
+  from 100.64.0.0/10, assigned when created. OS disks get names and IDs but are
+  not served.
+- Scale set VMs are numbered from 0 without reuse; raising `sku.capacity`
+  creates them with their interfaces and addresses, and lowering it deletes the
+  newest. A PUT that leaves out `sku.capacity` on an existing scale set keeps
+  the capacity rather than deleting every VM; a new one needs a capacity.
+- Resource SKUs list none, so availability checks see no restrictions.
+- Fault method names are the Azure RBAC action, such as
+  `Microsoft.Compute/virtualMachines/write`, and a rule's `Resource` is the
+  resource ID in the call's path.
 
 ## Requirements
 

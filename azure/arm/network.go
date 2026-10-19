@@ -1,0 +1,622 @@
+package arm
+
+import (
+	"cmp"
+	"fmt"
+	"hash/fnv"
+	"maps"
+	"net/http"
+	"net/netip"
+	"slices"
+	"strconv"
+	"strings"
+)
+
+var (
+	nsgKind = &kind{
+		typ: "Microsoft.Network/networkSecurityGroups", plural: "networkSecurityGroups", typeName: "NetworkSecurityGroup",
+		props:    []string{"securityRules", "flushConnection"},
+		readOnly: []string{"defaultSecurityRules", "flowLogs", "networkInterfaces", "provisioningState", "resourceGuid", "subnets"},
+		located:  true, etag: weakETag,
+	}
+	nicKind = &kind{
+		typ: "Microsoft.Network/networkInterfaces", plural: "networkInterfaces", typeName: "NetworkInterface",
+		top: []string{"extendedLocation"},
+		props: []string{
+			"auxiliaryMode", "auxiliarySku", "disableTcpStateTracking", "dnsSettings", "enableAcceleratedNetworking",
+			"enableIPForwarding", "ipConfigurations", "migrationPhase", "networkSecurityGroup", "nicType", "workloadType",
+		},
+		readOnly: []string{
+			"defaultOutboundConnectivityEnabled", "dscpConfiguration", "hostedWorkloads", "macAddress", "primary",
+			"privateEndpoint", "privateLinkService", "provisioningState", "resourceGuid", "tapConfigurations",
+			"virtualMachine", "vnetEncryptionSupported",
+		},
+		located: true, etag: weakETag,
+	}
+	pipKind = &kind{
+		typ: "Microsoft.Network/publicIPAddresses", plural: "publicIPAddresses", typeName: "PublicIPAddress",
+		top: []string{"sku", "zones", "extendedLocation"},
+		props: []string{
+			"ddosSettings", "deleteOption", "dnsSettings", "ipTags", "idleTimeoutInMinutes", "publicIPAddressVersion",
+			"publicIPAllocationMethod",
+		},
+		readOnly: []string{
+			"ipAddress", "ipConfiguration", "linkedPublicIPAddress", "migrationPhase", "natGateway", "provisioningState",
+			"publicIPPrefix", "resourceGuid", "servicePublicIPAddress",
+		},
+		located: true, etag: weakETag,
+	}
+)
+
+const ipConfigType = "Microsoft.Network/networkInterfaces/ipConfigurations"
+
+type nicState struct {
+	configs []*ipConfig
+	nsg     string
+	// vm is the ID of the VM the interface is attached to, if any.
+	vm string
+}
+
+type ipConfig struct {
+	name    string
+	subnet  string
+	address netip.Addr
+	static  bool
+	primary bool
+	pip     string
+	props   map[string]any
+}
+
+type pipState struct {
+	address netip.Addr
+}
+
+// putSpec describes the create or update of a resource with a
+// long-running operation.
+type putSpec struct {
+	kind *kind
+	id   func(c *call) string
+	// parent, when set, is the ID of the resource that must hold the new one.
+	parent func(c *call) string
+	paths  func(c *call, location string) opPaths
+	// prepare validates p as the new body of res, which is not yet stored when
+	// new, and returns how to apply it. Nil records p as it is.
+	prepare func(res *resource, p *parsed) (func(), *apiError)
+	render  func(res *resource) map[string]any
+}
+
+// put creates or updates a resource as spec describes.
+func (s *Server) put(spec putSpec) handler {
+	return func(c *call) (*reply, *apiError) {
+		p, err := parseBody(c, spec.kind)
+		if err != nil {
+			return nil, err
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if err := s.writableGroup(c); err != nil {
+			return nil, err
+		}
+		if spec.parent != nil {
+			if parent := s.settled(spec.parent(c)); parent == nil {
+				return nil, parentNotFound(c.val("zone"))
+			}
+		}
+		id := spec.id(c)
+		existing := s.settled(id)
+		if err := checkPrecondition(c.r, existing); err != nil {
+			return nil, err
+		}
+		if existing != nil && existing.loc != p.location {
+			return nil, wrongLocation(existing.name, existing.loc, p.location, c.val("rg"))
+		}
+		res, status := existing, http.StatusOK
+		if res == nil {
+			res, status = s.newResource(c, spec.kind, id, p), http.StatusCreated
+		}
+		commit := func() { s.update(res, p) }
+		if spec.prepare != nil {
+			if commit, err = spec.prepare(res, p); err != nil {
+				return nil, err
+			}
+		}
+		render := func() []byte { return encode(spec.render(res)) }
+		paths := spec.paths(c, p.location)
+		if c.opFault != nil {
+			op := s.begin(c, paths, 0, nil)
+			return accepted(c, op, status, status, false, func() []byte { return withState(res, putState(status), render) }), nil
+		}
+		commit()
+		s.resources[key(id)] = res
+		op := s.change(c, res, paths, 0, putState(status), nil)
+		return accepted(c, op, status, status, false, render), nil
+	}
+}
+
+// putNetwork creates or updates a network resource of kind k.
+func (s *Server) putNetwork(k *kind) handler {
+	spec := putSpec{
+		kind:   k,
+		id:     func(c *call) string { return resourceID(c, k.typ, c.val("name")) },
+		paths:  networkOps,
+		render: s.renderNetwork,
+	}
+	switch k {
+	case nicKind:
+		spec.prepare = s.prepareNIC
+	case pipKind:
+		spec.prepare = s.preparePIP
+	}
+	return s.put(spec)
+}
+
+// prepareNIC validates p as the new body of the interface res, and returns
+// how to apply it. The caller holds s.mu.
+func (s *Server) prepareNIC(res *resource, p *parsed) (func(), *apiError) {
+	raw, err := objects(p.props, "ipConfigurations")
+	if err != nil {
+		return nil, err
+	}
+	delete(p.props, "ipConfigurations")
+	if len(raw) == 0 {
+		return nil, badRequest("Network interface %s must have one or more IP configurations.", res.id)
+	}
+	nsg := refID(p.props, "networkSecurityGroup")
+	delete(p.props, "networkSecurityGroup")
+	if nsg != "" {
+		if target := s.settled(nsg); target == nil || target.kind != nsgKind || target.loc != res.loc {
+			return nil, invalidReference(nsg, res.id)
+		}
+	}
+	var old map[string]*ipConfig
+	if res.nic != nil {
+		old = map[string]*ipConfig{}
+		for _, ic := range res.nic.configs {
+			old[key(ic.name)] = ic
+		}
+	}
+	configs := make([]*ipConfig, 0, len(raw))
+	for i, rc := range raw {
+		ic, err := s.parseIPConfig(res, rc, i, len(raw))
+		if err != nil {
+			return nil, err
+		}
+		configs = append(configs, ic)
+	}
+	// Reserve every address before taking any, so a conflict leaves nothing taken.
+	taken := map[string]bool{}
+	for _, ic := range configs {
+		if !ic.static {
+			continue
+		}
+		holder := s.privateIPs[key(ic.subnet)][ic.address]
+		k := key(ic.subnet) + " " + ic.address.String()
+		if holder != "" && !strings.HasPrefix(holder, key(res.id)+"/") || taken[k] {
+			return nil, newError(http.StatusBadRequest, "PrivateIPAddressInUse",
+				"IP configuration %s/ipConfigurations/%s is using the private IP address %s which is already allocated to resource %s.",
+				res.id, ic.name, ic.address, holder)
+		}
+		taken[k] = true
+	}
+	return func() {
+		if res.nic != nil {
+			s.releaseNIC(res)
+		}
+		for _, ic := range configs {
+			holder := key(res.id) + "/ipconfigurations/" + key(ic.name)
+			prev := old[key(ic.name)]
+			switch {
+			case ic.static:
+				s.takePrivate(ic.subnet, ic.address, holder)
+			case prev != nil && key(prev.subnet) == key(ic.subnet) && s.privateIPs[key(ic.subnet)][prev.address] == "":
+				ic.address = prev.address
+				s.takePrivate(ic.subnet, ic.address, holder)
+			default:
+				ic.address = s.allocPrivate(ic.subnet, holder)
+			}
+		}
+		vm := ""
+		if res.nic != nil {
+			vm = res.nic.vm
+		}
+		res.nic = &nicState{configs: configs, nsg: nsg, vm: vm}
+		s.update(res, p)
+	}, nil
+}
+
+// parseIPConfig reads the ith of n IP configurations of the interface res.
+// The caller holds s.mu.
+func (s *Server) parseIPConfig(res *resource, rc map[string]any, i, n int) (*ipConfig, *apiError) {
+	path := "properties.ipConfigurations[" + strconv.Itoa(i) + "]"
+	if err := checkMembers(rc, "NetworkInterfaceIPConfiguration", path, "id", "name", "etag", "type", "properties"); err != nil {
+		return nil, err
+	}
+	props, err := object(rc, "properties")
+	if err != nil {
+		return nil, err
+	}
+	if err := checkMembers(props, "NetworkInterfaceIPConfigurationPropertiesFormat", path+".properties",
+		"applicationGatewayBackendAddressPools", "applicationSecurityGroups", "gatewayLoadBalancer",
+		"loadBalancerBackendAddressPools", "loadBalancerInboundNatRules", "primary", "privateIPAddress",
+		"privateIPAddressPrefixLength", "privateIPAddressVersion", "privateIPAllocationMethod",
+		"privateLinkConnectionProperties", "provisioningState", "publicIPAddress", "subnet", "virtualNetworkTaps"); err != nil {
+		return nil, err
+	}
+	ic := &ipConfig{name: str(rc, "name"), subnet: refID(props, "subnet"), pip: refID(props, "publicIPAddress")}
+	if ic.name == "" {
+		return nil, badRequest("IP configuration %d of network interface %s has no name.", i, res.id)
+	}
+	if ic.subnet == "" {
+		return nil, badRequest("IP configuration %s of network interface %s must reference a subnet.", ic.name, res.id)
+	}
+	if v := str(props, "privateIPAddressVersion"); v != "" && !strings.EqualFold(v, "IPv4") {
+		return nil, unsupported("privateIPAddressVersion %s is not supported", v)
+	}
+	ic.primary, _ = boolean(props, "primary")
+	if n == 1 {
+		ic.primary = true
+	}
+	switch method := str(props, "privateIPAllocationMethod"); {
+	case strings.EqualFold(method, "Static"):
+		a, perr := netip.ParseAddr(str(props, "privateIPAddress"))
+		if perr != nil || !a.Is4() {
+			return nil, badRequest("IP configuration %s of network interface %s has a static allocation with no valid privateIPAddress.", ic.name, res.id)
+		}
+		ic.address, ic.static = a, true
+	case method != "" && !strings.EqualFold(method, "Dynamic"):
+		return nil, badRequest("The privateIPAllocationMethod '%s' is not valid.", method)
+	}
+	if ic.pip != "" {
+		target := s.settled(ic.pip)
+		if target == nil || target.kind != pipKind || target.loc != res.loc {
+			return nil, invalidReference(ic.pip, res.id)
+		}
+		if user := s.pipUser(ic.pip); user != "" && !strings.HasPrefix(key(user), key(res.id)+"/") {
+			return nil, newError(http.StatusBadRequest, "PublicIPAddressInUse",
+				"Resource %s/ipConfigurations/%s is referencing public IP address %s that is already allocated to resource %s.",
+				res.id, ic.name, ic.pip, user)
+		}
+	}
+	ic.props = map[string]any{}
+	for k, v := range props {
+		switch k {
+		case "primary", "privateIPAddress", "privateIPAddressVersion", "privateIPAllocationMethod",
+			"privateLinkConnectionProperties", "provisioningState", "publicIPAddress", "subnet":
+		default:
+			ic.props[k] = v
+		}
+	}
+	return ic, nil
+}
+
+// preparePIP validates p as the new body of the public IP address res, and
+// returns how to apply it. The caller holds s.mu.
+func (s *Server) preparePIP(res *resource, p *parsed) (func(), *apiError) {
+	if v := str(p.props, "publicIPAddressVersion"); v != "" && !strings.EqualFold(v, "IPv4") {
+		return nil, unsupported("publicIPAddressVersion %s is not supported", v)
+	}
+	if sku, _ := p.top["sku"].(map[string]any); sku != nil {
+		if name := str(sku, "name"); name != "" && !strings.EqualFold(name, "Standard") {
+			return nil, unsupported("public IP address SKU %s is not supported; use Standard", name)
+		}
+	} else {
+		p.top["sku"] = map[string]any{"name": "Standard", "tier": "Regional"}
+	}
+	return func() {
+		if res.pip == nil {
+			res.pip = &pipState{address: s.allocPublic(key(res.id))}
+		}
+		s.update(res, p)
+	}, nil
+}
+
+func (s *Server) getResource(k *kind) handler {
+	return func(c *call) (*reply, *apiError) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if err := s.readableGroup(c); err != nil {
+			return nil, err
+		}
+		res := s.read(resourceID(c, k.typ, c.val("name")))
+		if res == nil || res.kind != k {
+			return nil, resourceNotFound(k.typ, c.val("name"), c.val("rg"))
+		}
+		return ok200(s.renderNetwork(res)), nil
+	}
+}
+
+func (s *Server) deleteNetwork(k *kind) handler {
+	return func(c *call) (*reply, *apiError) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if err := s.writableGroup(c); err != nil {
+			return nil, err
+		}
+		res := s.settled(resourceID(c, k.typ, c.val("name")))
+		if res == nil || res.kind != k {
+			return &reply{status: http.StatusNoContent}, nil
+		}
+		if err := s.checkUnused(res); err != nil {
+			return nil, err
+		}
+		op := s.change(c, res, networkOps(c, res.loc), http.StatusNoContent, stateDeleting, func() { s.remove(res) })
+		return accepted(c, op, http.StatusOK, http.StatusAccepted, true, noBody), nil
+	}
+}
+
+// checkUnused fails the deletion of a network resource another uses. The caller holds s.mu.
+func (s *Server) checkUnused(res *resource) *apiError {
+	switch res.kind {
+	case nsgKind:
+		if users := s.nsgUsers(res.id); len(users) > 0 {
+			return newError(http.StatusBadRequest, "InUseNetworkSecurityGroupCannotBeDeleted",
+				"Network security group %s cannot be deleted because it is in use by the following resources: %s.", res.id, strings.Join(users, ", "))
+		}
+	case pipKind:
+		if user := s.pipUser(res.id); user != "" {
+			return newError(http.StatusBadRequest, "PublicIPAddressCannotBeDeleted",
+				"Public IP address %s can not be deleted since it is still allocated to resource %s.", res.id, user)
+		}
+	case nicKind:
+		if res.nic.vm != "" {
+			return newError(http.StatusBadRequest, "NicInUse",
+				"Network Interface %s is used by existing resource %s. In order to delete the network interface, it must be dissociated from the resource. To learn more, see aka.ms/deletenic.",
+				res.id, res.nic.vm)
+		}
+	}
+	return nil
+}
+
+// nsgUsers lists the interfaces and scale sets that use the security group
+// id. The caller holds s.mu.
+func (s *Server) nsgUsers(id string) []string {
+	var users []string
+	for _, res := range s.resources {
+		switch {
+		case res.nic != nil && key(res.nic.nsg) == key(id):
+			users = append(users, res.id)
+		case res.scale != nil:
+			for _, cfg := range res.scale.nics {
+				if key(cfg.nsg) == key(id) {
+					for _, inst := range res.scale.sorted() {
+						users = append(users, inst.id(res)+"/networkInterfaces/"+cfg.name)
+					}
+				}
+			}
+		}
+	}
+	slices.Sort(users)
+	return users
+}
+
+// pipUser returns the IP configuration that uses the public IP address id,
+// or "". The caller holds s.mu.
+func (s *Server) pipUser(id string) string {
+	for _, res := range s.resources {
+		if res.nic == nil {
+			continue
+		}
+		for _, ic := range res.nic.configs {
+			if key(ic.pip) == key(id) {
+				return res.id + "/ipConfigurations/" + ic.name
+			}
+		}
+	}
+	return ""
+}
+
+func (s *Server) renderNetwork(res *resource) map[string]any {
+	m, props := envelope(res)
+	props["resourceGuid"] = res.guid
+	switch res.kind {
+	case nsgKind:
+		rules, _ := objects(res.props, "securityRules")
+		out := make([]any, 0, len(rules))
+		for _, r := range rules {
+			rule := maps.Clone(r)
+			name := str(r, "name")
+			rule["id"], rule["etag"], rule["type"] = res.id+"/securityRules/"+name, res.etag, res.kind.typ+"/securityRules"
+			rp, _ := r["properties"].(map[string]any)
+			rp = maps.Clone(rp)
+			if rp == nil {
+				rp = map[string]any{}
+			}
+			rp["provisioningState"] = res.state
+			rule["properties"] = rp
+			out = append(out, rule)
+		}
+		props["securityRules"] = out
+		var nics []any
+		for _, u := range s.nsgUsers(res.id) {
+			nics = append(nics, ref(u))
+		}
+		if nics != nil {
+			props["networkInterfaces"] = nics
+		}
+	case nicKind:
+		if res.nic != nil {
+			s.renderNIC(res, props)
+		}
+	case pipKind:
+		var address netip.Addr
+		if res.pip != nil {
+			address = res.pip.address
+		}
+		renderPublicIP(res.loc, address, props)
+		if user := s.pipUser(res.id); user != "" {
+			props["ipConfiguration"] = ref(user)
+		}
+	}
+	return m
+}
+
+func (s *Server) renderNIC(res *resource, props map[string]any) {
+	configs := make([]any, 0, len(res.nic.configs))
+	for _, ic := range res.nic.configs {
+		configs = append(configs, map[string]any{
+			"id": res.id + "/ipConfigurations/" + ic.name, "name": ic.name, "etag": res.etag, "type": ipConfigType,
+			"properties": renderIPConfig(ic, res.state),
+		})
+	}
+	props["ipConfigurations"] = configs
+	if res.nic.nsg != "" {
+		props["networkSecurityGroup"] = ref(res.nic.nsg)
+	}
+	if vm := res.nic.vm; vm != "" {
+		props["virtualMachine"] = ref(vm)
+		props["primary"] = s.primaryNIC(vm) == key(res.id)
+		props["macAddress"] = macAddress(res.guid)
+	}
+	for _, name := range []string{"enableAcceleratedNetworking", "enableIPForwarding"} {
+		if _, ok := props[name]; !ok {
+			props[name] = false
+		}
+	}
+	if _, ok := props["nicType"]; !ok {
+		props["nicType"] = "Standard"
+	}
+}
+
+func renderIPConfig(ic *ipConfig, state string) map[string]any {
+	p := maps.Clone(ic.props)
+	if p == nil {
+		p = map[string]any{}
+	}
+	p["privateIPAddress"] = ic.address.String()
+	p["privateIPAllocationMethod"] = "Dynamic"
+	if ic.static {
+		p["privateIPAllocationMethod"] = "Static"
+	}
+	p["privateIPAddressVersion"] = "IPv4"
+	p["primary"] = ic.primary
+	p["provisioningState"] = state
+	p["subnet"] = ref(ic.subnet)
+	if ic.pip != "" {
+		p["publicIPAddress"] = ref(ic.pip)
+	}
+	return p
+}
+
+// renderPublicIP adds the properties Azure computes for a public IP address.
+func renderPublicIP(location string, address netip.Addr, props map[string]any) {
+	if address.IsValid() {
+		props["ipAddress"] = address.String()
+	}
+	props["publicIPAddressVersion"] = "IPv4"
+	if _, ok := props["publicIPAllocationMethod"]; !ok {
+		props["publicIPAllocationMethod"] = "Static"
+	}
+	if _, ok := props["idleTimeoutInMinutes"]; !ok {
+		props["idleTimeoutInMinutes"] = 4
+	}
+	if dns, _ := props["dnsSettings"].(map[string]any); dns != nil {
+		if label := str(dns, "domainNameLabel"); label != "" {
+			dns = maps.Clone(dns)
+			dns["fqdn"] = label + "." + location + ".cloudapp.azure.com"
+			props["dnsSettings"] = dns
+		}
+	}
+}
+
+// macAddress derives a stable MAC address in Azure's 00-0D-3A range from a GUID.
+func macAddress(guid string) string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(guid))
+	b := h.Sum(nil)
+	return fmt.Sprintf("00-0D-3A-%02X-%02X-%02X", b[1], b[2], b[3])
+}
+
+// allocPrivate takes the next free private address in subnet for holder. The caller holds s.mu.
+func (s *Server) allocPrivate(subnet, holder string) netip.Addr {
+	used := s.privateIPs[key(subnet)]
+	for {
+		s.nextPrivate = s.nextPrivate.Next()
+		if used[s.nextPrivate] == "" {
+			s.takePrivate(subnet, s.nextPrivate, holder)
+			return s.nextPrivate
+		}
+	}
+}
+
+func (s *Server) takePrivate(subnet string, a netip.Addr, holder string) {
+	used := s.privateIPs[key(subnet)]
+	if used == nil {
+		used = map[netip.Addr]string{}
+		s.privateIPs[key(subnet)] = used
+	}
+	used[a] = holder
+}
+
+func (s *Server) releasePrivate(subnet string, a netip.Addr) {
+	delete(s.privateIPs[key(subnet)], a)
+}
+
+// allocPublic takes the next free public address for holder. The caller holds s.mu.
+func (s *Server) allocPublic(holder string) netip.Addr {
+	for {
+		s.nextPublic = s.nextPublic.Next()
+		if s.publicIPs[s.nextPublic] == "" {
+			s.publicIPs[s.nextPublic] = holder
+			return s.nextPublic
+		}
+	}
+}
+
+// releaseNIC frees the addresses of the interface res. The caller holds s.mu.
+func (s *Server) releaseNIC(res *resource) {
+	for _, ic := range res.nic.configs {
+		s.releasePrivate(ic.subnet, ic.address)
+	}
+}
+
+// NetworkInterface is a snapshot of a network interface.
+type NetworkInterface struct {
+	ID string
+	// PrivateIPAddresses are the addresses of its IP configurations, in order.
+	PrivateIPAddresses []string
+	// VirtualMachine is the ID of the VM it is attached to, if any.
+	VirtualMachine string
+	Tags           map[string]string
+}
+
+// NetworkInterfaces returns the network interfaces the server holds, not
+// counting those of scale set VMs, ordered by ID.
+func (s *Server) NetworkInterfaces() []NetworkInterface {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []NetworkInterface
+	for _, res := range s.resources {
+		if res.nic == nil {
+			continue
+		}
+		n := NetworkInterface{ID: res.id, VirtualMachine: res.nic.vm, Tags: maps.Clone(res.tags)}
+		for _, ic := range res.nic.configs {
+			n.PrivateIPAddresses = append(n.PrivateIPAddresses, ic.address.String())
+		}
+		out = append(out, n)
+	}
+	slices.SortFunc(out, func(a, b NetworkInterface) int { return cmp.Compare(a.ID, b.ID) })
+	return out
+}
+
+// PublicIPAddress is a snapshot of a public IP address.
+type PublicIPAddress struct {
+	ID        string
+	IPAddress string
+	Tags      map[string]string
+}
+
+// PublicIPAddresses returns the public IP addresses the server holds, not
+// counting those of scale set VMs, ordered by ID.
+func (s *Server) PublicIPAddresses() []PublicIPAddress {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []PublicIPAddress
+	for _, res := range s.resources {
+		if res.pip != nil {
+			out = append(out, PublicIPAddress{ID: res.id, IPAddress: res.pip.address.String(), Tags: maps.Clone(res.tags)})
+		}
+	}
+	slices.SortFunc(out, func(a, b PublicIPAddress) int { return cmp.Compare(a.ID, b.ID) })
+	return out
+}
