@@ -214,7 +214,7 @@ func (s *Server) insertAddress(r *http.Request, opFault *apiError) (any, *apiErr
 	if err := validate(&want); err != nil {
 		return nil, err
 	}
-	reqID, err := requestID(r, "insert")
+	reqID, err := requestID(r)
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +252,7 @@ func (s *Server) getAddress(r *http.Request, _ *apiError) (any, *apiError) {
 }
 
 func (s *Server) deleteAddress(r *http.Request, opFault *apiError) (any, *apiError) {
-	reqID, err := requestID(r, "delete")
+	reqID, err := requestID(r)
 	if err != nil {
 		return nil, err
 	}
@@ -267,12 +267,15 @@ func (s *Server) deleteAddress(r *http.Request, opFault *apiError) (any, *apiErr
 	if !ok {
 		return nil, notFound(path)
 	}
-	if len(a.Users) > 0 {
-		return nil, inUse("address", path, a.Users[0])
-	}
 	if opFault == nil {
 		s.addresses[region].remove(name)
-		delete(s.ipHolders, ipKey(region, a.AddressType, a.Address))
+		key := ipKey(region, a.AddressType, a.Address)
+		if len(a.Users) > 0 {
+			// The API releases an address in use, and the IP stays with its user until the user goes.
+			s.ipHolders[key] = strings.TrimPrefix(a.Users[0], selfLinkBase)
+		} else {
+			delete(s.ipHolders, key)
+		}
 	}
 	return encoded(s.startOperation(r, reqID, "delete", path, a.ID, opFault, nil)), nil
 }
@@ -293,7 +296,7 @@ func (s *Server) setAddressLabels(r *http.Request, opFault *apiError) (any, *api
 	if err := validateLabels("labels", req.Labels); err != nil {
 		return nil, err
 	}
-	reqID, err := requestID(r, "setLabels")
+	reqID, err := requestID(r)
 	if err != nil {
 		return nil, err
 	}

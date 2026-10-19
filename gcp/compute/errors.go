@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/parallelworks/squall/fault"
@@ -74,9 +75,20 @@ func writeError(w http.ResponseWriter, e *apiError) {
 	}})
 }
 
+// writeJSON answers with body. A body that writes itself, such as a list
+// whose items are already encoded, is not encoded again.
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	// Once the status is sent, a client that went away is all a write error can mean.
+	if wt, ok := body.(io.WriterTo); ok {
+		w.WriteHeader(status)
+		_, _ = wt.WriteTo(w)
+		return
+	}
+	b, ok := body.(json.RawMessage)
+	if !ok {
+		b = encoded(body)
+	}
 	w.WriteHeader(status)
-	// The status is already sent, so a client that went away is all an error here can mean.
-	_ = json.NewEncoder(w).Encode(body)
+	_, _ = w.Write(b)
 }

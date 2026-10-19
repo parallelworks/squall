@@ -35,9 +35,10 @@
 //     the same method, gets that call's operation back without taking effect
 //     again. The server keeps the last 10,000 operations.
 //   - Images and snapshots must be registered with [Server.PutImage] and
-//     [Server.PutSnapshot]; a disk or instance made from any other fails with
-//     404. Machine and disk types are any well-formed name, in the zone of
-//     the call; nothing checks that they exist or fit together.
+//     [Server.PutSnapshot]; a disk or instance made from any other fails as
+//     the API fails one made from an image that does not exist. Machine and
+//     disk types are any well-formed name, in the zone of the call; nothing
+//     checks that they exist or fit together.
 //   - Zones come from a fixed set per region, which [WithZones] changes.
 //     Regional calls take any region.
 //   - Networks, subnetworks, service accounts, accelerators and other
@@ -49,9 +50,10 @@
 //   - A bulkInsert is all or nothing: if any name it asks for, or any disk it
 //     would create, already exists, its operation fails with
 //     VM_MIN_COUNT_NOT_REACHED and a RESOURCE_ALREADY_EXISTS error per
-//     conflict and creates nothing. It takes no fixed IP addresses or disk
-//     names, as the API does not, and ignores locationPolicy. A name pattern
-//     numbers new names after the highest existing match. A disk created with
+//     conflict and creates nothing, even where minCount would let the API
+//     create the rest. It takes no fixed IP addresses or disk names, as the
+//     API does not, and ignores locationPolicy. A name pattern numbers new
+//     names after the highest existing match. A disk created with
 //     an instance is named after it: the boot disk takes the instance's name,
 //     the others the instance's name and their index.
 //   - IP addresses come from 100.64.0.0/10 (external) and 10.0.0.0/8
@@ -60,7 +62,8 @@
 //     region, which stands in for its subnetwork. An instance's ephemeral
 //     external address is released when it stops and replaced when it starts.
 //     An instance may take a reserved address by its IP, which makes the
-//     address IN_USE until the instance goes.
+//     address IN_USE until the instance goes. Deleting the address then
+//     leaves the IP with the instance until it goes, as the API does.
 //   - List filters support the comparisons field = value, field != value, and
 //     the regular expressions field eq re and field ne re, on each
 //     resource's name, description, id, status and labels, among others. The
@@ -347,7 +350,12 @@ func decodeStrict(r *http.Request, v any) *apiError {
 	if err != nil {
 		return invalid("reading the request body: %v", err)
 	}
-	dec := json.NewDecoder(bytes.NewReader(body))
+	return unmarshalStrict(body, v)
+}
+
+// unmarshalStrict decodes data into v, rejecting fields v does not have.
+func unmarshalStrict(data []byte, v any) *apiError {
+	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		if name, ok := strings.CutPrefix(err.Error(), "json: unknown field "); ok {
@@ -373,7 +381,7 @@ func timestamp(t time.Time) string { return t.Format("2006-01-02T15:04:05.000-07
 // requestID returns the key a call's requestId replays under, scoped to its
 // project and method, or "" when the call has none. The API requires the ID to
 // be a non-zero UUID.
-func requestID(r *http.Request, method string) (string, *apiError) {
+func requestID(r *http.Request) (string, *apiError) {
 	id := r.URL.Query().Get("requestId")
 	if id == "" {
 		return "", nil
@@ -381,7 +389,7 @@ func requestID(r *http.Request, method string) (string, *apiError) {
 	if !validUUID(id) {
 		return "", invalid("Invalid value for field 'requestId': '%s'. The request ID must be a valid UUID other than the zero UUID.", id)
 	}
-	return r.PathValue("project") + "/" + method + "/" + id, nil
+	return r.PathValue("project") + " " + r.Pattern + " " + id, nil
 }
 
 func validUUID(id string) bool {

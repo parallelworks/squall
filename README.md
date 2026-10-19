@@ -88,7 +88,8 @@ it simplifies, the package documentation says so. For Compute Engine:
   supported: their aggregated list is always empty.
 - A `bulkInsert` is all or nothing. If a name it asks for, or a disk it would
   create, already exists, its operation fails with `VM_MIN_COUNT_NOT_REACHED`
-  and a `RESOURCE_ALREADY_EXISTS` error per conflict, and nothing is created.
+  and a `RESOURCE_ALREADY_EXISTS` error per conflict, and nothing is created,
+  even where `minCount` would let the API create the rest.
   It takes no fixed IP addresses or disk names, and ignores `locationPolicy`.
 - List filters support `field = value` and `field != value` comparisons joined
   by AND, OR and parentheses (OR binds tighter than AND), and the regular
@@ -100,7 +101,8 @@ it simplifies, the package documentation says so. For Compute Engine:
   never from routable ranges. An external address is unique across every
   project and region; an internal one is unique within its region, which stands
   in for its subnetwork. An instance's ephemeral external address is released
-  when it stops; a reserved one it takes is `IN_USE` until it goes.
+  when it stops; a reserved one it takes is `IN_USE` until it goes, and stays
+  with it until then if the address is deleted.
 - A fault rule's `Resource` for an insert is the resource being created, so a
   rule can target the insert of one name; for a `bulkInsert`, the first
   instance it names.

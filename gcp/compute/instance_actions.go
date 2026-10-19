@@ -44,7 +44,9 @@ func (s *Server) getInstance(r *http.Request, _ *apiError) (any, *apiError) {
 	if err != nil {
 		return nil, err
 	}
-	s.observe(inst.op)
+	if s.observe(inst.op); !s.instances[scopeOf(r)].has(inst.Name) {
+		return nil, notFound(instancePath(scopeOf(r), r.PathValue("name")))
+	}
 	return encoded(inst), nil
 }
 
@@ -72,7 +74,7 @@ func (s *Server) aggregatedInstances(r *http.Request, _ *apiError) (any, *apiErr
 }
 
 func (s *Server) deleteInstance(r *http.Request, opFault *apiError) (any, *apiError) {
-	reqID, err := requestID(r, "delete")
+	reqID, err := requestID(r)
 	if err != nil {
 		return nil, err
 	}
@@ -119,9 +121,11 @@ func (s *Server) removeInstance(zone string, inst *Instance) {
 
 // change is a validated change to an instance: now applies what takes effect
 // at once, and later, when not nil, what takes effect when its operation
-// finishes.
+// finishes. A change with fail set takes no effect: the API accepts the call
+// and its operation ends in that error.
 type change struct {
 	now, later func()
+	fail       *apiError
 }
 
 // instanceVerb handles a POST to an instance's custom method, such as stop.
@@ -141,7 +145,7 @@ func (s *Server) instanceVerb(verb string) handler {
 				return nil, err
 			}
 		}
-		reqID, err := requestID(r, verb)
+		reqID, err := requestID(r)
 		if err != nil {
 			return nil, err
 		}
@@ -179,7 +183,7 @@ func (s *Server) instanceVerb(verb string) handler {
 		if err != nil {
 			return nil, err
 		}
-		if opFault != nil {
+		if opFault = cmp.Or(opFault, c.fail); opFault != nil {
 			return encoded(s.startOperation(r, reqID, verb, path, inst.ID, opFault, nil)), nil
 		}
 		if c.now != nil {
@@ -237,12 +241,12 @@ func setInstanceLabels(inst *Instance, req setLabelsRequest) (change, *apiError)
 
 // setMachineType changes a stopped instance's machine type.
 func setMachineType(inst *Instance, zone, path, ref string) (change, *apiError) {
-	if inst.Status != statusTerminated {
-		return change{}, notReady(path)
-	}
 	link, err := zonalType(zone, "machineTypes", "machineType", ref)
 	if err != nil {
 		return change{}, err
+	}
+	if inst.Status != statusTerminated {
+		return change{fail: notReady(path)}, nil
 	}
 	return change{now: func() { inst.MachineType = link }}, nil
 }
@@ -256,7 +260,7 @@ func (s *Server) addAccessConfig(inst *Instance, region, nicName string, ac Acce
 		return change{}, invalid("Invalid value for field 'networkInterface': '%s'. The instance has no such network interface.", nicName)
 	}
 	if len(inst.NetworkInterfaces[i].AccessConfigs) > 0 {
-		return change{}, invalid("At most one access config currently supported.")
+		return change{}, &apiError{Status: http.StatusBadRequest, Reason: "badRequest", Message: "At most one access config currently supported."}
 	}
 	c, err := s.configureAccess(&ac, region, "resource", false)
 	if err != nil {
@@ -280,10 +284,16 @@ func (s *Server) attachDisk(inst *Instance, zone string, ad AttachedDisk) (chang
 	}
 	ad.Mode = cmp.Or(ad.Mode, "READ_WRITE")
 	d, err := s.attachable(zone, "resource.source", ad.Source, ad.Mode, inst.SelfLink)
+	if err != nil && err.Reason == "resourceInUseByAnotherResource" {
+		return change{fail: err}, nil
+	}
 	if err != nil {
 		return change{}, err
 	}
-	index := len(inst.Disks)
+	index := 0
+	for _, a := range inst.Disks {
+		index = max(index, a.Index+1)
+	}
 	ad.DeviceName = cmp.Or(ad.DeviceName, fmt.Sprintf("persistent-disk-%d", index))
 	if slices.ContainsFunc(inst.Disks, func(a AttachedDisk) bool { return a.DeviceName == ad.DeviceName }) {
 		return change{}, invalid("Invalid value for field 'resource.deviceName': '%s'. Device names must be unique.", ad.DeviceName)
@@ -299,7 +309,7 @@ func (s *Server) attachDisk(inst *Instance, zone string, ad AttachedDisk) (chang
 func (s *Server) detachDisk(inst *Instance, device string) (change, *apiError) {
 	i := slices.IndexFunc(inst.Disks, func(a AttachedDisk) bool { return a.DeviceName == device })
 	if i < 0 {
-		return change{}, invalid("Invalid value for field 'deviceName': '%s'. No attached disk found with the device name.", device)
+		return change{fail: &apiError{Status: http.StatusBadRequest, Reason: "invalidUsage", Message: fmt.Sprintf("No attached disk found with device name '%s'", device)}}, nil
 	}
 	if inst.Disks[i].Boot && inst.Status != statusTerminated {
 		return change{}, notReady(strings.TrimPrefix(inst.SelfLink, selfLinkBase))

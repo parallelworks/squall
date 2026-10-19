@@ -1,7 +1,6 @@
 package compute
 
 import (
-	"bytes"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -94,7 +93,7 @@ func (s *Server) insertPolicy(r *http.Request, opFault *apiError) (any, *apiErro
 	if len(want.GroupPlacementPolicy) == 0 {
 		return nil, invalid("Invalid value for field 'resource': a resource policy needs a groupPlacementPolicy.")
 	}
-	reqID, err := requestID(r, "insert")
+	reqID, err := requestID(r)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +131,7 @@ func (s *Server) getPolicy(r *http.Request, _ *apiError) (any, *apiError) {
 }
 
 func (s *Server) deletePolicy(r *http.Request, opFault *apiError) (any, *apiError) {
-	reqID, err := requestID(r, "delete")
+	reqID, err := requestID(r)
 	if err != nil {
 		return nil, err
 	}
@@ -190,7 +189,7 @@ func templatePath(global, name string) string { return global + "/instanceTempla
 
 // templateProperties returns the properties of the template ref names, for
 // a bulk insertion in project. The caller holds s.mu.
-func (s *Server) templateProperties(project, ref string) (*Instance, *apiError) {
+func (s *Server) templateProperties(project, ref string) (json.RawMessage, *apiError) {
 	if !strings.Contains(ref, "/") {
 		ref = "global/instanceTemplates/" + ref
 	}
@@ -202,11 +201,7 @@ func (s *Server) templateProperties(project, ref string) (*Instance, *apiError) 
 	if !ok {
 		return nil, notFound(templatePath(global, name))
 	}
-	var props Instance
-	if err := json.Unmarshal(t.Properties, &props); err != nil {
-		return nil, invalid("Invalid value for field 'resource.sourceInstanceTemplate': %v", err)
-	}
-	return &props, nil
+	return t.Properties, nil
 }
 
 func (s *Server) insertTemplate(r *http.Request, opFault *apiError) (any, *apiError) {
@@ -218,15 +213,13 @@ func (s *Server) insertTemplate(r *http.Request, opFault *apiError) (any, *apiEr
 		return nil, invalid("Invalid value for field 'resource.name': '%s'. Must be a match of regex '(?:[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?)'", want.Name)
 	}
 	var props Instance
-	dec := json.NewDecoder(bytes.NewReader(want.Properties))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&props); err != nil || props.MachineType == "" || props.Name != "" {
+	if err := unmarshalStrict(want.Properties, &props); err != nil || props.MachineType == "" || props.Name != "" {
 		return nil, invalid("Invalid value for field 'resource.properties': the properties need a machineType and take the fields of an instance's properties.")
 	}
 	if err := validateLabels("resource.properties.labels", props.Labels); err != nil {
 		return nil, err
 	}
-	reqID, err := requestID(r, "insert")
+	reqID, err := requestID(r)
 	if err != nil {
 		return nil, err
 	}
@@ -263,7 +256,7 @@ func (s *Server) getTemplate(r *http.Request, _ *apiError) (any, *apiError) {
 }
 
 func (s *Server) deleteTemplate(r *http.Request, opFault *apiError) (any, *apiError) {
-	reqID, err := requestID(r, "delete")
+	reqID, err := requestID(r)
 	if err != nil {
 		return nil, err
 	}

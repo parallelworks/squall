@@ -103,22 +103,28 @@ func (s *Server) resolveSource(project, field, image, snapshot string) (source, 
 				}
 			}
 			if newest == nil {
-				return source{}, notFound(path)
+				return source{}, missingSource(field, "sourceImage", image, "image")
 			}
 			return source{image: newest.SelfLink, imageID: newest.ID, sizeGB: newest.DiskSizeGB}, nil
 		}
 		img, ok := s.images[path]
 		if !ok {
-			return source{}, notFound(path)
+			return source{}, missingSource(field, "sourceImage", image, "image")
 		}
 		return source{image: img.SelfLink, imageID: img.ID, sizeGB: img.DiskSizeGB}, nil
 	case snapshot != "":
 		path := relPath(snapshot, project)
 		snap, ok := s.snapshots[path]
 		if !ok {
-			return source{}, notFound(path)
+			return source{}, missingSource(field, "sourceSnapshot", snapshot, "snapshot")
 		}
 		return source{snapshot: snap.SelfLink, sizeGB: snap.DiskSizeGB}, nil
 	}
 	return source{sizeGB: defaultDiskSizeGB}, nil
+}
+
+// missingSource is the error for a disk source that does not exist, which the
+// API reports as an invalid field rather than a missing resource.
+func missingSource(field, name, ref, kind string) *apiError {
+	return invalid("Invalid value for field '%s.%s': '%s'. The referenced %s resource cannot be found.", field, name, ref, kind)
 }

@@ -74,8 +74,7 @@ func diskPath(zone, name string) string { return zone + "/disks/" + name }
 func zonalType(zone, kind, field, ref string) (string, *apiError) {
 	name := ref
 	if strings.Contains(ref, "/") {
-		project, _, _ := strings.Cut(strings.TrimPrefix(zone, "projects/"), "/")
-		inZone, n, ok := strings.Cut(relPath(ref, project), "/"+kind+"/")
+		inZone, n, ok := strings.Cut(relPath(ref, projectOf(zone)), "/"+kind+"/")
 		if !ok || inZone != zone {
 			return "", invalid("Invalid value for field '%s': '%s'. The type must be in zone '%s'.", field, ref, zone)
 		}
@@ -97,8 +96,7 @@ func (s *Server) newDisk(zone, field string, d Disk) (*Disk, *apiError) {
 	if err := validateLabels(field+".labels", d.Labels); err != nil {
 		return nil, err
 	}
-	project, _, _ := strings.Cut(strings.TrimPrefix(zone, "projects/"), "/")
-	src, err := s.resolveSource(project, field, d.SourceImage, d.SourceSnapshot)
+	src, err := s.resolveSource(projectOf(zone), field, d.SourceImage, d.SourceSnapshot)
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +126,7 @@ func (s *Server) insertDisk(r *http.Request, opFault *apiError) (any, *apiError)
 	if err := decodeStrict(r, &want); err != nil {
 		return nil, err
 	}
-	reqID, err := requestID(r, "insert")
+	reqID, err := requestID(r)
 	if err != nil {
 		return nil, err
 	}
@@ -151,10 +149,11 @@ func (s *Server) insertDisk(r *http.Request, opFault *apiError) (any, *apiError)
 	}
 	d.Status = diskCreating
 	scoped(s.disks, zone).put(d.Name, d)
-	d.op = s.startOperation(r, reqID, "insert", path, d.ID, nil, func() {
+	op := s.startOperation(r, reqID, "insert", path, d.ID, nil, func() {
 		d.Status, d.op = diskReady, nil
 	})
-	return encoded(d.op), nil
+	track(op, nil, []*Disk{d}, false)
+	return encoded(op), nil
 }
 
 // lookupDisk returns the disk r names. The caller holds s.mu.
@@ -174,12 +173,14 @@ func (s *Server) getDisk(r *http.Request, _ *apiError) (any, *apiError) {
 	if err != nil {
 		return nil, err
 	}
-	s.observe(d.op)
+	if s.observe(d.op); !s.disks[scopeOf(r)].has(d.Name) {
+		return nil, notFound(diskPath(scopeOf(r), d.Name))
+	}
 	return encoded(d), nil
 }
 
 func (s *Server) deleteDisk(r *http.Request, opFault *apiError) (any, *apiError) {
-	reqID, err := requestID(r, "delete")
+	reqID, err := requestID(r)
 	if err != nil {
 		return nil, err
 	}
@@ -192,7 +193,12 @@ func (s *Server) deleteDisk(r *http.Request, opFault *apiError) (any, *apiError)
 	if err != nil {
 		return nil, err
 	}
-	s.finish(d.op)
+	if d.op != nil {
+		s.finish(d.op)
+		if d, err = s.lookupDisk(r); err != nil {
+			return nil, err
+		}
+	}
 	path := strings.TrimPrefix(d.SelfLink, selfLinkBase)
 	if len(d.Users) > 0 {
 		return nil, inUse("disk", path, strings.TrimPrefix(d.Users[0], selfLinkBase))
@@ -202,11 +208,12 @@ func (s *Server) deleteDisk(r *http.Request, opFault *apiError) (any, *apiError)
 	}
 	d.Status = diskDeleting
 	zone := scopeOf(r)
-	d.op = s.startOperation(r, reqID, "delete", path, d.ID, nil, func() {
+	op := s.startOperation(r, reqID, "delete", path, d.ID, nil, func() {
 		s.disks[zone].remove(d.Name)
 		d.op = nil
 	})
-	return encoded(d.op), nil
+	track(op, nil, []*Disk{d}, false)
+	return encoded(op), nil
 }
 
 func (s *Server) listDisks(r *http.Request, _ *apiError) (any, *apiError) {

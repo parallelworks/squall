@@ -62,8 +62,8 @@ type bulkInsertMetadata struct {
 type bulkInsertStatus struct {
 	Status                string `json:"status"`
 	TargetVMCount         int    `json:"targetVmCount"`
-	CreatedVMCount        int    `json:"createdVmCount"`
-	FailedToCreateVMCount int    `json:"failedToCreateVmCount"`
+	CreatedVMCount        int    `json:"createdVmCount,omitzero"`
+	FailedToCreateVMCount int    `json:"failedToCreateVmCount,omitzero"`
 }
 
 // scopeOf is the zone, region or global scope a call's path names, such as
@@ -126,7 +126,7 @@ func (s *Server) startOperation(r *http.Request, requestID, opType, target strin
 		}
 		op.Error = &operationErrors{errs}
 		op.HTTPErrorStatusCode = failure.Status
-		op.HTTPErrorMessage = upperSnake(http.StatusText(failure.Status))
+		op.HTTPErrorMessage = strings.ToUpper(http.StatusText(failure.Status))
 		s.done(op)
 	case complete == nil || s.settleAfter == 0:
 		if complete != nil {
@@ -248,9 +248,8 @@ func (s *Server) Settle() {
 	}
 }
 
-// upperSnake spells a reason or status text as the API's error codes are:
-// "backendError" and "Internal Server Error" become "BACKEND_ERROR" and
-// "INTERNAL_SERVER_ERROR".
+// upperSnake spells a reason as the API's error codes are: "backendError"
+// becomes "BACKEND_ERROR".
 func upperSnake(s string) string {
 	var b strings.Builder
 	prev := ' '

@@ -192,6 +192,7 @@ func TestBulkInsertCreatesRunningInstances(t *testing.T) {
 		t.Fatal(err)
 	}
 	if p := op.Proto(); p.GetOperationType() != "bulkInsert" || !strings.HasSuffix(p.GetZone(), "/zones/"+zone) ||
+		p.GetTargetLink() != "https://www.googleapis.com/compute/v1/projects/p" ||
 		p.GetInstancesBulkInsertOperationMetadata().GetPerLocationStatus()["zones/"+zone].GetCreatedVmCount() != 2 {
 		t.Errorf("operation = %v", p)
 	}
@@ -276,9 +277,9 @@ func TestBulkInsertRetriedAfterALostResponse(t *testing.T) {
 	}
 	// Without a request ID the retry is a new request, and the names are taken.
 	err := c.bulkInsert(t, req)
-	if apiCode(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "RESOURCE_ALREADY_EXISTS") ||
+	if apiCode(err) != http.StatusConflict || !strings.Contains(err.Error(), "CONFLICT") || !strings.Contains(err.Error(), "RESOURCE_ALREADY_EXISTS") ||
 		!strings.Contains(err.Error(), "VM_MIN_COUNT_NOT_REACHED") || !strings.Contains(err.Error(), "already exists") {
-		t.Fatalf("retry = %v, want a 400 operation error naming the existing instances", err)
+		t.Fatalf("retry = %v, want a 409 operation error naming the existing instances", err)
 	}
 	if got := faults.Injected(); len(got) != 1 || got[0].Call.Resource != "projects/p/zones/us-east1-b/instances/node-1" {
 		t.Errorf("injected = %v", got)
@@ -315,7 +316,10 @@ func TestInstanceInsertErrors(t *testing.T) {
 		{"a machine type in another zone", func(i *computepb.Instance) { i.MachineType = new("zones/us-east1-c/machineTypes/n2-standard-2") }, http.StatusBadRequest},
 		{"an unknown image", func(i *computepb.Instance) {
 			i.Disks[0].InitializeParams.SourceImage = new("projects/debian-cloud/global/images/missing")
-		}, http.StatusNotFound},
+		}, http.StatusBadRequest},
+		{"an unknown image family", func(i *computepb.Instance) {
+			i.Disks[0].InitializeParams.SourceImage = new("projects/debian-cloud/global/images/family/missing")
+		}, http.StatusBadRequest},
 		{"a subnetwork in another region", func(i *computepb.Instance) {
 			i.NetworkInterfaces[0].Subnetwork = new("regions/europe-west1/subnetworks/sub")
 		}, http.StatusBadRequest},
@@ -339,6 +343,12 @@ func TestInstanceInsertErrors(t *testing.T) {
 	_, err := c.instances.Insert(t.Context(), &computepb.InsertInstanceRequest{Project: project, Zone: "us-east1-z", InstanceResource: single("vm", "s")})
 	if apiCode(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "Unknown zone") {
 		t.Errorf("insert in an unknown zone = %v", err)
+	}
+	_, err = c.instances.Insert(t.Context(), &computepb.InsertInstanceRequest{
+		Project: project, Zone: zone, SourceInstanceTemplate: new("global/instanceTemplates/t"), InstanceResource: single("vm", "s"),
+	})
+	if apiCode(err) != http.StatusBadRequest {
+		t.Errorf("insert from a template = %v, want HTTP 400 rather than the template ignored", err)
 	}
 }
 
@@ -448,8 +458,8 @@ func TestStopStartAndSetMachineType(t *testing.T) {
 		}
 		return op.Wait(t.Context())
 	}
-	if err := setType("zones/" + zone + "/machineTypes/n2-standard-8"); apiCode(err) != http.StatusBadRequest {
-		t.Fatalf("setMachineType while running = %v, want HTTP 400", err)
+	if err := setType("zones/" + zone + "/machineTypes/n2-standard-8"); apiCode(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "RESOURCE_NOT_READY") {
+		t.Fatalf("setMachineType while running = %v, want an operation that fails with RESOURCE_NOT_READY", err)
 	}
 	stop, err := c.instances.Stop(t.Context(), &computepb.StopInstanceRequest{Project: project, Zone: zone, Instance: "vm-1"})
 	if err != nil {
@@ -552,22 +562,46 @@ func TestAddAccessConfigClaimsAReservedAddress(t *testing.T) {
 	if a, _ := c.server.LookupAddress(project, region, "ip-1"); a.Status != "IN_USE" || len(a.Users) != 1 {
 		t.Fatalf("address = %+v", a)
 	}
-	if err := add("nic0", reserved.Address); apiCode(err) != http.StatusBadRequest {
-		t.Fatalf("a second access config = %v, want HTTP 400", err)
+	if err := add("nic0", reserved.Address); apiCode(err) != http.StatusBadRequest || apiReason(err) != "badRequest" {
+		t.Fatalf("a second access config = %v, want HTTP 400 badRequest", err)
 	}
-	_, err := c.addresses.Delete(t.Context(), &computepb.DeleteAddressRequest{Project: project, Region: region, Address: "ip-1"})
-	if apiCode(err) != http.StatusBadRequest {
-		t.Fatalf("deleting an address in use = %v, want HTTP 400", err)
+	deleteInstance := func(name string) {
+		t.Helper()
+		op, err := c.instances.Delete(t.Context(), &computepb.DeleteInstanceRequest{Project: project, Zone: zone, Instance: name})
+		if err == nil {
+			err = op.Wait(t.Context())
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
-	op, err := c.instances.Delete(t.Context(), &computepb.DeleteInstanceRequest{Project: project, Zone: zone, Instance: "vm-1"})
+	deleteInstance("vm-1")
+	if a, _ := c.server.LookupAddress(project, region, "ip-1"); a.Status != "RESERVED" || len(a.Users) != 0 {
+		t.Fatalf("address after the instance went = %+v", a)
+	}
+
+	// Deleting an address an instance uses releases it, and the IP stays with the instance until it goes.
+	other := single("vm-2", "s")
+	other.NetworkInterfaces[0].AccessConfigs[0].NatIP = new(reserved.Address)
+	if err := c.insert(t, other); err != nil {
+		t.Fatal(err)
+	}
+	op, err := c.addresses.Delete(t.Context(), &computepb.DeleteAddressRequest{Project: project, Region: region, Address: "ip-1"})
 	if err == nil {
 		err = op.Wait(t.Context())
 	}
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("deleting an address in use: %v", err)
 	}
-	if a, _ := c.server.LookupAddress(project, region, "ip-1"); a.Status != "RESERVED" || len(a.Users) != 0 {
-		t.Fatalf("address after the instance went = %+v", a)
+	if got, _ := c.get(t, "vm-2"); got.GetNetworkInterfaces()[0].GetAccessConfigs()[0].GetNatIP() != reserved.Address {
+		t.Fatalf("access config after the address went = %v", got.GetNetworkInterfaces()[0].GetAccessConfigs())
+	}
+	if err := insert(t, c.addresses, &computepb.Address{Name: new("ip-2"), Address: new(reserved.Address)}); apiCode(err) != http.StatusBadRequest {
+		t.Fatalf("reserving the IP the instance still holds = %v, want HTTP 400", err)
+	}
+	deleteInstance("vm-2")
+	if err := insert(t, c.addresses, &computepb.Address{Name: new("ip-2"), Address: new(reserved.Address)}); err != nil {
+		t.Fatalf("reserving the IP once the instance went: %v", err)
 	}
 }
 
@@ -598,6 +632,19 @@ func TestAttachAndDetachDisk(t *testing.T) {
 	if d, _ := c.server.LookupDisk(project, zone, "data-1"); len(d.Users) != 1 {
 		t.Fatalf("users = %v", d.Users)
 	}
+	if err := c.insert(t, single("vm-2", "s")); err != nil {
+		t.Fatal(err)
+	}
+	again, err := c.instances.AttachDisk(t.Context(), &computepb.AttachDiskInstanceRequest{
+		Project: project, Zone: zone, Instance: "vm-2",
+		AttachedDiskResource: &computepb.AttachedDisk{Source: new("projects/p/zones/" + zone + "/disks/data-1")},
+	})
+	if err != nil {
+		t.Fatalf("attaching a disk in use = %v, want the call accepted and its operation failed", err)
+	}
+	if err := again.Wait(t.Context()); apiCode(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "RESOURCE_IN_USE_BY_ANOTHER_RESOURCE") {
+		t.Fatalf("attaching a disk in use = %v, want an operation that fails with RESOURCE_IN_USE_BY_ANOTHER_RESOURCE", err)
+	}
 	detach := func(device string) error {
 		op, err := c.instances.DetachDisk(t.Context(), &computepb.DetachDiskInstanceRequest{Project: project, Zone: zone, Instance: "vm-1", DeviceName: device})
 		if err != nil {
@@ -608,8 +655,9 @@ func TestAttachAndDetachDisk(t *testing.T) {
 	if err := detach("data-1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := detach("data-1"); apiCode(err) != http.StatusBadRequest {
-		t.Fatalf("detaching it again = %v, want HTTP 400", err)
+	if err := detach("data-1"); apiCode(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "INVALID_USAGE") ||
+		!strings.Contains(err.Error(), "No attached disk found with device name 'data-1'") {
+		t.Fatalf("detaching it again = %v, want an operation that fails with INVALID_USAGE", err)
 	}
 	if d, _ := c.server.LookupDisk(project, zone, "data-1"); len(d.Users) != 0 {
 		t.Fatalf("users after detach = %v", d.Users)
@@ -847,7 +895,7 @@ func createNodes(t *testing.T, c *clients, session string, nodes ...string) erro
 			return nil
 		}
 		last = err
-		if apiCode(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "RESOURCE_ALREADY_EXISTS") {
+		if apiCode(err) != http.StatusConflict || !strings.Contains(err.Error(), "RESOURCE_ALREADY_EXISTS") {
 			continue
 		}
 		filter := fmt.Sprintf("labels.session-id=%s AND (name=%s)", session, strings.Join(nodes, " OR name="))
@@ -878,5 +926,120 @@ func TestCreateNodesConvergesUnderRandomFaults(t *testing.T) {
 		if got := c.server.Disks(); len(got) != 3 {
 			t.Fatalf("seed %d: %d disks, want one boot disk per node", seed, len(got))
 		}
+	}
+}
+
+func TestAReadThatFinishesADeleteNoLongerSeesIt(t *testing.T) {
+	c := setup(t, compute.WithSettleAfter(1))
+	for _, name := range []string{"vm-1", "vm-2", "vm-3"} {
+		if _, err := c.instances.Insert(t.Context(), &computepb.InsertInstanceRequest{Project: project, Zone: zone, InstanceResource: single(name, "s")}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.server.Settle()
+	for _, name := range []string{"vm-1", "vm-2"} {
+		if _, err := c.instances.Delete(t.Context(), &computepb.DeleteInstanceRequest{Project: project, Zone: zone, Instance: name}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var lists []string
+	for range 2 {
+		insts, err := c.list(t, "", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lists = append(lists, names(insts))
+	}
+	if want := "[[vm-1 vm-2 vm-3] [vm-3]]"; fmt.Sprint(lists) != want {
+		t.Errorf("lists = %v, want %s", lists, want)
+	}
+
+	if _, err := c.instances.Delete(t.Context(), &computepb.DeleteInstanceRequest{Project: project, Zone: zone, Instance: "vm-3"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := c.get(t, "vm-3"); err != nil || got.GetStatus() != "STOPPING" {
+		t.Fatalf("get while deleting = %v, %v", got, err)
+	}
+	if _, err := c.get(t, "vm-3"); apiCode(err) != http.StatusNotFound {
+		t.Errorf("the get that finishes the delete = %v, want HTTP 404", err)
+	}
+}
+
+func TestRequestIDsAreScopedToTheirMethod(t *testing.T) {
+	c := setup(t)
+	id := new("1b4e28ba-2fa1-11d2-883f-0016d3cca427")
+	op, err := c.instances.Insert(t.Context(), &computepb.InsertInstanceRequest{Project: project, Zone: zone, RequestId: id, InstanceResource: single("vm-1", "s")})
+	if err == nil {
+		err = op.Wait(t.Context())
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	op, err = c.disks.Insert(t.Context(), &computepb.InsertDiskRequest{Project: project, Zone: zone, RequestId: id, DiskResource: &computepb.Disk{Name: new("data-1")}})
+	if err == nil {
+		err = op.Wait(t.Context())
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c.server.LookupDisk(project, zone, "data-1"); !ok {
+		t.Error("a disk insert that reuses an instance insert's request ID was not applied")
+	}
+}
+
+func TestAttachAfterDetachPicksAFreeDeviceName(t *testing.T) {
+	c := setup(t)
+	inst := single("vm-1", "s")
+	inst.Disks = append(inst.Disks,
+		&computepb.AttachedDisk{InitializeParams: &computepb.AttachedDiskInitializeParams{}},
+		&computepb.AttachedDisk{InitializeParams: &computepb.AttachedDiskInitializeParams{}},
+	)
+	if err := c.insert(t, inst); err != nil {
+		t.Fatal(err)
+	}
+	op, err := c.disks.Insert(t.Context(), &computepb.InsertDiskRequest{Project: project, Zone: zone, DiskResource: &computepb.Disk{Name: new("data-1")}})
+	if err == nil {
+		err = op.Wait(t.Context())
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	op, err = c.instances.DetachDisk(t.Context(), &computepb.DetachDiskInstanceRequest{Project: project, Zone: zone, Instance: "vm-1", DeviceName: "persistent-disk-1"})
+	if err == nil {
+		err = op.Wait(t.Context())
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	op, err = c.instances.AttachDisk(t.Context(), &computepb.AttachDiskInstanceRequest{
+		Project: project, Zone: zone, Instance: "vm-1",
+		AttachedDiskResource: &computepb.AttachedDisk{Source: new("zones/" + zone + "/disks/data-1")},
+	})
+	if err == nil {
+		err = op.Wait(t.Context())
+	}
+	if err != nil {
+		t.Fatalf("attaching without a device name after a detach: %v", err)
+	}
+	got, _ := c.get(t, "vm-1")
+	var devices []string
+	for _, d := range got.GetDisks() {
+		devices = append(devices, fmt.Sprintf("%s:%d", d.GetDeviceName(), d.GetIndex()))
+	}
+	if want := "[persistent-disk-0:0 persistent-disk-2:2 persistent-disk-3:3]"; fmt.Sprint(devices) != want {
+		t.Errorf("disks = %v, want %s", devices, want)
+	}
+}
+
+func TestBulkInsertRejectsDiskNamesItWouldCreateTwice(t *testing.T) {
+	c := setup(t)
+	req := bulkRequest("s", "vm", "vm-1")
+	props := req.BulkInsertInstanceResourceResource.InstanceProperties
+	props.Disks = append(props.Disks, &computepb.AttachedDisk{AutoDelete: new(true), InitializeParams: &computepb.AttachedDiskInitializeParams{}})
+	if err := c.bulkInsert(t, req); apiCode(err) != http.StatusConflict || !strings.Contains(err.Error(), "disks/vm-1' already exists") {
+		t.Fatalf("bulkInsert = %v, want a 409 operation error naming disk vm-1", err)
+	}
+	if got := len(c.server.Disks()); got != 0 {
+		t.Errorf("%d disks, want none", got)
 	}
 }

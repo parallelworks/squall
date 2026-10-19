@@ -1,8 +1,12 @@
 package compute
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
+	"iter"
 	"maps"
+	"net"
 	"net/http"
 	"slices"
 	"strconv"
@@ -21,6 +25,11 @@ func (c *collection[T]) put(name string, v T) {
 		c.names = slices.Insert(c.names, i, name)
 	}
 	c.byName[name] = v
+}
+
+func (c *collection[T]) has(name string) bool {
+	_, ok := c.byName[name]
+	return ok
 }
 
 func (c *collection[T]) remove(name string) {
@@ -117,46 +126,116 @@ func parseListQuery(r *http.Request, fields fieldSet) (listQuery, *apiError) {
 
 // resourceList is a list response in the API's JSON shape.
 type resourceList struct {
-	Kind          string            `json:"kind"`
-	ID            string            `json:"id"`
-	Items         []json.RawMessage `json:"items,omitzero"`
-	SelfLink      string            `json:"selfLink"`
-	NextPageToken string            `json:"nextPageToken,omitzero"`
+	Kind          string `json:"kind"`
+	ID            string `json:"id"`
+	SelfLink      string `json:"selfLink"`
+	NextPageToken string `json:"nextPageToken,omitzero"`
+	// items is the JSON of the page's items, encoded under s.mu, or nil.
+	items []byte
+}
+
+// WriteTo writes l's JSON, with the items it already holds as JSON.
+func (l *resourceList) WriteTo(w io.Writer) (int64, error) {
+	type head resourceList
+	return writeWithItems(w, (*head)(l), l.items)
 }
 
 // aggregatedList is an aggregatedList response: items grouped by scope, such
 // as "zones/us-east1-b", under a key naming the resource, such as "instances".
 type aggregatedList struct {
-	Kind          string                                  `json:"kind"`
-	ID            string                                  `json:"id"`
-	Items         map[string]map[string][]json.RawMessage `json:"items,omitzero"`
-	SelfLink      string                                  `json:"selfLink"`
-	NextPageToken string                                  `json:"nextPageToken,omitzero"`
+	Kind          string `json:"kind"`
+	ID            string `json:"id"`
+	SelfLink      string `json:"selfLink"`
+	NextPageToken string `json:"nextPageToken,omitzero"`
+	// items is the JSON of the page's items object, encoded under s.mu, or nil.
+	items []byte
+}
+
+// WriteTo writes l's JSON, with the items it already holds as JSON.
+func (l *aggregatedList) WriteTo(w io.Writer) (int64, error) {
+	type head aggregatedList
+	return writeWithItems(w, (*head)(l), l.items)
+}
+
+// writeWithItems writes head's JSON with an "items" member holding items,
+// which is already JSON, without copying the items.
+func writeWithItems(w io.Writer, head any, items []byte) (int64, error) {
+	b, err := json.Marshal(head)
+	if err != nil {
+		return 0, err
+	}
+	parts := net.Buffers{b}
+	if items != nil {
+		parts = net.Buffers{b[:len(b)-1], []byte(`,"items":`), items, []byte("}")}
+	}
+	return parts.WriteTo(w)
+}
+
+// itemWriter encodes a list's items into one buffer, so a list costs no
+// allocation per item.
+type itemWriter struct {
+	buf bytes.Buffer
+	enc *json.Encoder
+}
+
+// add appends v's JSON.
+func (w *itemWriter) add(v any) {
+	if w.enc == nil {
+		w.enc = json.NewEncoder(&w.buf)
+	}
+	if err := w.enc.Encode(v); err != nil {
+		panic("squall: encoding a resource: " + err.Error())
+	}
+	w.buf.Truncate(w.buf.Len() - 1)
+}
+
+// scan yields the resources of c from index start on that filter matches.
+// seen, when not nil, is called for each before the filter applies, and a
+// resource it finishes deleting is skipped. The caller holds s.mu.
+func scan[T filterable](c *collection[T], start int, filter *expr, seen func(T)) iter.Seq2[string, T] {
+	return func(yield func(string, T) bool) {
+		for i := start; i < len(c.names); i++ {
+			name := c.names[i]
+			v := c.byName[name]
+			if seen != nil {
+				if seen(v); !c.has(name) {
+					i = afterName(c.names, name) - 1
+					continue
+				}
+			}
+			if filter.matches(v) && !yield(name, v) {
+				return
+			}
+		}
+	}
 }
 
 // listScope answers a list of c, the collection at path. seen, when not nil,
-// is called for each resource the page scans, before the filter applies. The
-// caller holds s.mu.
+// is called for each resource the page scans, as scan calls it. The caller
+// holds s.mu.
 func listScope[T filterable](c *collection[T], q listQuery, kind, path string, seen func(T)) *resourceList {
 	list := &resourceList{Kind: kind, ID: path, SelfLink: selfLinkBase + path}
 	if c == nil {
 		return list
 	}
-	last := ""
-	for _, name := range c.names[afterName(c.names, q.after):] {
-		v := c.byName[name]
-		if seen != nil {
-			seen(v)
-		}
-		if !q.filter.matches(v) {
-			continue
-		}
-		if len(list.Items) == q.limit {
+	var items itemWriter
+	n, last := 0, ""
+	for name, v := range scan(c, afterName(c.names, q.after), q.filter, seen) {
+		if n == q.limit {
 			list.NextPageToken = last
 			break
 		}
-		list.Items = append(list.Items, encoded(v))
-		last = name
+		if n == 0 {
+			items.buf.WriteByte('[')
+		} else {
+			items.buf.WriteByte(',')
+		}
+		items.add(v)
+		n, last = n+1, name
+	}
+	if n > 0 {
+		items.buf.WriteByte(']')
+		list.items = items.buf.Bytes()
 	}
 	return list
 }
@@ -182,6 +261,7 @@ func listAggregated[T filterable](m map[string]*collection[T], project string, q
 	if i := strings.LastIndexByte(q.after, '/'); i >= 0 {
 		afterScope, afterItem = prefix+q.after[:i], q.after[i+1:]
 	}
+	var items itemWriter
 	n, last := 0, ""
 	for _, scope := range slices.Sorted(maps.Keys(m)) {
 		if !strings.HasPrefix(scope, prefix) || scope < afterScope {
@@ -191,28 +271,36 @@ func listAggregated[T filterable](m map[string]*collection[T], project string, q
 		if scope == afterScope {
 			start = afterName(c.names, afterItem)
 		}
-		short := strings.TrimPrefix(scope, prefix)
-		for _, name := range c.names[start:] {
-			v := c.byName[name]
-			if seen != nil {
-				seen(v)
-			}
-			if !q.filter.matches(v) {
-				continue
-			}
+		short, inScope := strings.TrimPrefix(scope, prefix), 0
+		for name, v := range scan(c, start, q.filter, seen) {
 			if n == q.limit {
 				list.NextPageToken = last
-				return list
+				break
 			}
-			if list.Items == nil {
-				list.Items = map[string]map[string][]json.RawMessage{}
+			switch {
+			case n == 0:
+				items.buf.WriteByte('{')
+			case inScope == 0:
+				items.buf.WriteString("]},")
+			default:
+				items.buf.WriteByte(',')
 			}
-			if list.Items[short] == nil {
-				list.Items[short] = map[string][]json.RawMessage{}
+			if inScope == 0 {
+				items.add(short)
+				items.buf.WriteString(":{")
+				items.add(key)
+				items.buf.WriteString(":[")
 			}
-			list.Items[short][key] = append(list.Items[short][key], encoded(v))
-			n, last = n+1, short+"/"+name
+			items.add(v)
+			n, last, inScope = n+1, short+"/"+name, inScope+1
 		}
+		if list.NextPageToken != "" {
+			break
+		}
+	}
+	if n > 0 {
+		items.buf.WriteString("]}}")
+		list.items = items.buf.Bytes()
 	}
 	return list
 }

@@ -635,7 +635,12 @@ func (s *Server) insertInstance(r *http.Request, opFault *apiError) (any, *apiEr
 	if err := decodeStrict(r, &in); err != nil {
 		return nil, err
 	}
-	reqID, err := requestID(r, "insert")
+	for _, param := range []string{"sourceInstanceTemplate", "sourceMachineImage"} {
+		if r.URL.Query().Has(param) {
+			return nil, invalid("Invalid value for field '%s': squall does not support creating an instance from a template or machine image.", param)
+		}
+	}
+	reqID, err := requestID(r)
 	if err != nil {
 		return nil, err
 	}
@@ -674,7 +679,7 @@ type bulkInsertInput struct {
 	MinCount               int64                       `json:"minCount,string"`
 	NamePattern            string                      `json:"namePattern"`
 	PerInstanceProperties  map[string]perInstanceInput `json:"perInstanceProperties"`
-	InstanceProperties     *Instance                   `json:"instanceProperties"`
+	InstanceProperties     json.RawMessage             `json:"instanceProperties"`
 	SourceInstanceTemplate string                      `json:"sourceInstanceTemplate"`
 	LocationPolicy         json.RawMessage             `json:"locationPolicy"`
 }
@@ -696,6 +701,43 @@ func withBulkTarget(r *http.Request, collection string) string {
 		return collection
 	}
 	return collection + "/" + slices.Min(slices.Collect(maps.Keys(in.PerInstanceProperties)))
+}
+
+// mergePatch applies patch to target as a JSON Merge Patch (RFC 7396), as a
+// bulkInsert applies its instanceProperties to its sourceInstanceTemplate.
+func mergePatch(target, patch json.RawMessage) json.RawMessage {
+	if len(patch) == 0 {
+		return target
+	}
+	return encoded(mergeValues(decodeValue(target), decodeValue(patch)))
+}
+
+func mergeValues(target, patch any) any {
+	p, ok := patch.(map[string]any)
+	if !ok {
+		return patch
+	}
+	t, ok := target.(map[string]any)
+	if !ok {
+		t = map[string]any{}
+	}
+	for k, v := range p {
+		if v == nil {
+			delete(t, k)
+		} else {
+			t[k] = mergeValues(t[k], v)
+		}
+	}
+	return t
+}
+
+// decodeValue decodes JSON the server has already checked, keeping numbers exact.
+func decodeValue(b []byte) any {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	var v any
+	_ = dec.Decode(&v)
+	return v
 }
 
 // bulkNames are the names a bulkInsert creates: those it lists, in order, and
@@ -758,10 +800,21 @@ func (s *Server) bulkInsertInstances(r *http.Request, opFault *apiError) (any, *
 	if in.MinCount < 1 || in.MinCount > in.Count {
 		return nil, invalid("Invalid value for field 'resource.minCount': '%d'. Must be between 1 and count.", in.MinCount)
 	}
-	if (in.InstanceProperties == nil) == (in.SourceInstanceTemplate == "") {
-		return nil, invalid("Invalid value for field 'resource': exactly one of instanceProperties and sourceInstanceTemplate must be set.")
+	props, field := &Instance{}, "resource.instanceProperties"
+	if string(in.InstanceProperties) == "null" {
+		in.InstanceProperties = nil
 	}
-	reqID, err := requestID(r, "bulkInsert")
+	switch {
+	case in.InstanceProperties != nil:
+		if err := unmarshalStrict(in.InstanceProperties, props); err != nil {
+			return nil, err
+		}
+	case in.SourceInstanceTemplate == "":
+		return nil, invalid("Invalid value for field 'resource': instanceProperties or sourceInstanceTemplate must be set.")
+	default:
+		field = "resource.sourceInstanceTemplate"
+	}
+	reqID, err := requestID(r)
 	if err != nil {
 		return nil, err
 	}
@@ -771,12 +824,15 @@ func (s *Server) bulkInsertInstances(r *http.Request, opFault *apiError) (any, *
 	if op, ok := s.requests[reqID]; ok {
 		return encoded(op), nil
 	}
-	props, field := in.InstanceProperties, "resource.instanceProperties"
-	if props == nil {
-		if props, err = s.templateProperties(projectOf(zone), in.SourceInstanceTemplate); err != nil {
+	if in.SourceInstanceTemplate != "" {
+		template, err := s.templateProperties(projectOf(zone), in.SourceInstanceTemplate)
+		if err != nil {
 			return nil, err
 		}
-		field = "resource.sourceInstanceTemplate"
+		*props = Instance{}
+		if err := unmarshalStrict(mergePatch(template, in.InstanceProperties), props); err != nil {
+			return nil, err
+		}
 	}
 	if props.Name != "" {
 		return nil, invalid("Invalid JSON payload received. Unknown name \"name\" at '%s': Cannot find field.", field)
@@ -795,6 +851,7 @@ func (s *Server) bulkInsertInstances(r *http.Request, opFault *apiError) (any, *
 		insts     []*Instance
 		disks     []*Disk
 		conflicts []operationError
+		creating  = map[string]bool{}
 	)
 	for _, name := range names {
 		p := *props
@@ -807,26 +864,30 @@ func (s *Server) bulkInsertInstances(r *http.Request, opFault *apiError) (any, *
 			conflicts = append(conflicts, operationError{"RESOURCE_ALREADY_EXISTS", alreadyExists(instancePath(zone, name)).Message})
 		}
 		for _, disk := range d {
-			if _, ok := lookupIn(s.disks, zone, disk.Name); ok {
+			if _, ok := lookupIn(s.disks, zone, disk.Name); ok || creating[disk.Name] {
 				conflicts = append(conflicts, operationError{"RESOURCE_ALREADY_EXISTS", alreadyExists(diskPath(zone, disk.Name)).Message})
 			}
+			creating[disk.Name] = true
 		}
 		batch = append(batch, built{inst, d, c})
 		insts, disks = append(insts, inst), append(disks, d...)
 	}
-	if len(conflicts) > 0 && opFault == nil {
+	conflicted := len(conflicts) > 0 && opFault == nil
+	if conflicted {
 		opFault = &apiError{
-			Status: http.StatusBadRequest, Reason: "resourceAlreadyExists", Message: conflicts[0].Message,
+			Status: http.StatusConflict, Reason: "resourceAlreadyExists", Message: conflicts[0].Message,
 			opErrors: append([]operationError{{"VM_MIN_COUNT_NOT_REACHED", fmt.Sprintf("Requested minimum count of %d VMs could not be created.", in.MinCount)}}, conflicts...),
 		}
 	}
 	location := "zones/" + r.PathValue("zone")
 	status := bulkInsertStatus{Status: "DONE", TargetVMCount: len(names)}
 	metadata := &bulkInsertMetadata{map[string]bulkInsertStatus{location: status}}
-	target := zone + "/instances"
+	target := "projects/" + r.PathValue("project")
 	if opFault != nil {
 		op := s.startOperation(r, reqID, "bulkInsert", target, 0, opFault, nil)
-		status.FailedToCreateVMCount = len(names)
+		if !conflicted {
+			status.FailedToCreateVMCount = len(names)
+		}
 		metadata.PerLocationStatus[location], op.BulkInsert = status, metadata
 		return encoded(op), nil
 	}

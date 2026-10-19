@@ -148,6 +148,16 @@ func TestInstanceTemplatesAndGroupManagers(t *testing.T) {
 	if insts, _ := c.list(t, "labels.session-id = s", 0); names(insts) != "[node-1 node-2]" {
 		t.Fatalf("instances = %s", names(insts))
 	}
+	one := int64(1)
+	if err := c.bulkInsert(t, &computepb.BulkInsertInstanceRequest{Project: project, Zone: zone, BulkInsertInstanceResourceResource: &computepb.BulkInsertInstanceResource{
+		Count: &one, NamePattern: new("other-#"), SourceInstanceTemplate: new("u-p-00001-tmpl"),
+		InstanceProperties: &computepb.InstanceProperties{Labels: map[string]string{"session-id": "t"}},
+	}}); err != nil {
+		t.Fatalf("bulkInsert from the template with instanceProperties: %v", err)
+	}
+	if inst, err := c.get(t, "other-1"); err != nil || inst.GetLabels()["session-id"] != "t" || !strings.HasSuffix(inst.GetMachineType(), "/n2-standard-4") {
+		t.Fatalf("instance from the patched template = %v, %v", inst, err)
+	}
 	op, err = c.templates.Delete(t.Context(), &computepb.DeleteInstanceTemplateRequest{Project: project, InstanceTemplate: "u-p-00001-tmpl"})
 	if err == nil {
 		err = op.Wait(t.Context())
@@ -231,7 +241,8 @@ func TestDisks(t *testing.T) {
 	}{
 		{"a name in use", &computepb.Disk{Name: new("d-1")}, http.StatusConflict},
 		{"smaller than its image", &computepb.Disk{Name: new("d-2"), SizeGb: new(int64(5)), SourceImage: new("projects/debian-cloud/global/images/debian-12-v1")}, http.StatusBadRequest},
-		{"an unknown snapshot", &computepb.Disk{Name: new("d-3"), SourceSnapshot: new("global/snapshots/missing")}, http.StatusNotFound},
+		{"an unknown snapshot", &computepb.Disk{Name: new("d-3"), SourceSnapshot: new("global/snapshots/missing")}, http.StatusBadRequest},
+		{"an unknown image", &computepb.Disk{Name: new("d-3"), SourceImage: new("projects/debian-cloud/global/images/missing")}, http.StatusBadRequest},
 		{"a type in another zone", &computepb.Disk{Name: new("d-4"), Type: new("zones/us-east1-c/diskTypes/pd-ssd")}, http.StatusBadRequest},
 	} {
 		if err := insert(tc.disk); apiCode(err) != tc.code {
@@ -267,5 +278,28 @@ func TestDisks(t *testing.T) {
 	}
 	if _, err := c.disks.Get(t.Context(), &computepb.GetDiskRequest{Project: project, Zone: zone, Disk: "missing"}); apiCode(err) != http.StatusNotFound {
 		t.Errorf("get of a missing disk = %v", err)
+	}
+}
+
+func TestDeletingADiskAgainFinishesTheFirstDelete(t *testing.T) {
+	c := setup(t, compute.WithSettleAfter(-1))
+	insert := func() {
+		t.Helper()
+		if _, err := c.disks.Insert(t.Context(), &computepb.InsertDiskRequest{Project: project, Zone: zone, DiskResource: &computepb.Disk{Name: new("d-1")}}); err != nil {
+			t.Fatal(err)
+		}
+		c.server.Settle()
+	}
+	insert()
+	del := &computepb.DeleteDiskRequest{Project: project, Zone: zone, Disk: "d-1"}
+	if _, err := c.disks.Delete(t.Context(), del); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.disks.Delete(t.Context(), del); apiCode(err) != http.StatusNotFound {
+		t.Fatalf("deleting a disk being deleted = %v, want HTTP 404 once the first delete finishes", err)
+	}
+	insert()
+	if _, ok := c.server.LookupDisk(project, zone, "d-1"); !ok {
+		t.Error("a disk made after the deletes is gone")
 	}
 }

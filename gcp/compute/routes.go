@@ -91,7 +91,7 @@ func (s *Server) insertRoute(r *http.Request, opFault *apiError) (any, *apiError
 	if err := validateRoute(r.PathValue("project"), &want); err != nil {
 		return nil, err
 	}
-	reqID, err := requestID(r, "insert")
+	reqID, err := requestID(r)
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +127,7 @@ func (s *Server) getRoute(r *http.Request, _ *apiError) (any, *apiError) {
 }
 
 func (s *Server) deleteRoute(r *http.Request, opFault *apiError) (any, *apiError) {
-	reqID, err := requestID(r, "delete")
+	reqID, err := requestID(r)
 	if err != nil {
 		return nil, err
 	}
