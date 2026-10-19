@@ -3,6 +3,7 @@ package ec2_test
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -47,7 +48,19 @@ func clientAt(url, region string, opts ...func(*awsec2.Options)) *awsec2.Client 
 		Region:       region,
 		BaseEndpoint: aws.String(url),
 		Credentials:  credentials.NewStaticCredentialsProvider("AKID", "SECRET", ""),
+		HTTPClient:   readBodies{awshttp.NewBuildableClient()},
 	}, opts...)
+}
+
+// readBodies hides the request body's WriteTo: once the SDK closes the body after a fast answer, WriteTo returns
+// io.EOF, which net/http reports as a failed write and closes the connection mid-response.
+type readBodies struct{ c awsec2.HTTPClient }
+
+func (r readBodies) Do(req *http.Request) (*http.Response, error) {
+	if req.Body != nil && req.Body != http.NoBody {
+		req.Body = struct{ io.ReadCloser }{req.Body}
+	}
+	return r.c.Do(req)
 }
 
 func withRetries(attempts int) func(*awsec2.Options) {
@@ -728,7 +741,7 @@ func TestEndpointFromTheEnvironment(t *testing.T) {
 				t.Setenv(unset, "")
 			}
 			t.Setenv(variable, url)
-			cfg, err := config.LoadDefaultConfig(t.Context())
+			cfg, err := config.LoadDefaultConfig(t.Context(), config.WithHTTPClient(readBodies{awshttp.NewBuildableClient()}))
 			if err != nil {
 				t.Fatal(err)
 			}
