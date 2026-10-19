@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/parallelworks/squall/compare/v0.4.0...v0.5.0) (2026-10-19)
+
+
+### Features
+
+* Compute Engine instances, zones, disks and zonal operations ([#10](https://github.com/parallelworks/squall/issues/10)) ([96be1d5](https://github.com/parallelworks/squall/commit/96be1d5aa268bee9cd83eb1155faa72b9b134252))
+
 ## [0.4.0](https://github.com/parallelworks/squall/compare/v0.3.0...v0.4.0) (2026-10-18)
 
 
