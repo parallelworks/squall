@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/parallelworks/squall/compare/v0.6.0...v0.6.1) (2026-10-19)
+
+
+### Bug fixes
+
+* a scale set created without a capacity starts with no VMs instead of failing ([#14](https://github.com/parallelworks/squall/issues/14)) ([050ca0a](https://github.com/parallelworks/squall/commit/050ca0a136871ce81b0e329bc80a7972812bdbc4))
+
 ## [0.6.0](https://github.com/parallelworks/squall/compare/v0.5.0...v0.6.0) (2026-10-19)
 
 
