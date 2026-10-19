@@ -1,10 +1,8 @@
 package arm_test
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -24,6 +22,7 @@ import (
 
 	"github.com/parallelworks/squall/azure/arm"
 	"github.com/parallelworks/squall/fault"
+	"github.com/parallelworks/squall/sdktest/internal/sdkhttp"
 )
 
 const (
@@ -83,7 +82,7 @@ func setupWith(t *testing.T, retry policy.RetryOptions, opts ...arm.Option) *cli
 		}},
 		Retry:                           retry,
 		PerCallPolicies:                 []policy.Policy{recorder{requests}},
-		Transport:                       bodyCopier{srv.Client()},
+		Transport:                       sdkhttp.CopyBodies(srv.Client()),
 		InsecureAllowCredentialWithHTTP: true,
 	}
 	compute, err := armcompute.NewClientFactory(subscription, credential{}, options)
@@ -110,24 +109,6 @@ func setupWith(t *testing.T, retry policy.RetryOptions, opts ...arm.Option) *cli
 		zones: dns.NewPrivateZonesClient(), links: dns.NewVirtualNetworkLinksClient(), records: dns.NewRecordSetsClient(),
 		requests: requests,
 	}
-}
-
-// bodyCopier sends a copy of the body, since after a lost response the
-// transport can still be reading it while the SDK rewinds it to retry.
-type bodyCopier struct{ client *http.Client }
-
-func (b bodyCopier) Do(req *http.Request) (*http.Response, error) {
-	if req.Body == nil || req.Body == http.NoBody {
-		return b.client.Do(req)
-	}
-	body, err := io.ReadAll(req.Body)
-	if err != nil {
-		return nil, err
-	}
-	req = req.Clone(req.Context())
-	req.Body = io.NopCloser(bytes.NewReader(body))
-	req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
-	return b.client.Do(req)
 }
 
 // recorder notes the method and path of every call a client makes, once per call.
