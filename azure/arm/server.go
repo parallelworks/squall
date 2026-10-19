@@ -90,13 +90,20 @@
 //   - A scale set's VMs are numbered from 0 and never reuse a number. Raising
 //     sku.capacity creates VMs, each with the network interfaces and public
 //     IP addresses its profile describes; lowering it deletes the newest,
-//     whatever the scaleInPolicy. Overprovisioning is not modeled. A PUT that
-//     leaves out sku keeps the scale set's sku and capacity; one that gives a
-//     sku must give its capacity, as must a new scale set. A PUT that changes
-//     the VM profile marks existing VMs latestModelApplied false, and one that
-//     changes computerNamePrefix fails with PropertyChangeNotAllowed. A PATCH
-//     takes sku and tags only. Deleting instances that do not exist fails with
-//     InvalidParameter and deletes nothing. Scale set VMs are always running.
+//     whatever the scaleInPolicy. Overprovisioning is not modeled. A new
+//     scale set needs a sku with a name. One created without a capacity
+//     starts with no VMs, as a Flexible one does in Azure; for Uniform, both
+//     are inferred. A PUT to an existing one that leaves out sku keeps its
+//     sku and capacity. One that gives a sku without a capacity fails, as
+//     Azure answers one that changes the model, unless it repeats the create
+//     of a scale set made without a capacity and nothing has changed its
+//     model since: then it succeeds and changes nothing, so a retry after a
+//     lost response converges. That exception is inferred from ARM PUTs being
+//     idempotent. A PUT that changes the VM profile marks existing VMs
+//     latestModelApplied false, and one that changes computerNamePrefix fails
+//     with PropertyChangeNotAllowed. A PATCH takes sku and tags only.
+//     Deleting instances that do not exist fails with InvalidParameter and
+//     deletes nothing. Scale set VMs are always running.
 //   - Resource SKUs list none: a caller that checks availability sees no
 //     restrictions.
 //

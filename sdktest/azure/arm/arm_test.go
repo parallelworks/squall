@@ -22,6 +22,7 @@ import (
 
 	"github.com/parallelworks/squall/azure/arm"
 	"github.com/parallelworks/squall/fault"
+	"github.com/parallelworks/squall/sdktest/internal/sdkhttp"
 )
 
 const (
@@ -81,6 +82,7 @@ func setupWith(t *testing.T, retry policy.RetryOptions, opts ...arm.Option) *cli
 		}},
 		Retry:                           retry,
 		PerCallPolicies:                 []policy.Policy{recorder{requests}},
+		Transport:                       sdkhttp.CopyBodies(srv.Client()),
 		InsecureAllowCredentialWithHTTP: true,
 	}
 	compute, err := armcompute.NewClientFactory(subscription, credential{}, options)
