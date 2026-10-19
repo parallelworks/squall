@@ -3,6 +3,7 @@ package compute_test
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -1041,5 +1042,80 @@ func TestBulkInsertRejectsDiskNamesItWouldCreateTwice(t *testing.T) {
 	}
 	if got := len(c.server.Disks()); got != 0 {
 		t.Errorf("%d disks, want none", got)
+	}
+}
+
+func TestBulkInsertCreatesTheFreeNamesAboveMinCount(t *testing.T) {
+	c := setup(t)
+	if err := c.bulkInsert(t, bulkRequest("s", "node-1")); err != nil {
+		t.Fatal(err)
+	}
+	req := bulkRequest("s", "node-1", "node-2", "node-3")
+	req.BulkInsertInstanceResourceResource.MinCount = new(int64(2))
+	op, err := c.instances.BulkInsert(t.Context(), req)
+	if err == nil {
+		err = op.Wait(t.Context())
+	}
+	if err != nil {
+		t.Fatalf("bulkInsert with minCount 2 = %v, want success", err)
+	}
+	st := op.Proto().GetInstancesBulkInsertOperationMetadata().GetPerLocationStatus()["zones/"+zone]
+	if st.GetTargetVmCount() != 3 || st.GetCreatedVmCount() != 2 || st.GetFailedToCreateVmCount() != 1 || st.GetStatus() != "DONE" {
+		t.Errorf("perLocationStatus = %v", st)
+	}
+	if insts, err := c.list(t, "", 0); err != nil || names(insts) != "[node-1 node-2 node-3]" {
+		t.Fatalf("list = %s, %v", names(insts), err)
+	}
+
+	req = bulkRequest("s", "node-2", "node-3", "node-4")
+	req.BulkInsertInstanceResourceResource.MinCount = new(int64(2))
+	if err := c.bulkInsert(t, req); apiCode(err) != http.StatusConflict || !strings.Contains(err.Error(), "VM_MIN_COUNT_NOT_REACHED") {
+		t.Fatalf("bulkInsert that can create 1 of minCount 2 = %v, want a 409 operation error", err)
+	}
+	if got := len(c.server.Instances()); got != 3 {
+		t.Errorf("%d instances, want 3: a failed bulkInsert creates nothing", got)
+	}
+}
+
+func TestInt64FieldsTakeStringsAndNumbers(t *testing.T) {
+	c := setup(t)
+	post := func(path, body string) {
+		t.Helper()
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, c.url+"/compute/v1/projects/"+project+"/zones/"+zone+path, strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("POST %s = %d", path, resp.StatusCode)
+		}
+	}
+	post("/disks", `{"name":"num","sizeGb":30,"physicalBlockSizeBytes":4096,"provisionedIops":3000,"provisionedThroughput":140}`)
+	post("/disks", `{"name":"str","sizeGb":"30","provisionedIops":"3000"}`)
+	for _, name := range []string{"num", "str"} {
+		d, err := c.disks.Get(t.Context(), &computepb.GetDiskRequest{Project: project, Zone: zone, Disk: name})
+		if err != nil || d.GetSizeGb() != 30 || d.GetProvisionedIops() != 3000 || d.GetPhysicalBlockSizeBytes() != 4096 {
+			t.Errorf("disk %s = %v, %v", name, d, err)
+		}
+	}
+	resp, err := c.httpClient.Get(c.url + "/compute/v1/projects/" + project + "/zones/" + zone + "/disks/num")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil || !strings.Contains(string(body), `"sizeGb":"30"`) {
+		t.Errorf("disk JSON = %s, %v; want sizeGb as a string", body, err)
+	}
+	post("/instances/bulkInsert", `{"count":2,"minCount":"1","namePattern":"vm-#","instanceProperties":{"machineType":"n2-standard-2",`+
+		`"disks":[{"boot":true,"diskSizeGb":20,"initializeParams":{"sourceImage":"projects/debian-cloud/global/images/family/debian-12","diskSizeGb":"20"}}],`+
+		`"networkInterfaces":[{}]}}`)
+	insts, err := c.list(t, "", 0)
+	if err != nil || names(insts) != "[vm-1 vm-2]" || insts[0].GetDisks()[0].GetDiskSizeGb() != 20 {
+		t.Fatalf("instances = %s, %v", names(insts), err)
 	}
 }

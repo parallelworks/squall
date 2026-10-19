@@ -47,15 +47,17 @@
 //     JSON the caller sent. Fields it does not know are rejected with 400.
 //     Instance group managers, deletion protection and resource policies
 //     other than group placement are not supported.
-//   - A bulkInsert is all or nothing: if any name it asks for, or any disk it
-//     would create, already exists, its operation fails with
-//     VM_MIN_COUNT_NOT_REACHED and a RESOURCE_ALREADY_EXISTS error per
-//     conflict and creates nothing, even where minCount would let the API
-//     create the rest. It takes no fixed IP addresses or disk names, as the
-//     API does not, and ignores locationPolicy. A name pattern numbers new
-//     names after the highest existing match. A disk created with
-//     an instance is named after it: the boot disk takes the instance's name,
-//     the others the instance's name and their index.
+//   - A bulkInsert skips each instance whose name, or a disk it would
+//     create, already exists, and creates the rest when they number at least
+//     minCount: its operation succeeds, counting both in its
+//     perLocationStatus, with no warning for what it skipped. With fewer, its
+//     operation fails with VM_MIN_COUNT_NOT_REACHED and a
+//     RESOURCE_ALREADY_EXISTS error per conflict and creates nothing. It
+//     takes no fixed IP addresses or disk names, as the API does not, and
+//     ignores locationPolicy. A name pattern numbers new names after the
+//     highest existing match. A disk created with an instance is named after
+//     it: the boot disk takes the instance's name, the others the instance's
+//     name and their index.
 //   - IP addresses come from 100.64.0.0/10 (external) and 10.0.0.0/8
 //     (internal), never from routable ranges. An external address is unique
 //     across every project and region; an internal one is unique within its

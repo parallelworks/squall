@@ -67,17 +67,19 @@ func (t *InstanceTemplate) filterValue(field string) string {
 func policyPath(region, name string) string { return region + "/resourcePolicies/" + name }
 
 // resolvePolicy returns the link of the resource policy ref names in region:
-// a bare name, as bulk insertions take, or a URL. The caller holds s.mu.
-func (s *Server) resolvePolicy(region, ref string) (string, *apiError) {
+// a bare name, as bulk insertions take, or a URL. field names ref in errors.
+// The caller holds s.mu.
+func (s *Server) resolvePolicy(region, field, ref string) (string, *apiError) {
+	path := ref
 	if !strings.Contains(ref, "/") {
-		ref = policyPath(region, ref)
+		path = policyPath(region, ref)
 	}
-	inRegion, name, ok := strings.Cut(relPath(ref, projectOf(region)), "/resourcePolicies/")
+	inRegion, name, ok := strings.Cut(relPath(path, projectOf(region)), "/resourcePolicies/")
 	if !ok || inRegion != region {
-		return "", invalid("Invalid value for field 'resourcePolicies': '%s'. The resource policy must be in region '%s'.", ref, region)
+		return "", invalid("Invalid value for field '%s': '%s'. The resource policy must be in region '%s'.", field, ref, region)
 	}
 	if _, ok := lookupIn(s.policies, region, name); !ok {
-		return "", notFound(policyPath(region, name))
+		return "", missingRef(field, ref, "resourcePolicy")
 	}
 	return selfLinkBase + policyPath(region, name), nil
 }
@@ -190,16 +192,17 @@ func templatePath(global, name string) string { return global + "/instanceTempla
 // templateProperties returns the properties of the template ref names, for
 // a bulk insertion in project. The caller holds s.mu.
 func (s *Server) templateProperties(project, ref string) (json.RawMessage, *apiError) {
+	path := ref
 	if !strings.Contains(ref, "/") {
-		ref = "global/instanceTemplates/" + ref
+		path = "global/instanceTemplates/" + ref
 	}
-	global, name, ok := strings.Cut(relPath(ref, project), "/instanceTemplates/")
+	global, name, ok := strings.Cut(relPath(path, project), "/instanceTemplates/")
 	if !ok || !strings.HasSuffix(global, "/global") {
 		return nil, invalid("Invalid value for field 'resource.sourceInstanceTemplate': '%s'.", ref)
 	}
 	t, ok := lookupIn(s.templates, global, name)
 	if !ok {
-		return nil, notFound(templatePath(global, name))
+		return nil, missingRef("resource.sourceInstanceTemplate", ref, "instanceTemplate")
 	}
 	return t.Properties, nil
 }

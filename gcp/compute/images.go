@@ -83,7 +83,7 @@ func relPath(ref, project string) string {
 type source struct {
 	image, snapshot string
 	imageID         uint64
-	sizeGB          int64
+	sizeGB          Int64
 }
 
 // resolveSource finds the image or snapshot a disk is created from, either
@@ -103,28 +103,28 @@ func (s *Server) resolveSource(project, field, image, snapshot string) (source, 
 				}
 			}
 			if newest == nil {
-				return source{}, missingSource(field, "sourceImage", image, "image")
+				return source{}, missingRef(field+".sourceImage", image, "image")
 			}
-			return source{image: newest.SelfLink, imageID: newest.ID, sizeGB: newest.DiskSizeGB}, nil
+			return source{image: newest.SelfLink, imageID: newest.ID, sizeGB: Int64(newest.DiskSizeGB)}, nil
 		}
 		img, ok := s.images[path]
 		if !ok {
-			return source{}, missingSource(field, "sourceImage", image, "image")
+			return source{}, missingRef(field+".sourceImage", image, "image")
 		}
-		return source{image: img.SelfLink, imageID: img.ID, sizeGB: img.DiskSizeGB}, nil
+		return source{image: img.SelfLink, imageID: img.ID, sizeGB: Int64(img.DiskSizeGB)}, nil
 	case snapshot != "":
 		path := relPath(snapshot, project)
 		snap, ok := s.snapshots[path]
 		if !ok {
-			return source{}, missingSource(field, "sourceSnapshot", snapshot, "snapshot")
+			return source{}, missingRef(field+".sourceSnapshot", snapshot, "snapshot")
 		}
-		return source{snapshot: snap.SelfLink, sizeGB: snap.DiskSizeGB}, nil
+		return source{snapshot: snap.SelfLink, sizeGB: Int64(snap.DiskSizeGB)}, nil
 	}
 	return source{sizeGB: defaultDiskSizeGB}, nil
 }
 
-// missingSource is the error for a disk source that does not exist, which the
-// API reports as an invalid field rather than a missing resource.
-func missingSource(field, name, ref, kind string) *apiError {
-	return invalid("Invalid value for field '%s.%s': '%s'. The referenced %s resource cannot be found.", field, name, ref, kind)
+// missingRef is the error for a referenced resource that does not exist,
+// which the API reports as an invalid field rather than a missing resource.
+func missingRef(field, ref, kind string) *apiError {
+	return invalid("Invalid value for field '%s': '%s'. The referenced %s resource cannot be found.", field, ref, kind)
 }

@@ -141,7 +141,7 @@ type AttachedDisk struct {
 	Boot              bool              `json:"boot"`
 	AutoDelete        bool              `json:"autoDelete"`
 	Interface         string            `json:"interface,omitzero"`
-	DiskSizeGB        int64             `json:"diskSizeGb,string,omitzero"`
+	DiskSizeGB        Int64             `json:"diskSizeGb,omitzero"`
 	InitializeParams  *InitializeParams `json:"initializeParams,omitzero"`
 	GuestOSFeatures   json.RawMessage   `json:"guestOsFeatures,omitzero"`
 	DiskEncryptionKey json.RawMessage   `json:"diskEncryptionKey,omitzero"`
@@ -150,15 +150,15 @@ type AttachedDisk struct {
 // InitializeParams describe a disk created with its instance.
 type InitializeParams struct {
 	DiskName                    string            `json:"diskName,omitzero"`
-	DiskSizeGB                  int64             `json:"diskSizeGb,string,omitzero"`
+	DiskSizeGB                  Int64             `json:"diskSizeGb,omitzero"`
 	DiskType                    string            `json:"diskType,omitzero"`
 	SourceImage                 string            `json:"sourceImage,omitzero"`
 	SourceSnapshot              string            `json:"sourceSnapshot,omitzero"`
 	Labels                      map[string]string `json:"labels,omitzero"`
 	Description                 string            `json:"description,omitzero"`
 	ResourcePolicies            []string          `json:"resourcePolicies,omitzero"`
-	ProvisionedIops             int64             `json:"provisionedIops,string,omitzero"`
-	ProvisionedThroughput       int64             `json:"provisionedThroughput,string,omitzero"`
+	ProvisionedIops             Int64             `json:"provisionedIops,omitzero"`
+	ProvisionedThroughput       Int64             `json:"provisionedThroughput,omitzero"`
 	Architecture                string            `json:"architecture,omitzero"`
 	SourceImageEncryptionKey    json.RawMessage   `json:"sourceImageEncryptionKey,omitzero"`
 	SourceSnapshotEncryptionKey json.RawMessage   `json:"sourceSnapshotEncryptionKey,omitzero"`
@@ -249,8 +249,8 @@ func (s *Server) newInstance(zone, region, name, field string, props Instance, b
 		return nil, nil, nil, invalid("Invalid value for field '%s.serviceAccounts': at most one service account may be specified.", field)
 	}
 	policies := make([]string, 0, len(inst.ResourcePolicies))
-	for _, ref := range inst.ResourcePolicies {
-		link, err := s.resolvePolicy(region, ref)
+	for i, ref := range inst.ResourcePolicies {
+		link, err := s.resolvePolicy(region, fmt.Sprintf("%s.resourcePolicies[%d]", field, i), ref)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -675,8 +675,8 @@ func (s *Server) insertInstance(r *http.Request, opFault *apiError) (any, *apiEr
 
 // bulkInsertInput is an instances.bulkInsert body.
 type bulkInsertInput struct {
-	Count                  int64                       `json:"count,string"`
-	MinCount               int64                       `json:"minCount,string"`
+	Count                  Int64                       `json:"count"`
+	MinCount               Int64                       `json:"minCount"`
 	NamePattern            string                      `json:"namePattern"`
 	PerInstanceProperties  map[string]perInstanceInput `json:"perInstanceProperties"`
 	InstanceProperties     json.RawMessage             `json:"instanceProperties"`
@@ -860,6 +860,7 @@ func (s *Server) bulkInsertInstances(r *http.Request, opFault *apiError) (any, *
 		if err != nil {
 			return nil, err
 		}
+		before := len(conflicts)
 		if _, ok := lookupIn(s.instances, zone, name); ok {
 			conflicts = append(conflicts, operationError{"RESOURCE_ALREADY_EXISTS", alreadyExists(instancePath(zone, name)).Message})
 		}
@@ -867,12 +868,17 @@ func (s *Server) bulkInsertInstances(r *http.Request, opFault *apiError) (any, *
 			if _, ok := lookupIn(s.disks, zone, disk.Name); ok || creating[disk.Name] {
 				conflicts = append(conflicts, operationError{"RESOURCE_ALREADY_EXISTS", alreadyExists(diskPath(zone, disk.Name)).Message})
 			}
+		}
+		if len(conflicts) > before {
+			continue
+		}
+		for _, disk := range d {
 			creating[disk.Name] = true
 		}
 		batch = append(batch, built{inst, d, c})
 		insts, disks = append(insts, inst), append(disks, d...)
 	}
-	conflicted := len(conflicts) > 0 && opFault == nil
+	conflicted := len(batch) < int(in.MinCount) && opFault == nil
 	if conflicted {
 		opFault = &apiError{
 			Status: http.StatusConflict, Reason: "resourceAlreadyExists", Message: conflicts[0].Message,
@@ -895,7 +901,7 @@ func (s *Server) bulkInsertInstances(r *http.Request, opFault *apiError) (any, *
 		s.storeInstance(zone, region, b.inst, b.disks, b.claims)
 	}
 	created := status
-	created.CreatedVMCount = len(names)
+	created.CreatedVMCount, created.FailedToCreateVMCount = len(batch), len(names)-len(batch)
 	provisioned := s.provisioned(insts, disks)
 	op := s.startOperation(r, reqID, "bulkInsert", target, 0, nil, func() {
 		provisioned()

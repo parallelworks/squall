@@ -22,7 +22,7 @@ type Disk struct {
 	CreationTimestamp           string            `json:"creationTimestamp"`
 	Name                        string            `json:"name"`
 	Description                 string            `json:"description,omitzero"`
-	SizeGB                      int64             `json:"sizeGb,string,omitzero"`
+	SizeGB                      Int64             `json:"sizeGb,omitzero"`
 	Zone                        string            `json:"zone"`
 	Status                      string            `json:"status"`
 	SelfLink                    string            `json:"selfLink"`
@@ -35,10 +35,10 @@ type Disk struct {
 	Users                       []string          `json:"users,omitzero"`
 	LastAttachTimestamp         string            `json:"lastAttachTimestamp,omitzero"`
 	LastDetachTimestamp         string            `json:"lastDetachTimestamp,omitzero"`
-	PhysicalBlockSizeBytes      int64             `json:"physicalBlockSizeBytes,string,omitzero"`
+	PhysicalBlockSizeBytes      Int64             `json:"physicalBlockSizeBytes,omitzero"`
 	ResourcePolicies            []string          `json:"resourcePolicies,omitzero"`
-	ProvisionedIops             int64             `json:"provisionedIops,string,omitzero"`
-	ProvisionedThroughput       int64             `json:"provisionedThroughput,string,omitzero"`
+	ProvisionedIops             Int64             `json:"provisionedIops,omitzero"`
+	ProvisionedThroughput       Int64             `json:"provisionedThroughput,omitzero"`
 	Architecture                string            `json:"architecture,omitzero"`
 	DiskEncryptionKey           json.RawMessage   `json:"diskEncryptionKey,omitzero"`
 	SourceImageEncryptionKey    json.RawMessage   `json:"sourceImageEncryptionKey,omitzero"`
@@ -61,7 +61,7 @@ func (d *Disk) filterValue(field string) string {
 	case "id":
 		return strconv.FormatUint(d.ID, 10)
 	case "sizeGb":
-		return strconv.FormatInt(d.SizeGB, 10)
+		return strconv.FormatInt(int64(d.SizeGB), 10)
 	}
 	return d.Labels[strings.TrimPrefix(field, "labels.")]
 }

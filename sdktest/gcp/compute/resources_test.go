@@ -79,8 +79,15 @@ func TestResourcePolicies(t *testing.T) {
 	}
 	missing := bulkRequest("s", "node-3")
 	missing.BulkInsertInstanceResourceResource.InstanceProperties.ResourcePolicies = []string{"nope"}
-	if err := c.bulkInsert(t, missing); apiCode(err) != http.StatusNotFound {
-		t.Errorf("a missing policy = %v, want HTTP 404", err)
+	err = c.bulkInsert(t, missing)
+	if apiCode(err) != http.StatusBadRequest || !strings.Contains(err.Error(),
+		"Invalid value for field 'resource.instanceProperties.resourcePolicies[0]': 'nope'. The referenced resourcePolicy resource cannot be found.") {
+		t.Errorf("a missing policy = %v, want HTTP 400 naming the field", err)
+	}
+	gone := single("vm-3", "s")
+	gone.ResourcePolicies = []string{"regions/us-east1/resourcePolicies/nope"}
+	if err := c.insert(t, gone); apiCode(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "resource.resourcePolicies[0]") {
+		t.Errorf("insert with a missing policy = %v, want HTTP 400 naming the field", err)
 	}
 
 	del := func(name string) error {
@@ -157,6 +164,13 @@ func TestInstanceTemplatesAndGroupManagers(t *testing.T) {
 	}
 	if inst, err := c.get(t, "other-1"); err != nil || inst.GetLabels()["session-id"] != "t" || !strings.HasSuffix(inst.GetMachineType(), "/n2-standard-4") {
 		t.Fatalf("instance from the patched template = %v, %v", inst, err)
+	}
+	err = c.bulkInsert(t, &computepb.BulkInsertInstanceRequest{Project: project, Zone: zone, BulkInsertInstanceResourceResource: &computepb.BulkInsertInstanceResource{
+		Count: &one, NamePattern: new("other-#"), SourceInstanceTemplate: new("global/instanceTemplates/missing"),
+	}})
+	if apiCode(err) != http.StatusBadRequest || !strings.Contains(err.Error(),
+		"Invalid value for field 'resource.sourceInstanceTemplate': 'global/instanceTemplates/missing'. The referenced instanceTemplate resource cannot be found.") {
+		t.Errorf("bulkInsert from a missing template = %v, want HTTP 400 naming the field", err)
 	}
 	op, err = c.templates.Delete(t.Context(), &computepb.DeleteInstanceTemplateRequest{Project: project, InstanceTemplate: "u-p-00001-tmpl"})
 	if err == nil {

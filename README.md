@@ -86,10 +86,12 @@ it simplifies, the package documentation says so. For Compute Engine:
   Fields the stand-in only records keep the JSON the caller sent, and fields it
   does not know are rejected with 400. Instance group managers are not
   supported: their aggregated list is always empty.
-- A `bulkInsert` is all or nothing. If a name it asks for, or a disk it would
-  create, already exists, its operation fails with `VM_MIN_COUNT_NOT_REACHED`
-  and a `RESOURCE_ALREADY_EXISTS` error per conflict, and nothing is created,
-  even where `minCount` would let the API create the rest.
+- A `bulkInsert` skips each instance whose name, or a disk it would create,
+  already exists, and creates the rest when they number at least `minCount`;
+  its operation succeeds, with `createdVmCount` and `failedToCreateVmCount`
+  counting the two, and lists no warning for what it skipped. With fewer than
+  `minCount`, its operation fails with `VM_MIN_COUNT_NOT_REACHED` and a
+  `RESOURCE_ALREADY_EXISTS` error per conflict, and nothing is created.
   It takes no fixed IP addresses or disk names, and ignores `locationPolicy`.
 - List filters support `field = value` and `field != value` comparisons joined
   by AND, OR and parentheses (OR binds tighter than AND), and the regular
