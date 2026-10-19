@@ -317,7 +317,7 @@ func (s *Server) putScaleSet(c *call) (*reply, *apiError) {
 		return nil, requiredParameter("sku")
 	case res == nil && b.sku.name == "":
 		return nil, requiredParameter("sku.name")
-	case b.sku != nil && !b.sku.capacitySet:
+	case res != nil && b.sku != nil && !b.sku.capacitySet:
 		return nil, requiredParameter("sku.capacity")
 	case res == nil:
 		res, status = s.newResource(c, vmssKind, id, b.parsed), http.StatusCreated

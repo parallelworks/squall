@@ -197,9 +197,6 @@ func TestScaleSetValidation(t *testing.T) {
 	if _, err := c.sets.BeginCreateOrUpdate(t.Context(), group, "set", flexible, nil); code(err) != "BadRequest" {
 		t.Fatalf("a Flexible scale set = %v", err)
 	}
-	if _, err := c.sets.BeginCreateOrUpdate(t.Context(), group, "set", scaleSetBody(nil), nil); code(err) != "InvalidParameter" {
-		t.Fatalf("a new scale set with no capacity = %v", err)
-	}
 	noSKU := scaleSetBody(nil)
 	noSKU.SKU = nil
 	if _, err := c.sets.BeginCreateOrUpdate(t.Context(), group, "set", noSKU, nil); code(err) != "InvalidParameter" || !strings.Contains(err.Error(), "'sku'") {
@@ -212,6 +209,29 @@ func TestScaleSetValidation(t *testing.T) {
 		Properties: &armcompute.VirtualMachineScaleSetUpdateProperties{Overprovision: new(false)},
 	}, nil); code(err) != "BadRequest" {
 		t.Fatalf("patching properties = %v", err)
+	}
+}
+
+func TestScaleSetCreatedWithoutCapacity(t *testing.T) {
+	c := setup(t)
+	c.createGroup(t, group, nil)
+	p, err := c.sets.BeginCreateOrUpdate(t.Context(), group, "set", scaleSetBody(nil), nil)
+	created, err := wait(t, p, err)
+	if err != nil || *created.SKU.Capacity != 0 || *created.SKU.Name != "Standard_D2s_v5" || *created.Properties.ProvisioningState != "Succeeded" {
+		t.Fatalf("a new scale set with no capacity = %+v, %v", created.SKU, err)
+	}
+	if vms := c.listScaleSetVMs(t, "set", false); len(vms) != 0 {
+		t.Fatalf("VMs of a scale set created with no capacity = %v", instanceIDs(vms))
+	}
+	up, err := c.sets.BeginUpdate(t.Context(), group, "set", armcompute.VirtualMachineScaleSetUpdate{SKU: &armcompute.SKU{Capacity: new(int64(2))}}, nil)
+	if _, err = wait(t, up, err); err != nil {
+		t.Fatal(err)
+	}
+	if got := instanceIDs(c.listScaleSetVMs(t, "set", false)); !slices.Equal(got, []string{"0", "1"}) {
+		t.Fatalf("after scaling out = %v", got)
+	}
+	if _, err := c.sets.BeginCreateOrUpdate(t.Context(), group, "set", scaleSetBody(nil), nil); code(err) != "InvalidParameter" || !strings.Contains(err.Error(), "'sku.capacity'") {
+		t.Fatalf("a PUT to an existing scale set with a sku and no capacity = %v", err)
 	}
 }
 

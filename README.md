@@ -189,8 +189,10 @@ For Azure Resource Manager:
   OS disks get names and IDs but are not served.
 - Scale set VMs are numbered from 0 without reuse; raising `sku.capacity`
   creates them with their interfaces and addresses, and lowering it deletes the
-  newest. A PUT that leaves out `sku` keeps the capacity, as in Azure; a `sku`
-  must give its capacity.
+  newest. A PUT that leaves out `sku` keeps the capacity, and one that gives
+  a `sku` must give its capacity, as in Azure. A new scale set needs a `sku`
+  with a name and without a capacity starts with no VMs, as a Flexible one
+  does in Azure; both are inferred for Uniform.
 - Resource SKUs list none, so availability checks see no restrictions.
 - Fault method names are the Azure RBAC action, such as
   `Microsoft.Compute/virtualMachines/write`, and a rule's `Resource` is the
