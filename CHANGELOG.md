@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/parallelworks/squall/compare/v0.5.0...v0.6.0) (2026-10-19)
+
+
+### Features
+
+* Azure Resource Manager resource groups, virtual machines, scale sets, networking and private DNS ([#12](https://github.com/parallelworks/squall/issues/12)) ([5239d68](https://github.com/parallelworks/squall/commit/5239d68dc9af356bb5bc6af20a76f856dfa89051))
+
 ## [0.5.0](https://github.com/parallelworks/squall/compare/v0.4.0...v0.5.0) (2026-10-19)
 
 
