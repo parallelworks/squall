@@ -1,6 +1,7 @@
 package arm
 
 import (
+	"bytes"
 	"cmp"
 	"encoding/json"
 	"fmt"
@@ -36,6 +37,7 @@ const (
 type scaleSet struct {
 	skuName, skuTier string
 	capacity         int
+	createdUncounted bool
 	next             int
 	instances        map[int]*instance
 	nics             []nicConfig
@@ -304,6 +306,12 @@ func (s *Server) putScaleSet(c *call) (*reply, *apiError) {
 		return nil, err
 	}
 	id := vmssID(c)
+	if res := s.resources[key(id)]; res != nil && res.state != stateDeleting && repeatsCreate(res, b) {
+		if err := checkPrecondition(c.r, res); err != nil {
+			return nil, err
+		}
+		return s.repeatCreate(c, res), nil
+	}
 	existing, err := s.claim(id, "Update VM Scale Set")
 	if err != nil {
 		return nil, err
@@ -321,7 +329,7 @@ func (s *Server) putScaleSet(c *call) (*reply, *apiError) {
 		return nil, requiredParameter("sku.capacity")
 	case res == nil:
 		res, status = s.newResource(c, vmssKind, id, b.parsed), http.StatusCreated
-		res.scale = &scaleSet{instances: map[int]*instance{}}
+		res.scale = &scaleSet{instances: map[int]*instance{}, createdUncounted: !b.sku.capacitySet}
 	case res.loc != b.location:
 		return nil, wrongLocation(res.name, res.loc, b.location, res.group)
 	case b.prefix != "" && !strings.EqualFold(b.prefix, res.scale.prefix):
@@ -356,6 +364,27 @@ func (s *Server) putScaleSet(c *call) (*reply, *apiError) {
 	s.update(res, b.parsed)
 	s.resources[key(id)] = res
 	return s.rescale(c, res, capacity, status, putState(status)), nil
+}
+
+// repeatsCreate reports whether b repeats the create of res, a scale set
+// created without a capacity, and nothing has changed its model since.
+func repeatsCreate(res *resource, b *vmssBody) bool {
+	sc := res.scale
+	return sc.createdUncounted && b.sku != nil && !b.sku.capacitySet &&
+		strings.EqualFold(b.sku.name, sc.skuName) && strings.EqualFold(b.sku.tier, sc.skuTier) &&
+		b.location == res.loc && maps.Equal(b.tags, res.tags) && bytes.Equal(encode(b.top), encode(res.top)) &&
+		bytes.Equal(encode(b.props), encode(res.props)) && bytes.Equal(encode(b.userData), encode(sc.userData))
+}
+
+// repeatCreate answers a PUT that repeats the create of res, changing
+// nothing, as an idempotent ARM PUT does. The caller holds s.mu.
+func (s *Server) repeatCreate(c *call, res *resource) *reply {
+	render := func() []byte { return encode(s.renderScaleSet(res)) }
+	if c.opFault != nil {
+		op := s.begin(c, computeOps(c, res.loc), 0, nil)
+		return accepted(c, op, http.StatusOK, http.StatusOK, false, func() []byte { return withState(res, stateUpdating, render) })
+	}
+	return ok(render())
 }
 
 // rescale sets the scale set's capacity, creating or deleting VMs, in an

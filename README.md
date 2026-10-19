@@ -190,10 +190,13 @@ For Azure Resource Manager:
 - Scale set VMs are numbered from 0 without reuse; raising `sku.capacity`
   creates them with their interfaces and addresses, and lowering it deletes the
   newest. A PUT to an existing scale set that leaves out `sku` keeps the
-  capacity, and one that gives a `sku` must give its capacity, as in Azure. A
-  new scale set needs a `sku` with a name. One created without a capacity
-  starts with no VMs, as a Flexible one does in Azure; for Uniform, both are
-  inferred.
+  capacity. One that gives a `sku` without a capacity fails, as Azure answers
+  one that changes the model, unless it repeats the create of a scale set made
+  without a capacity with nothing changed since: then it succeeds and changes
+  nothing, so a retry after a lost response converges, which is inferred from
+  ARM PUTs being idempotent. A new scale set needs a `sku` with a name. One
+  created without a capacity starts with no VMs, as a Flexible one does in
+  Azure; for Uniform, both are inferred.
 - Resource SKUs list none, so availability checks see no restrictions.
 - Fault method names are the Azure RBAC action, such as
   `Microsoft.Compute/virtualMachines/write`, and a rule's `Resource` is the

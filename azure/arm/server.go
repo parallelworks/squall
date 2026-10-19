@@ -94,8 +94,12 @@
 //     scale set needs a sku with a name. One created without a capacity
 //     starts with no VMs, as a Flexible one does in Azure; for Uniform, both
 //     are inferred. A PUT to an existing one that leaves out sku keeps its
-//     sku and capacity, and one that gives a sku must give its capacity, as
-//     Azure answers. A PUT that changes the VM profile marks existing VMs
+//     sku and capacity. One that gives a sku without a capacity fails, as
+//     Azure answers one that changes the model, unless it repeats the create
+//     of a scale set made without a capacity and nothing has changed its
+//     model since: then it succeeds and changes nothing, so a retry after a
+//     lost response converges. That exception is inferred from ARM PUTs being
+//     idempotent. A PUT that changes the VM profile marks existing VMs
 //     latestModelApplied false, and one that changes computerNamePrefix fails
 //     with PropertyChangeNotAllowed. A PATCH takes sku and tags only.
 //     Deleting instances that do not exist fails with InvalidParameter and
