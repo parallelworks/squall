@@ -22,7 +22,7 @@ failure replays from its seed.
 | --- | --- |
 | [`fault`](https://pkg.go.dev/github.com/parallelworks/squall/fault) | Decides which calls fail and how: rejected, applied with the response lost, applied with an error, an operation that ends in an error, or slow. Scripted rules and a seeded random rate. |
 | [`aws/ec2`](https://pkg.go.dev/github.com/parallelworks/squall/aws/ec2) | Amazon EC2: instances (run with client tokens, describe with filters and pages, start, stop, terminate, change type), images, instance types, EBS volumes (create, describe, attach, detach, delete), placement groups, tags, Elastic IP addresses (allocate, describe, release, associate with an interface or instance, disassociate) and network interfaces (create with client tokens, describe, delete). |
-| [`gcp/compute`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/compute) | Compute Engine: regional addresses (get, list with filters, insert, delete, setLabels) and region operations. |
+| [`gcp/compute`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/compute) | Compute Engine: instances (bulkInsert, insert, get, list, aggregatedList, delete, stop, start, setLabels, setMachineType, addAccessConfig, attachDisk, detachDisk), disks (get, list, aggregatedList, insert, delete), zones, regional addresses (get, list, insert, delete, setLabels), resource policies, instance templates, routes, and zone, region and global operations (get, wait). |
 
 Coverage grows with use: each stand-in implements the methods someone needed,
 answers anything else with 404, and documents how faithful it is. Contributions
@@ -66,20 +66,44 @@ Each stand-in follows the real API's requests, response shapes and error codes f
 methods it covers, and is tested through the official Go client library. Where
 it simplifies, the package documentation says so. For Compute Engine:
 
-- Long-running operations finish before the call that started them returns.
-- A call that repeats an earlier call's `requestId` in the same project, for the
-  same method, gets that call's operation back without taking effect again, as
-  the real API does for retries. The server keeps the last 10,000 operations.
-- List filters support `field = value` and `field != value` comparisons on
-  name, description, status, address, addressType and labels, joined by AND or
-  in parentheses. Lists are ordered by name. Anything else, such as a wildcard
-  or `orderBy=creationTimestamp desc`, is rejected with 400 rather than ignored.
+- Changes to instances and disks finish before the call that makes them
+  returns, so the SDK's `Operation.Wait` returns at once. `WithSettleAfter(n)`
+  keeps them in progress, with their operation `RUNNING`, for `n` more reads
+  of the resource or its operation, or until the test calls `Settle`: a new
+  instance is `PROVISIONING` and then `STAGING`, a stopping or deleted one
+  `STOPPING`, a starting one `STAGING`. An `operations.wait` finishes the
+  operation it waits for. A change to an instance that has another in
+  progress finishes that one first. Every other change finishes at once.
+- A call that repeats an earlier call's `requestId` in the same project, for
+  the same method, gets that call's operation back without taking effect
+  again, as the real API does for retries. The server keeps the last 10,000
+  operations.
+- Images and snapshots are registered by the test with `PutImage` and
+  `PutSnapshot`, and an image family names the newest image in it. Machine and
+  disk types are any well-formed name in the call's zone. Zones come from a
+  fixed set per region, which `WithZones` changes.
+- Networks, subnetworks, service accounts and accelerators are not checked.
+  Fields the stand-in only records keep the JSON the caller sent, and fields it
+  does not know are rejected with 400. Instance group managers are not
+  supported: their aggregated list is always empty.
+- A `bulkInsert` is all or nothing. If a name it asks for, or a disk it would
+  create, already exists, its operation fails with `VM_MIN_COUNT_NOT_REACHED`
+  and a `RESOURCE_ALREADY_EXISTS` error per conflict, and nothing is created.
+  It takes no fixed IP addresses or disk names, and ignores `locationPolicy`.
+- List filters support `field = value` and `field != value` comparisons joined
+  by AND, OR and parentheses (OR binds tighter than AND), and the regular
+  expressions `field eq re` and `field ne re`, which must match the whole
+  field. Lists are ordered by name. Anything else, such as a wildcard or
+  `orderBy=creationTimestamp desc`, is rejected with 400 rather than ignored.
+  An `aggregatedList` lists only the scopes that have items.
 - IP addresses come from 100.64.0.0/10 (external) and 10.0.0.0/8 (internal),
   never from routable ranges. An external address is unique across every
   project and region; an internal one is unique within its region, which stands
-  in for its subnetwork.
+  in for its subnetwork. An instance's ephemeral external address is released
+  when it stops; a reserved one it takes is `IN_USE` until it goes.
 - A fault rule's `Resource` for an insert is the resource being created, so a
-  rule can target the insert of one name.
+  rule can target the insert of one name; for a `bulkInsert`, the first
+  instance it names.
 
 For Amazon EC2:
 

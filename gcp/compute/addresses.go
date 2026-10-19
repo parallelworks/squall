@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"slices"
 	"strconv"
+	"strings"
 	"unicode"
 	"unicode/utf8"
 )
@@ -42,59 +43,41 @@ type Address struct {
 	SelfLink          string            `json:"selfLink"`
 	Labels            map[string]string `json:"labels,omitzero"`
 	LabelFingerprint  string            `json:"labelFingerprint"`
+	Users             []string          `json:"users,omitzero"`
 }
 
 func (a *Address) clone() Address {
 	c := *a
 	c.Labels = maps.Clone(a.Labels)
+	c.Users = slices.Clone(a.Users)
 	return c
 }
 
 func addressPath(region, name string) string { return region + "/addresses/" + name }
 
-// addressSet holds one region's addresses, with names kept sorted for listing
-// and an index of the IP addresses in use.
-type addressSet struct {
-	names  []string
-	byName map[string]*Address
-}
-
-func (set *addressSet) put(a *Address) {
-	if _, ok := set.byName[a.Name]; !ok {
-		i, _ := slices.BinarySearch(set.names, a.Name)
-		set.names = slices.Insert(set.names, i, a.Name)
-	}
-	set.byName[a.Name] = a
-}
-
-func (set *addressSet) remove(name string) {
-	if _, ok := set.byName[name]; !ok {
-		return
-	}
-	delete(set.byName, name)
-	if i, found := slices.BinarySearch(set.names, name); found {
-		set.names = slices.Delete(set.names, i, i+1)
-	}
-}
-
-// region returns the address set of region, creating it. The caller holds s.mu.
-func (s *Server) region(region string) *addressSet {
-	set, ok := s.addresses[region]
-	if !ok {
-		set = &addressSet{byName: map[string]*Address{}}
-		s.addresses[region] = set
-	}
-	return set
-}
-
 // lookup returns the named address in region. The caller holds s.mu.
 func (s *Server) lookup(region, name string) (*Address, bool) {
-	set, ok := s.addresses[region]
-	if !ok {
-		return nil, false
+	return lookupIn(s.addresses, region, name)
+}
+
+var addressFields = fieldSet{names: []string{"name", "description", "status", "address", "addressType", "id"}, labels: true}
+
+func (a *Address) filterValue(field string) string {
+	switch field {
+	case "name":
+		return a.Name
+	case "description":
+		return a.Description
+	case "status":
+		return a.Status
+	case "address":
+		return a.Address
+	case "addressType":
+		return a.AddressType
+	case "id":
+		return strconv.FormatUint(a.ID, 10)
 	}
-	a, ok := set.byName[name]
-	return a, ok
+	return a.Labels[strings.TrimPrefix(field, "labels.")]
 }
 
 // validName reports whether name is a valid resource name: RFC 1035, 1 to 63
@@ -167,7 +150,7 @@ func fingerprint(labels map[string]string) string {
 // store fills in what a leaves empty and stores it in region. The caller
 // holds s.mu and has validated a.
 func (s *Server) store(region string, a Address) (*Address, *apiError) {
-	set := s.region(region)
+	set := scoped(s.addresses, region)
 	a.Kind = "compute#address"
 	if a.ID == 0 {
 		a.ID = s.newID()
@@ -195,7 +178,7 @@ func (s *Server) store(region string, a Address) (*Address, *apiError) {
 	}
 	s.ipHolders[ipKey(region, a.AddressType, a.Address)] = path
 	stored := a.clone()
-	set.put(&stored)
+	set.put(stored.Name, &stored)
 	return &stored, nil
 }
 
@@ -240,20 +223,20 @@ func (s *Server) insertAddress(r *http.Request, opFault *apiError) (any, *apiErr
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if op, ok := s.requests[reqID]; ok {
-		return op, nil
+		return encoded(op), nil
 	}
 	if _, ok := s.lookup(region, want.Name); ok {
 		return nil, alreadyExists(path)
 	}
 	if opFault != nil {
-		return s.finishOperation(reqID, region, "insert", path, 0, opFault), nil
+		return encoded(s.startOperation(r, reqID, "insert", path, 0, opFault, nil)), nil
 	}
-	want.ID, want.CreationTimestamp, want.Status = 0, "", ""
+	want.ID, want.CreationTimestamp, want.Status, want.Users = 0, "", "", nil
 	a, err := s.store(region, want)
 	if err != nil {
 		return nil, err
 	}
-	return s.finishOperation(reqID, region, "insert", path, a.ID, nil), nil
+	return encoded(s.startOperation(r, reqID, "insert", path, a.ID, nil, nil)), nil
 }
 
 func (s *Server) getAddress(r *http.Request, _ *apiError) (any, *apiError) {
@@ -278,17 +261,20 @@ func (s *Server) deleteAddress(r *http.Request, opFault *apiError) (any, *apiErr
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if op, ok := s.requests[reqID]; ok {
-		return op, nil
+		return encoded(op), nil
 	}
 	a, ok := s.lookup(region, name)
 	if !ok {
 		return nil, notFound(path)
 	}
+	if len(a.Users) > 0 {
+		return nil, inUse("address", path, a.Users[0])
+	}
 	if opFault == nil {
 		s.addresses[region].remove(name)
 		delete(s.ipHolders, ipKey(region, a.AddressType, a.Address))
 	}
-	return s.finishOperation(reqID, region, "delete", path, a.ID, opFault), nil
+	return encoded(s.startOperation(r, reqID, "delete", path, a.ID, opFault, nil)), nil
 }
 
 type setLabelsRequest struct {
@@ -316,75 +302,31 @@ func (s *Server) setAddressLabels(r *http.Request, opFault *apiError) (any, *api
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if op, ok := s.requests[reqID]; ok {
-		return op, nil
+		return encoded(op), nil
 	}
 	a, ok := s.lookup(region, name)
 	if !ok {
 		return nil, notFound(path)
 	}
 	if req.LabelFingerprint != a.LabelFingerprint {
-		return nil, &apiError{http.StatusPreconditionFailed, "conditionNotMet", "Labels fingerprint either invalid or resource labels have changed"}
+		return nil, fingerprintMismatch()
 	}
 	if opFault == nil {
 		a.Labels = maps.Clone(req.Labels)
 		a.LabelFingerprint = fingerprint(a.Labels)
 	}
-	return s.finishOperation(reqID, region, "setLabels", path, a.ID, opFault), nil
-}
-
-type addressList struct {
-	Kind          string    `json:"kind"`
-	ID            string    `json:"id"`
-	Items         []Address `json:"items,omitzero"`
-	SelfLink      string    `json:"selfLink"`
-	NextPageToken string    `json:"nextPageToken,omitzero"`
+	return encoded(s.startOperation(r, reqID, "setLabels", path, a.ID, opFault, nil)), nil
 }
 
 func (s *Server) listAddresses(r *http.Request, _ *apiError) (any, *apiError) {
-	q := r.URL.Query()
-	f, err := parseFilter(q.Get("filter"))
+	q, err := parseListQuery(r, addressFields)
 	if err != nil {
-		return nil, invalid("Invalid value for field 'filter': %v", err)
-	}
-	if o := q.Get("orderBy"); o != "" && o != "name" {
-		return nil, invalid("Invalid value for field 'orderBy': '%s'. Only ordering by name is supported.", o)
-	}
-	limit := maxListResults
-	if v := q.Get("maxResults"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 0 || n > maxListResults {
-			return nil, invalid("Invalid value for field 'maxResults': '%s'. Must be between 0 and %d.", v, maxListResults)
-		}
-		if n > 0 {
-			limit = n
-		}
+		return nil, err
 	}
 	region := regionPath(r)
-	collection := region + "/addresses"
-	list := addressList{Kind: "compute#addressList", ID: collection, SelfLink: selfLinkBase + collection}
-	after := q.Get("pageToken")
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	set, ok := s.addresses[region]
-	if !ok {
-		return &list, nil
-	}
-	start, found := slices.BinarySearch(set.names, after)
-	if found {
-		start++
-	}
-	for _, name := range set.names[start:] {
-		a := set.byName[name]
-		if !f.matches(a) {
-			continue
-		}
-		if len(list.Items) == limit {
-			list.NextPageToken = list.Items[limit-1].Name
-			break
-		}
-		list.Items = append(list.Items, a.clone())
-	}
-	return &list, nil
+	return listScope(s.addresses[region], q, "compute#addressList", region+"/addresses", nil), nil
 }
 
 // Addresses returns every address the server holds, ordered by selfLink.
@@ -392,12 +334,7 @@ func (s *Server) Addresses() []Address {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []Address
-	for _, region := range slices.Sorted(maps.Keys(s.addresses)) {
-		set := s.addresses[region]
-		for _, name := range set.names {
-			out = append(out, set.byName[name].clone())
-		}
-	}
+	each(s.addresses, func(a *Address) { out = append(out, a.clone()) })
 	return out
 }
 
