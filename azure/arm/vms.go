@@ -87,12 +87,16 @@ func parseVM(c *call) (*vmBody, *apiError) {
 	if _, ok := np["networkInterfaceConfigurations"]; ok {
 		return nil, unsupported("networkProfile.networkInterfaceConfigurations is not supported; create network interfaces and reference them")
 	}
+	if np == nil {
+		return nil, requiredParameter("networkProfile")
+	}
 	refs, err := objects(np, "networkInterfaces")
 	if err != nil {
 		return nil, err
 	}
 	if len(refs) == 0 {
-		return nil, requiredParameter("networkProfile")
+		return nil, newError(http.StatusBadRequest, "VirtualMachineMustHaveAtLeastOneNetworkInterface",
+			"Virtual machine %s must have at least one network interface.", vmID(c))
 	}
 	for i, r := range refs {
 		path := "properties.networkProfile.networkInterfaces[" + strconv.Itoa(i) + "]"
@@ -179,7 +183,10 @@ func (s *Server) putVM(c *call) (*reply, *apiError) {
 		return nil, err
 	}
 	id := vmID(c)
-	existing := s.settled(id)
+	existing, err := s.claim(id, "Update VM")
+	if err != nil {
+		return nil, err
+	}
 	if err := checkPrecondition(c.r, existing); err != nil {
 		return nil, err
 	}
@@ -194,12 +201,15 @@ func (s *Server) putVM(c *call) (*reply, *apiError) {
 	}
 	for i, n := range b.nics {
 		target := s.settled(n.id)
-		if target == nil || target.kind != nicKind || target.loc != b.location {
+		if target == nil || target.kind != nicKind {
+			return nil, newError(http.StatusNotFound, "NotFound", "Resource %s not found.", n.id)
+		}
+		if target.loc != b.location {
 			return nil, invalidParameter("networkProfile.networkInterfaces["+strconv.Itoa(i)+"].id",
 				"Network interface %s was not found in location %s.", n.id, b.location)
 		}
 		if vm := target.nic.vm; vm != "" && key(vm) != key(id) {
-			return nil, newError(http.StatusBadRequest, "NicInUse", "Network Interface %s is used by existing resource %s.", target.id, vm)
+			return nil, nicInUse(target.name, vm)
 		}
 	}
 	render := func() []byte { return encode(s.renderVM(res, "")) }
@@ -235,7 +245,7 @@ func (s *Server) checkVMUpdate(res *resource, b *vmBody) *apiError {
 	oldOS, _ := object(res.props, "osProfile")
 	newOS, _ := object(b.props, "osProfile")
 	if name := str(newOS, "computerName"); name != "" && oldOS != nil && !strings.EqualFold(name, str(oldOS, "computerName")) {
-		return changeNotAllowed("osProfile.computerName")
+		return changeNotAllowed("computerName")
 	}
 	return nil
 }
@@ -315,16 +325,27 @@ func (s *Server) applyVM(res *resource, b *vmBody) {
 	if res.vm == nil {
 		res.vm = &vmState{power: powerRunning, changed: s.now()}
 	}
-	for _, n := range res.vm.nics {
-		if nic := s.resources[key(n.id)]; nic != nil && key(nic.nic.vm) == key(res.id) {
-			nic.nic.vm = ""
-		}
-	}
+	s.detachNICs(res, false)
 	res.vm.nics, res.vm.userData = b.nics, b.userData
 	for _, n := range b.nics {
 		s.resources[key(n.id)].nic.vm = res.id
 	}
 	s.update(res, b.parsed)
+}
+
+// detachNICs detaches the interfaces of the VM res, deleting those whose
+// deleteOption is Delete when deleting is set. The caller holds s.mu.
+func (s *Server) detachNICs(res *resource, deleting bool) {
+	for _, n := range res.vm.nics {
+		nic := s.resources[key(n.id)]
+		if nic == nil || key(nic.nic.vm) != key(res.id) {
+			continue
+		}
+		nic.nic.vm = ""
+		if deleting && n.delete {
+			s.remove(nic)
+		}
+	}
 }
 
 // primaryNIC returns the key of the primary interface of the VM id. The caller holds s.mu.
@@ -446,9 +467,9 @@ func (s *Server) listVMs(c *call) (*reply, *apiError) {
 
 // powerVM deallocates or starts a VM.
 func (s *Server) powerVM(target string) handler {
-	transition := powerStarting
+	transition, verb := powerStarting, "start"
 	if target == powerDeallocated {
-		transition = powerDeallocating
+		transition, verb = powerDeallocating, "deallocate"
 	}
 	return func(c *call) (*reply, *apiError) {
 		if c.query("hibernate") == "true" {
@@ -459,7 +480,10 @@ func (s *Server) powerVM(target string) handler {
 		if err := s.writableGroup(c); err != nil {
 			return nil, err
 		}
-		res := s.settled(vmID(c))
+		res, err := s.claim(vmID(c), verb)
+		if err != nil {
+			return nil, err
+		}
 		if res == nil {
 			return nil, resourceNotFound(vmKind.typ, c.val("name"), c.val("rg"))
 		}
@@ -479,23 +503,17 @@ func (s *Server) deleteVM(c *call) (*reply, *apiError) {
 	if err := s.writableGroup(c); err != nil {
 		return nil, err
 	}
-	res := s.settled(vmID(c))
+	if op := s.deletion(vmID(c)); op != nil {
+		return accepted(c, op, http.StatusOK, http.StatusAccepted, true, noBody), nil
+	}
+	res, err := s.claim(vmID(c), "")
+	if err != nil {
+		return nil, err
+	}
 	if res == nil {
 		return &reply{status: http.StatusNoContent}, nil
 	}
-	op := s.change(c, res, computeOps(c, res.loc), http.StatusNoContent, stateDeleting, func() {
-		for _, n := range res.vm.nics {
-			nic := s.resources[key(n.id)]
-			if nic == nil || key(nic.nic.vm) != key(res.id) {
-				continue
-			}
-			nic.nic.vm = ""
-			if n.delete {
-				s.remove(nic)
-			}
-		}
-		delete(s.resources, key(res.id))
-	})
+	op := s.change(c, res, computeOps(c, res.loc), http.StatusNoContent, stateDeleting, func() { s.remove(res) })
 	return accepted(c, op, http.StatusOK, http.StatusAccepted, true, noBody), nil
 }
 

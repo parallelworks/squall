@@ -17,6 +17,13 @@ type apiError struct {
 	Code    string
 	Message string
 	Target  string
+	Details []errorDetail
+	Header  http.Header
+	// bare errors are answered as {"code", "message"} without the "error"
+	// wrapper, as the private DNS service answers its own errors.
+	bare bool
+	// async errors end the operation a call starts rather than failing the call.
+	async bool
 }
 
 func (e *apiError) Error() string { return fmt.Sprintf("%d %s: %s", e.Status, e.Code, e.Message) }
@@ -39,9 +46,17 @@ func resourceNotFound(typ, name, group string) *apiError {
 		"The Resource '%s/%s' under resource group '%s' was not found. For more details please go to https://aka.ms/ARMResourceNotFoundFix", typ, name, group)
 }
 
-func parentNotFound(name string) *apiError {
+// parentNotFound fails a write of a nested resource of kind k whose parent does not exist.
+func parentNotFound(k *kind, parent string) *apiError {
 	return newError(http.StatusNotFound, "ParentResourceNotFound",
-		"Can not perform requested operation on nested resource. Parent resource '%s' not found.", name)
+		"Failed to perform 'write' on resource(s) of type '%s', because the parent resource '%s' could not be found.", k.resourceType(), parent)
+}
+
+// unregisteredLocation fails a resource of kind k in a location its type is not offered in.
+func unregisteredLocation(k *kind, location string) *apiError {
+	return newError(http.StatusConflict, "MissingRegistrationForLocation",
+		"The subscription is not registered for the resource type '%s' in the location '%s'. Please re-register for this provider in order to have access to this location.",
+		k.resourceType(), location)
 }
 
 func wrongLocation(name, have, want, group string) *apiError {
@@ -99,8 +114,8 @@ func preconditionFailed() *apiError {
 }
 
 // faultError is the error a fault answers with. The fault package's generic
-// reasons become the code ARM uses for the status, such as
-// ServiceUnavailable or TooManyRequests; any other reason is the code itself.
+// reasons become the code ARM uses, such as ServiceUnavailable or
+// SubscriptionRequestsThrottled; any other reason is the code itself.
 func faultError(f fault.Fault) *apiError {
 	status := cmp.Or(f.Status, http.StatusServiceUnavailable)
 	code := f.Reason
@@ -108,7 +123,7 @@ func faultError(f fault.Fault) *apiError {
 	case "", "backendError":
 		code = cmp.Or(strings.ReplaceAll(http.StatusText(status), " ", ""), "InternalServerError")
 	case "rateLimitExceeded":
-		code = "TooManyRequests"
+		code = "SubscriptionRequestsThrottled"
 	}
 	return &apiError{Status: status, Code: code, Message: fmt.Sprintf("squall: injected fault (%s)", f)}
 }
@@ -118,17 +133,22 @@ type errorBody struct {
 }
 
 type errorDetail struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
-	Target  string `json:"target,omitzero"`
+	Code    string        `json:"code"`
+	Message string        `json:"message"`
+	Target  string        `json:"target,omitzero"`
+	Details []errorDetail `json:"details,omitzero"`
 }
 
-func (e *apiError) body() errorBody {
-	return errorBody{errorDetail{Code: e.Code, Message: e.Message, Target: e.Target}}
+func (e *apiError) detail() errorDetail {
+	return errorDetail{Code: e.Code, Message: e.Message, Target: e.Target, Details: e.Details}
 }
 
 func writeError(w http.ResponseWriter, e *apiError) {
-	writeJSON(w, e.Status, nil, encode(e.body()))
+	if e.bare {
+		writeJSON(w, e.Status, e.Header, encode(e.detail()))
+		return
+	}
+	writeJSON(w, e.Status, e.Header, encode(errorBody{e.detail()}))
 }
 
 // writeJSON answers with status, header and body, which may be empty.

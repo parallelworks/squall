@@ -2,6 +2,7 @@ package arm_test
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/privatedns/armprivatedns"
@@ -39,7 +40,7 @@ func aRecords(addresses ...string) armprivatedns.RecordSet {
 func TestPrivateDNS(t *testing.T) {
 	c := setup(t)
 	c.createGroup(t, group, nil)
-	if _, err := c.zones.BeginCreateOrUpdate(t.Context(), group, "example.internal", armprivatedns.PrivateZone{Location: new(location)}, nil); status(err) != http.StatusBadRequest {
+	if _, err := c.zones.BeginCreateOrUpdate(t.Context(), group, "example.internal", armprivatedns.PrivateZone{Location: new(location)}, nil); code(err) != "MissingRegistrationForLocation" {
 		t.Fatalf("a zone outside global = %v", err)
 	}
 	zone := c.createZone(t, "example.internal")
@@ -59,8 +60,17 @@ func TestPrivateDNS(t *testing.T) {
 		*created.ID != *zone.ID+"/virtualNetworkLinks/link" {
 		t.Fatalf("link = %+v, %v", created, err)
 	}
-	if _, err := c.links.BeginCreateOrUpdate(t.Context(), group, "example.internal", "link-2", link, nil); code(err) != "Conflict" {
+	lp, err = c.links.BeginCreateOrUpdate(t.Context(), group, "example.internal", "link-2", link, nil)
+	if _, err = wait(t, lp, err); code(err) != "BadRequest" {
 		t.Fatalf("linking the network twice = %v", err)
+	}
+	if _, err := c.links.Get(t.Context(), group, "example.internal", "link-2", nil); code(err) != "ResourceNotFound" || !strings.Contains(err.Error(), "/virtualNetworkLinks/link-2") {
+		t.Fatalf("the second link = %v", err)
+	}
+	lp, err = c.links.BeginCreateOrUpdate(t.Context(), group, "example.internal", "link", link,
+		&armprivatedns.VirtualNetworkLinksClientBeginCreateOrUpdateOptions{IfNoneMatch: new("*")})
+	if _, err = wait(t, lp, err); code(err) != "PreconditionFailed" {
+		t.Fatalf("If-None-Match on an existing link = %v", err)
 	}
 	if got, err := c.links.Get(t.Context(), group, "example.internal", "LINK", nil); err != nil || *got.Name != "link" {
 		t.Fatalf("get link = %+v, %v", got, err)
@@ -95,7 +105,7 @@ func TestPrivateDNS(t *testing.T) {
 	if _, err := c.records.Delete(t.Context(), group, "example.internal", armprivatedns.RecordTypeA, "www", nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.records.Get(t.Context(), group, "example.internal", armprivatedns.RecordTypeA, "www", nil); code(err) != "ResourceNotFound" {
+	if _, err := c.records.Get(t.Context(), group, "example.internal", armprivatedns.RecordTypeA, "www", nil); code(err) != "NotFound" || status(err) != http.StatusNotFound {
 		t.Fatalf("get after delete = %v", err)
 	}
 	if _, err := c.records.Delete(t.Context(), group, "example.internal", armprivatedns.RecordTypeA, "www", nil); err != nil {
@@ -116,5 +126,23 @@ func TestPrivateDNSPollersWithSettle(t *testing.T) {
 	}
 	if c.polls() != 2 {
 		t.Errorf("polled %d times, want 2", c.polls())
+	}
+}
+
+func TestPrivateDNSLinkChangeInProgress(t *testing.T) {
+	c := setup(t, arm.WithSettleAfter(-1))
+	c.createGroup(t, group, nil)
+	if _, err := c.zones.BeginCreateOrUpdate(t.Context(), group, "example.internal", armprivatedns.PrivateZone{Location: new("global")}, nil); err != nil {
+		t.Fatal(err)
+	}
+	link := armprivatedns.VirtualNetworkLink{
+		Location:   new("global"),
+		Properties: &armprivatedns.VirtualNetworkLinkProperties{VirtualNetwork: &armprivatedns.SubResource{ID: new(vnet)}},
+	}
+	if _, err := c.links.BeginCreateOrUpdate(t.Context(), group, "example.internal", "link", link, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.links.BeginCreateOrUpdate(t.Context(), group, "example.internal", "link", link, nil); code(err) != "Conflict" || status(err) != http.StatusConflict {
+		t.Fatalf("a link change while another runs = %v", err)
 	}
 }

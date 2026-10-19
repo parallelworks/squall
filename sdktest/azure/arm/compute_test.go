@@ -97,8 +97,13 @@ func TestVirtualMachines(t *testing.T) {
 		t.Fatalf("a VM with another's nic = %v", err)
 	}
 	missing := new(strings.Replace(*nic.ID, "vm-1-nic", "nope", 1))
-	if _, err := c.vms.BeginCreateOrUpdate(t.Context(), group, "vm-2", vmBody(missing), nil); code(err) != "InvalidParameter" {
+	if _, err := c.vms.BeginCreateOrUpdate(t.Context(), group, "vm-2", vmBody(missing), nil); code(err) != "NotFound" || status(err) != http.StatusNotFound {
 		t.Fatalf("a VM with a missing nic = %v", err)
+	}
+	noNICs := vmBody()
+	noNICs.Properties.NetworkProfile.NetworkInterfaces = []*armcompute.NetworkInterfaceReference{}
+	if _, err := c.vms.BeginCreateOrUpdate(t.Context(), group, "vm-2", noNICs, nil); code(err) != "VirtualMachineMustHaveAtLeastOneNetworkInterface" {
+		t.Fatalf("a VM with no nics = %v", err)
 	}
 	noSize := vmBody(other.ID)
 	noSize.Properties.HardwareProfile = nil
@@ -226,9 +231,11 @@ func TestVirtualMachinePollersWithSettle(t *testing.T) {
 	if got, err := c.vms.Get(t.Context(), group, "vm", nil); err != nil || *got.Properties.ProvisioningState != "Deleting" {
 		t.Fatalf("vm being deleted = %+v, %v", got.Properties, err)
 	}
-	// A change to a resource with another in progress finishes that one first.
-	if _, err := c.vms.BeginStart(t.Context(), group, "vm", nil); code(err) != "ResourceNotFound" {
+	if _, err := c.vms.BeginStart(t.Context(), group, "vm", nil); code(err) != "OperationNotAllowed" || status(err) != http.StatusConflict {
 		t.Fatalf("starting a VM being deleted = %v", err)
+	}
+	if again, err := c.vms.BeginDelete(t.Context(), group, "vm", nil); err != nil || again.Done() {
+		t.Fatalf("deleting it again = %v", err)
 	}
 	if _, err := del.PollUntilDone(t.Context(), nil); err != nil {
 		t.Fatal(err)
@@ -294,5 +301,59 @@ func TestVirtualMachineLostResponseRetries(t *testing.T) {
 	}
 	if got := len(faults.Injected()); got != 3 {
 		t.Fatalf("injected %d faults, want 3", got)
+	}
+}
+
+func TestDeleteResourceGroupReleasesInterfacesInOtherGroups(t *testing.T) {
+	c := setup(t)
+	c.createGroup(t, group, nil)
+	c.createGroup(t, "net", nil)
+	kept := c.createNIC(t, "net", "kept", nil)
+	deleted := c.createNIC(t, "net", "deleted", nil)
+	body := vmBody(deleted.ID, kept.ID)
+	body.Properties.NetworkProfile.NetworkInterfaces[1].Properties.DeleteOption = nil
+	p, err := c.vms.BeginCreateOrUpdate(t.Context(), group, "vm", body, nil)
+	if _, err = wait(t, p, err); err != nil {
+		t.Fatal(err)
+	}
+	d, err := c.groups.BeginDelete(t.Context(), group, nil)
+	if _, err = wait(t, d, err); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.nics.Get(t.Context(), "net", "deleted", nil); code(err) != "ResourceNotFound" {
+		t.Fatalf("an interface whose deleteOption is Delete = %v", err)
+	}
+	got, err := c.nics.Get(t.Context(), "net", "kept", nil)
+	if err != nil || got.Properties.VirtualMachine != nil {
+		t.Fatalf("a detached interface = %+v, %v", got.Properties, err)
+	}
+	nd, err := c.nics.BeginDelete(t.Context(), "net", "kept", nil)
+	if _, err = wait(t, nd, err); err != nil {
+		t.Fatalf("deleting a detached interface = %v", err)
+	}
+}
+
+func TestVirtualMachineChangePreemptsTheOneInProgress(t *testing.T) {
+	c := setup(t, arm.WithSettleAfter(-1))
+	c.createGroup(t, group, nil)
+	nic := c.createNIC(t, group, "nic", nil)
+	c.server.Settle()
+	create, err := c.vms.BeginCreateOrUpdate(t.Context(), group, "vm", vmBody(nic.ID), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deallocate, err := c.vms.BeginDeallocate(t.Context(), group, "vm", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := create.PollUntilDone(t.Context(), nil); code(err) != "OperationPreempted" {
+		t.Fatalf("the preempted create = %v", err)
+	}
+	c.server.Settle()
+	if _, err := deallocate.PollUntilDone(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.server.VirtualMachines(); len(got) != 1 || got[0].PowerState != "deallocated" {
+		t.Fatalf("VMs = %+v", got)
 	}
 }

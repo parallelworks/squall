@@ -3,6 +3,7 @@ package arm_test
 import (
 	"net/http"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v8"
@@ -143,11 +144,15 @@ func TestScaleSets(t *testing.T) {
 		t.Fatalf("after deleting instance 0 = %v", got)
 	}
 	dp, err = c.sets.BeginDeleteInstances(t.Context(), group, "set", armcompute.VirtualMachineScaleSetVMInstanceRequiredIDs{InstanceIDs: []*string{new("0")}}, nil)
-	if _, err = wait(t, dp, err); code(err) != "NotFound" {
+	if _, err = wait(t, dp, err); code(err) != "InvalidParameter" || status(err) != http.StatusBadRequest {
 		t.Fatalf("deleting a missing instance = %v", err)
 	}
-	// A PUT without a capacity keeps it, and a changed model marks the VMs out of date.
+	if _, err := c.sets.BeginCreateOrUpdate(t.Context(), group, "set", scaleSetBody(nil), nil); code(err) != "InvalidParameter" {
+		t.Fatalf("a PUT with a sku and no capacity = %v", err)
+	}
+	// A PUT without a sku keeps the capacity, and a changed model marks the VMs out of date.
 	body := scaleSetBody(nil)
+	body.SKU = nil
 	body.Properties.VirtualMachineProfile.StorageProfile.ImageReference.Version = new("24.04.202601010")
 	up, err := c.sets.BeginCreateOrUpdate(t.Context(), group, "set", body, nil)
 	put, err := wait(t, up, err)
@@ -194,6 +199,11 @@ func TestScaleSetValidation(t *testing.T) {
 	}
 	if _, err := c.sets.BeginCreateOrUpdate(t.Context(), group, "set", scaleSetBody(nil), nil); code(err) != "InvalidParameter" {
 		t.Fatalf("a new scale set with no capacity = %v", err)
+	}
+	noSKU := scaleSetBody(nil)
+	noSKU.SKU = nil
+	if _, err := c.sets.BeginCreateOrUpdate(t.Context(), group, "set", noSKU, nil); code(err) != "InvalidParameter" || !strings.Contains(err.Error(), "'sku'") {
+		t.Fatalf("a new scale set with no sku = %v", err)
 	}
 	if _, err := c.sets.BeginUpdate(t.Context(), group, "nope", armcompute.VirtualMachineScaleSetUpdate{}, nil); code(err) != "ResourceNotFound" {
 		t.Fatalf("patching a missing scale set = %v", err)
@@ -248,6 +258,9 @@ func TestScaleSetCapacityWithSettle(t *testing.T) {
 	if vms := c.listScaleSetVMs(t, "set", false); *vms[0].Properties.ProvisioningState != "Deleting" {
 		t.Fatalf("instance while deleting = %s", *vms[0].Properties.ProvisioningState)
 	}
+	if _, err := c.sets.BeginUpdate(t.Context(), group, "set", armcompute.VirtualMachineScaleSetUpdate{}, nil); code(err) != "OperationNotAllowed" {
+		t.Fatalf("updating a scale set being deleted = %v", err)
+	}
 	c.server.Settle()
 	if _, err := d.PollUntilDone(t.Context(), nil); err != nil {
 		t.Fatal(err)
@@ -275,7 +288,7 @@ func TestScaleSetLostResponses(t *testing.T) {
 		t.Fatal("deleteInstances with a lost response succeeded")
 	}
 	dp, err := c.sets.BeginDeleteInstances(t.Context(), group, "set", ids, nil)
-	if _, err = wait(t, dp, err); code(err) != "NotFound" {
+	if _, err = wait(t, dp, err); code(err) != "InvalidParameter" {
 		t.Fatalf("retried deleteInstances = %v", err)
 	}
 	if got := c.server.ScaleSets(); got[0].Capacity != 2 || len(got[0].VMs) != 2 {
@@ -300,5 +313,27 @@ func TestScaleSetNSGInUse(t *testing.T) {
 	got, err := c.nsgs.Get(t.Context(), group, "nsg", nil)
 	if err != nil || len(got.Properties.NetworkInterfaces) != 1 {
 		t.Fatalf("nsg users = %+v, %v", got.Properties.NetworkInterfaces, err)
+	}
+}
+
+func TestScaleSetComputerNamesDoNotChange(t *testing.T) {
+	c := setup(t)
+	c.createGroup(t, group, nil)
+	c.createScaleSet(t, "set", 1)
+	renamed := scaleSetBody(nil)
+	renamed.SKU = nil
+	renamed.Properties.VirtualMachineProfile.OSProfile.ComputerNamePrefix = new("other")
+	if _, err := c.sets.BeginCreateOrUpdate(t.Context(), group, "set", renamed, nil); code(err) != "PropertyChangeNotAllowed" || status(err) != http.StatusConflict {
+		t.Fatalf("changing the computer name prefix = %v", err)
+	}
+	omitted := scaleSetBody(nil)
+	omitted.SKU = nil
+	omitted.Properties.VirtualMachineProfile.OSProfile.ComputerNamePrefix = nil
+	p, err := c.sets.BeginCreateOrUpdate(t.Context(), group, "set", omitted, nil)
+	if _, err = wait(t, p, err); err != nil {
+		t.Fatal(err)
+	}
+	if vms := c.listScaleSetVMs(t, "set", false); len(vms) != 1 || *vms[0].Properties.OSProfile.ComputerName != "node000000" {
+		t.Fatalf("VMs after a PUT without a prefix = %+v", vms)
 	}
 }

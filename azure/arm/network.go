@@ -17,7 +17,7 @@ var (
 		typ: "Microsoft.Network/networkSecurityGroups", plural: "networkSecurityGroups", typeName: "NetworkSecurityGroup",
 		props:    []string{"securityRules", "flushConnection"},
 		readOnly: []string{"defaultSecurityRules", "flowLogs", "networkInterfaces", "provisioningState", "resourceGuid", "subnets"},
-		located:  true, etag: weakETag,
+		located:  true, etag: weakETag, opName: "NetworkSecurityGroup",
 	}
 	nicKind = &kind{
 		typ: "Microsoft.Network/networkInterfaces", plural: "networkInterfaces", typeName: "NetworkInterface",
@@ -31,7 +31,7 @@ var (
 			"privateEndpoint", "privateLinkService", "provisioningState", "resourceGuid", "tapConfigurations",
 			"virtualMachine", "vnetEncryptionSupported",
 		},
-		located: true, etag: weakETag,
+		located: true, etag: weakETag, opName: "Nic",
 	}
 	pipKind = &kind{
 		typ: "Microsoft.Network/publicIPAddresses", plural: "publicIPAddresses", typeName: "PublicIPAddress",
@@ -44,7 +44,7 @@ var (
 			"ipAddress", "ipConfiguration", "linkedPublicIPAddress", "migrationPhase", "natGateway", "provisioningState",
 			"publicIPPrefix", "resourceGuid", "servicePublicIPAddress",
 		},
-		located: true, etag: weakETag,
+		located: true, etag: weakETag, opName: "PublicIpAddress",
 	}
 )
 
@@ -79,10 +79,29 @@ type putSpec struct {
 	// parent, when set, is the ID of the resource that must hold the new one.
 	parent func(c *call) string
 	paths  func(c *call, location string) opPaths
+	// precondition checks the If-Match and If-None-Match headers against the
+	// resource, which is nil when it does not exist. Nil is checkPrecondition.
+	precondition func(r *http.Request, existing *resource) *apiError
 	// prepare validates p as the new body of res, which is not yet stored when
 	// new, and returns how to apply it. Nil records p as it is.
 	prepare func(res *resource, p *parsed) (func(), *apiError)
 	render  func(res *resource) map[string]any
+	// emptyAccepted answers a change in progress with 202, an empty object
+	// and a Location URL as well, as private DNS does.
+	emptyAccepted bool
+}
+
+// fail applies err to the call: an async error becomes the error the call's
+// operation ends in, unless a fault already chose one, and any other fails
+// the call, which fail returns.
+func (c *call) fail(err *apiError) *apiError {
+	if !err.async {
+		return err
+	}
+	if c.opFault == nil {
+		c.opFault = err
+	}
+	return nil
 }
 
 // put creates or updates a resource as spec describes.
@@ -98,14 +117,23 @@ func (s *Server) put(spec putSpec) handler {
 			return nil, err
 		}
 		if spec.parent != nil {
-			if parent := s.settled(spec.parent(c)); parent == nil {
-				return nil, parentNotFound(c.val("zone"))
+			if parent := spec.parent(c); s.settled(parent) == nil {
+				return nil, parentNotFound(spec.kind, parent)
 			}
 		}
 		id := spec.id(c)
-		existing := s.settled(id)
-		if err := checkPrecondition(c.r, existing); err != nil {
+		existing, err := s.claim(id, "")
+		if err != nil {
 			return nil, err
+		}
+		precondition := spec.precondition
+		if precondition == nil {
+			precondition = checkPrecondition
+		}
+		if err := precondition(c.r, existing); err != nil {
+			if err = c.fail(err); err != nil {
+				return nil, err
+			}
 		}
 		if existing != nil && existing.loc != p.location {
 			return nil, wrongLocation(existing.name, existing.loc, p.location, c.val("rg"))
@@ -116,20 +144,28 @@ func (s *Server) put(spec putSpec) handler {
 		}
 		commit := func() { s.update(res, p) }
 		if spec.prepare != nil {
-			if commit, err = spec.prepare(res, p); err != nil {
-				return nil, err
+			var perr *apiError
+			if commit, perr = spec.prepare(res, p); perr != nil {
+				if perr = c.fail(perr); perr != nil {
+					return nil, perr
+				}
 			}
 		}
 		render := func() []byte { return encode(spec.render(res)) }
+		answer := func(op *operation, render func() []byte) *reply {
+			if spec.emptyAccepted && op.status != opSucceeded {
+				return accepted(c, op, status, http.StatusAccepted, true, emptyObject)
+			}
+			return accepted(c, op, status, status, false, render)
+		}
 		paths := spec.paths(c, p.location)
 		if c.opFault != nil {
 			op := s.begin(c, paths, 0, nil)
-			return accepted(c, op, status, status, false, func() []byte { return withState(res, putState(status), render) }), nil
+			return answer(op, func() []byte { return withState(res, putState(status), render) }), nil
 		}
 		commit()
 		s.resources[key(id)] = res
-		op := s.change(c, res, paths, 0, putState(status), nil)
-		return accepted(c, op, status, status, false, render), nil
+		return answer(s.change(c, res, paths, 0, putState(status), nil), render), nil
 	}
 }
 
@@ -159,7 +195,7 @@ func (s *Server) prepareNIC(res *resource, p *parsed) (func(), *apiError) {
 	}
 	delete(p.props, "ipConfigurations")
 	if len(raw) == 0 {
-		return nil, badRequest("Network interface %s must have one or more IP configurations.", res.id)
+		return nil, newError(http.StatusBadRequest, "InvalidIPConfigCount", "Network interface %s must have one or more IP configurations.", res.name)
 	}
 	nsg := refID(p.props, "networkSecurityGroup")
 	delete(p.props, "networkSecurityGroup")
@@ -191,8 +227,8 @@ func (s *Server) prepareNIC(res *resource, p *parsed) (func(), *apiError) {
 		}
 		holder := s.privateIPs[key(ic.subnet)][ic.address]
 		k := key(ic.subnet) + " " + ic.address.String()
-		if holder != "" && !strings.HasPrefix(holder, key(res.id)+"/") || taken[k] {
-			return nil, newError(http.StatusBadRequest, "PrivateIPAddressInUse",
+		if holder != "" && !strings.HasPrefix(key(holder), key(res.id)+"/") || taken[k] {
+			return nil, newError(http.StatusBadRequest, "PrivateIPAddressIsAllocated",
 				"IP configuration %s/ipConfigurations/%s is using the private IP address %s which is already allocated to resource %s.",
 				res.id, ic.name, ic.address, holder)
 		}
@@ -202,17 +238,22 @@ func (s *Server) prepareNIC(res *resource, p *parsed) (func(), *apiError) {
 		if res.nic != nil {
 			s.releaseNIC(res)
 		}
+		holder := func(ic *ipConfig) string { return res.id + "/ipConfigurations/" + ic.name }
+		// Static addresses go first, so a dynamic one cannot take an address a later configuration claims.
 		for _, ic := range configs {
-			holder := key(res.id) + "/ipconfigurations/" + key(ic.name)
+			if ic.static {
+				s.takePrivate(ic.subnet, ic.address, holder(ic))
+			}
+		}
+		for _, ic := range configs {
 			prev := old[key(ic.name)]
 			switch {
 			case ic.static:
-				s.takePrivate(ic.subnet, ic.address, holder)
 			case prev != nil && key(prev.subnet) == key(ic.subnet) && s.privateIPs[key(ic.subnet)][prev.address] == "":
 				ic.address = prev.address
-				s.takePrivate(ic.subnet, ic.address, holder)
+				s.takePrivate(ic.subnet, ic.address, holder(ic))
 			default:
-				ic.address = s.allocPrivate(ic.subnet, holder)
+				ic.address = s.allocPrivate(ic.subnet, holder(ic))
 			}
 		}
 		vm := ""
@@ -332,7 +373,10 @@ func (s *Server) deleteNetwork(k *kind) handler {
 		if err := s.writableGroup(c); err != nil {
 			return nil, err
 		}
-		res := s.settled(resourceID(c, k.typ, c.val("name")))
+		res, err := s.claim(resourceID(c, k.typ, c.val("name")), "")
+		if err != nil {
+			return nil, err
+		}
 		if res == nil || res.kind != k {
 			return &reply{status: http.StatusNoContent}, nil
 		}
@@ -350,21 +394,29 @@ func (s *Server) checkUnused(res *resource) *apiError {
 	case nsgKind:
 		if users := s.nsgUsers(res.id); len(users) > 0 {
 			return newError(http.StatusBadRequest, "InUseNetworkSecurityGroupCannotBeDeleted",
-				"Network security group %s cannot be deleted because it is in use by the following resources: %s.", res.id, strings.Join(users, ", "))
+				"Network security group %s cannot be deleted because it is in use by the following resources: %s. In order to delete the Network security group, remove the association with the resource(s). To learn how to do this, see aka.ms/deletensg.",
+				res.id, strings.Join(users, ", "))
 		}
 	case pipKind:
 		if user := s.pipUser(res.id); user != "" {
 			return newError(http.StatusBadRequest, "PublicIPAddressCannotBeDeleted",
-				"Public IP address %s can not be deleted since it is still allocated to resource %s.", res.id, user)
+				"Public IP address %s can not be deleted since it is still allocated to resource %s. In order to delete the public IP, disassociate/detach the Public IP address from the resource.  To learn how to do this, see aka.ms/deletepublicip.",
+				res.id, user)
 		}
 	case nicKind:
 		if res.nic.vm != "" {
-			return newError(http.StatusBadRequest, "NicInUse",
-				"Network Interface %s is used by existing resource %s. In order to delete the network interface, it must be dissociated from the resource. To learn more, see aka.ms/deletenic.",
-				res.id, res.nic.vm)
+			return nicInUse(res.id, res.nic.vm)
 		}
 	}
 	return nil
+}
+
+// nicInUse fails a call on the network interface nic, as Azure names it in
+// the call's answer, because the VM vm uses it.
+func nicInUse(nic, vm string) *apiError {
+	return newError(http.StatusBadRequest, "NicInUse",
+		"Network Interface %s is used by existing resource %s. In order to delete the network interface, it must be dissociated from the resource. To learn more, see aka.ms/deletenic.",
+		nic, vm)
 }
 
 // nsgUsers lists the interfaces and scale sets that use the security group

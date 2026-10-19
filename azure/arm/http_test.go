@@ -121,8 +121,8 @@ func TestOldOperationsAreDropped(t *testing.T) {
 	const path = groupPath + "/providers/Microsoft.Network/networkSecurityGroups/n"
 	rec, _ := do(t, s, http.MethodPut, path, `{"location":"eastus"}`)
 	first, _ := url.Parse(rec.Header().Get("Azure-AsyncOperation"))
-	for range 10_000 {
-		do(t, s, http.MethodPut, path, `{"location":"eastus"}`)
+	for i := range 10_000 {
+		do(t, s, http.MethodPut, fmt.Sprintf("%s-%d", path, i), `{"location":"eastus"}`)
 	}
 	if rec, _ := do(t, s, http.MethodGet, first.RequestURI(), ""); rec.Code != http.StatusNotFound {
 		t.Fatalf("the oldest operation = %d, want 404 once 10,000 newer ones exist", rec.Code)
@@ -147,11 +147,29 @@ func TestFaultReasonIsTheErrorCode(t *testing.T) {
 	s := arm.New(arm.WithFaults(faults))
 	for path, want := range map[string]string{
 		groupPath + "/providers/Microsoft.Compute/virtualMachines/vm":        "OperationNotAllowed",
-		groupPath + "/providers/Microsoft.Compute/virtualMachineScaleSets/v": "TooManyRequests",
+		groupPath + "/providers/Microsoft.Compute/virtualMachineScaleSets/v": "SubscriptionRequestsThrottled",
 		groupPath + "/providers/Microsoft.Network/publicIPAddresses/p":       "ServiceUnavailable",
 	} {
 		if _, body := do(t, s, http.MethodGet, path, ""); errorCode(body) != want {
 			t.Errorf("GET %s = %v, want %s", path, body, want)
 		}
+	}
+}
+
+func TestPrivateDNSChangesInProgressAnswer202(t *testing.T) {
+	s := arm.New(arm.WithSettleAfter(-1))
+	newGroup(t, s)
+	rec, body := do(t, s, http.MethodPut, groupPath+"/providers/Microsoft.Network/privateDnsZones/example.internal", `{"location":"global"}`)
+	async := rec.Header().Get("Azure-AsyncOperation")
+	if rec.Code != http.StatusAccepted || len(body) != 0 || rec.Header().Get("Location") == "" || !strings.Contains(async, "/privateDnsOperationStatuses/") {
+		t.Fatalf("create zone = %d %v %v", rec.Code, rec.Header(), body)
+	}
+	u, _ := url.Parse(async)
+	if rec, op := do(t, s, http.MethodGet, u.RequestURI(), ""); rec.Code != http.StatusAccepted || op["status"] != "InProgress" {
+		t.Fatalf("operation in progress = %d %v", rec.Code, op)
+	}
+	s.Settle()
+	if rec, op := do(t, s, http.MethodGet, u.RequestURI(), ""); rec.Code != http.StatusOK || op["status"] != "Succeeded" {
+		t.Fatalf("operation done = %d %v", rec.Code, op)
 	}
 }

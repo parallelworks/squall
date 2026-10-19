@@ -171,7 +171,7 @@ func TestNetworkInterfacesAndPublicIPs(t *testing.T) {
 	static := nicBody(nil, nil)
 	static.Properties.IPConfigurations[0].Properties.PrivateIPAllocationMethod = new(armnetwork.IPAllocationMethodStatic)
 	static.Properties.IPConfigurations[0].Properties.PrivateIPAddress = new("10.0.0.4")
-	if _, err := c.nics.BeginCreateOrUpdate(t.Context(), group, "nic-3", static, nil); code(err) != "PrivateIPAddressInUse" {
+	if _, err := c.nics.BeginCreateOrUpdate(t.Context(), group, "nic-3", static, nil); code(err) != "PrivateIPAddressIsAllocated" {
 		t.Fatalf("a static address in use = %v", err)
 	}
 	static.Properties.IPConfigurations[0].Properties.PrivateIPAddress = new("10.0.0.9")
@@ -193,6 +193,30 @@ func TestNetworkInterfacesAndPublicIPs(t *testing.T) {
 	}
 	if got := c.server.PublicIPAddresses(); len(got) != 1 || got[0].IPAddress != "100.64.0.1" {
 		t.Fatalf("PublicIPAddresses = %+v", got)
+	}
+}
+
+func TestNetworkInterfaceDynamicAddressAvoidsItsStaticOne(t *testing.T) {
+	c := setup(t)
+	c.createGroup(t, group, nil)
+	body := nicBody(nil, nil)
+	body.Properties.IPConfigurations[0].Properties.Primary = new(true)
+	body.Properties.IPConfigurations = append(body.Properties.IPConfigurations, &armnetwork.InterfaceIPConfiguration{
+		Name: new("ipconfig2"),
+		Properties: &armnetwork.InterfaceIPConfigurationPropertiesFormat{
+			Subnet:                    &armnetwork.Subnet{ID: new(subnet)},
+			PrivateIPAllocationMethod: new(armnetwork.IPAllocationMethodStatic),
+			PrivateIPAddress:          new("10.0.0.4"),
+		},
+	})
+	p, err := c.nics.BeginCreateOrUpdate(t.Context(), group, "nic", body, nil)
+	got, err := wait(t, p, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dynamic, static := got.Properties.IPConfigurations[0].Properties, got.Properties.IPConfigurations[1].Properties
+	if *static.PrivateIPAddress != "10.0.0.4" || *dynamic.PrivateIPAddress == "10.0.0.4" {
+		t.Fatalf("addresses = %s and %s", *dynamic.PrivateIPAddress, *static.PrivateIPAddress)
 	}
 }
 
@@ -240,5 +264,35 @@ func TestNetworkFailedOperation(t *testing.T) {
 	}
 	if nic := c.createNIC(t, group, "nic", nil); *nic.Properties.IPConfigurations[0].Properties.PrivateIPAddress != "10.0.0.4" {
 		t.Fatalf("the failed create took an address: %+v", nic.Properties.IPConfigurations[0].Properties)
+	}
+}
+
+func TestNetworkChangeInProgressIsRetryable(t *testing.T) {
+	c := setup(t, arm.WithSettleAfter(-1))
+	c.createGroup(t, group, nil)
+	body := armnetwork.SecurityGroup{Location: new(location)}
+	if _, err := c.nsgs.BeginCreateOrUpdate(t.Context(), group, "nsg", body, nil); err != nil {
+		t.Fatal(err)
+	}
+	_, err := c.nsgs.BeginCreateOrUpdate(t.Context(), group, "nsg", body, nil)
+	if code(err) != "RetryableError" || status(err) != http.StatusTooManyRequests || !strings.Contains(err.Error(), "RetryableErrorDueToAnotherOperation") {
+		t.Fatalf("a change while another runs = %v", err)
+	}
+	c.server.Settle()
+	p, err := c.nsgs.BeginCreateOrUpdate(t.Context(), group, "nsg", body, nil)
+	if err != nil || p.Done() {
+		t.Fatalf("a change once the other finished = %v", err)
+	}
+}
+
+func TestNetworkChangeInProgressConvergesWhenRetried(t *testing.T) {
+	c := setupRetrying(t, arm.WithSettleAfter(1))
+	c.createGroup(t, group, nil)
+	if _, err := c.pips.BeginCreateOrUpdate(t.Context(), group, "pip", armnetwork.PublicIPAddress{Location: new(location)}, nil); err != nil {
+		t.Fatal(err)
+	}
+	d, err := c.pips.BeginDelete(t.Context(), group, "pip", nil)
+	if _, err = wait(t, d, err); err != nil {
+		t.Fatalf("deleting a public IP being created = %v", err)
 	}
 }

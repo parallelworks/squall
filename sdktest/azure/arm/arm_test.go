@@ -61,10 +61,12 @@ func setup(t *testing.T, opts ...arm.Option) *clients {
 	return setupWith(t, policy.RetryOptions{MaxRetries: -1}, opts...)
 }
 
-// setupRetrying is setup with clients that retry quickly.
+// setupRetrying is setup with clients that retry quickly. The SDK does not
+// retry an answer whose retry-after exceeds MaxRetryDelay, so it allows the
+// server's 10ms.
 func setupRetrying(t *testing.T, opts ...arm.Option) *clients {
 	t.Helper()
-	return setupWith(t, policy.RetryOptions{MaxRetries: 3, RetryDelay: time.Millisecond, MaxRetryDelay: 5 * time.Millisecond}, opts...)
+	return setupWith(t, policy.RetryOptions{MaxRetries: 3, RetryDelay: time.Millisecond, MaxRetryDelay: 20 * time.Millisecond}, opts...)
 }
 
 func setupWith(t *testing.T, retry policy.RetryOptions, opts ...arm.Option) *clients {

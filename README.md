@@ -163,8 +163,13 @@ For Azure Resource Manager:
   without the call taking effect.
 - PUT and DELETE are idempotent, as in Azure: a retried create answers 200 with
   the resource, and deleting what is not there answers 204. A change to a
-  resource with another in progress finishes that one first; a change in a
-  resource group being deleted fails with `ResourceGroupBeingDeleted`.
+  resource with another in progress is answered as its provider answers it:
+  network resources fail it with 429 `RetryableError` and virtual network
+  links with 409 `Conflict`, counting the call as a read of that change, and
+  a VM or scale set change preempts the other, which ends `Canceled` with
+  `OperationPreempted`, or fails with 409 `OperationNotAllowed` if that one is
+  a deletion. A change in a resource group being deleted fails with
+  `ResourceGroupBeingDeleted`.
 - Resource names, subscription IDs, locations and tags are not validated, and
   names match without regard to case. Fields it does not know are rejected
   with `InvalidRequestContent`; values it does not model, such as a Flexible
@@ -175,8 +180,8 @@ For Azure Resource Manager:
   not served.
 - Scale set VMs are numbered from 0 without reuse; raising `sku.capacity`
   creates them with their interfaces and addresses, and lowering it deletes the
-  newest. A PUT that leaves out `sku.capacity` on an existing scale set keeps
-  the capacity rather than deleting every VM; a new one needs a capacity.
+  newest. A PUT that leaves out `sku` keeps the capacity, as in Azure; a `sku`
+  must give its capacity.
 - Resource SKUs list none, so availability checks see no restrictions.
 - Fault method names are the Azure RBAC action, such as
   `Microsoft.Compute/virtualMachines/write`, and a rule's `Resource` is the

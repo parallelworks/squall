@@ -11,6 +11,7 @@ const (
 	opInProgress = "InProgress"
 	opSucceeded  = "Succeeded"
 	opFailed     = "Failed"
+	opCanceled   = "Canceled"
 )
 
 // operation is a long-running operation a call started.
@@ -23,9 +24,11 @@ type operation struct {
 	resultPath string
 	// resultStatus answers a poll of resultPath once the operation succeeds.
 	resultStatus int
-	status       string
-	err          *apiError
-	start, end   time.Time
+	// pollStatus answers a poll of statusPath while the operation runs.
+	pollStatus int
+	status     string
+	err        *apiError
+	start, end time.Time
 	// wait is how many more reads see the operation in progress.
 	wait int
 	// complete applies the call's effect; it is nil once the operation is done.
@@ -41,12 +44,16 @@ type opStatusBody struct {
 	Error     *errorDetail `json:"error,omitzero"`
 }
 
-// opPaths are the polling paths of an operation, before its ID.
-type opPaths struct{ status, result string }
+// opPaths are the polling paths of an operation, before its ID, and the
+// status a poll of its status path answers while it runs, if not 200.
+type opPaths struct {
+	status, result string
+	pollStatus     int
+}
 
 func providerOps(c *call, namespace, location string) opPaths {
 	prefix := "/subscriptions/" + c.val("sub") + "/providers/" + namespace + "/locations/" + location
-	return opPaths{prefix + "/operations/", prefix + "/operationResults/"}
+	return opPaths{status: prefix + "/operations/", result: prefix + "/operationResults/"}
 }
 
 func computeOps(c *call, location string) opPaths {
@@ -59,7 +66,7 @@ func networkOps(c *call, location string) opPaths {
 
 func dnsOps(c *call) opPaths {
 	prefix := "/subscriptions/" + c.val("sub") + "/resourceGroups/" + c.val("rg") + "/providers/Microsoft.Network/"
-	return opPaths{prefix + "privateDnsOperationStatuses/", prefix + "privateDnsOperationResults/"}
+	return opPaths{prefix + "privateDnsOperationStatuses/", prefix + "privateDnsOperationResults/", http.StatusAccepted}
 }
 
 func groupOps(c *call) opPaths {
@@ -72,7 +79,10 @@ func groupOps(c *call) opPaths {
 // resource in progress. The caller holds s.mu.
 func (s *Server) begin(c *call, paths opPaths, resultStatus int, complete func()) *operation {
 	id := s.newUUID()
-	op := &operation{id: id, resultPath: paths.result + id, resultStatus: cmp.Or(resultStatus, http.StatusNoContent), start: s.now()}
+	op := &operation{
+		id: id, resultPath: paths.result + id, resultStatus: cmp.Or(resultStatus, http.StatusNoContent),
+		pollStatus: cmp.Or(paths.pollStatus, http.StatusOK), start: s.now(),
+	}
 	if paths.status != "" {
 		op.statusPath = paths.status + id
 	}
@@ -113,6 +123,18 @@ func (s *Server) finish(op *operation) {
 	delete(s.pending, op)
 	complete()
 	op.status, op.end = opSucceeded, s.now()
+}
+
+// preempt ends op as Compute ends an operation a newer call supersedes: what
+// it did stands, and it reports Canceled with OperationPreempted. The caller
+// holds s.mu.
+func (s *Server) preempt(op *operation) {
+	if op == nil || op.complete == nil {
+		return
+	}
+	s.finish(op)
+	op.status = opCanceled
+	op.err = newError(http.StatusConflict, "OperationPreempted", "Operation execution has been preempted by a more recent operation.")
 }
 
 // observe counts one read of op while it is in progress, and finishes it once
@@ -172,6 +194,8 @@ func accepted(c *call, op *operation, syncStatus, asyncStatus int, location bool
 
 func noBody() []byte { return nil }
 
+func emptyObject() []byte { return []byte("{}") }
+
 // lookupOperation returns the operation the call's path names. The caller holds s.mu.
 func (s *Server) lookupOperation(c *call, result bool) (*operation, *apiError) {
 	op, ok := s.ops[c.val("op")]
@@ -201,10 +225,11 @@ func (s *Server) operationStatus(c *call) (*reply, *apiError) {
 		body.EndTime = timestamp(op.end)
 	}
 	if op.err != nil {
-		body.Error = new(op.err.body().Error)
+		body.Error = new(op.err.detail())
 	}
 	rep := ok(encode(body))
 	if op.status == opInProgress {
+		rep.status = op.pollStatus
 		rep.header = http.Header{"Retry-After-Ms": {retryAfterMS}}
 	}
 	return rep, nil
@@ -226,7 +251,7 @@ func (s *Server) operationResult(c *call) (*reply, *apiError) {
 		h.Set("Location", c.base()+c.r.URL.RequestURI())
 		h.Set("retry-after-ms", retryAfterMS)
 		return &reply{status: http.StatusAccepted, header: h}, nil
-	case opFailed:
+	case opFailed, opCanceled:
 		return nil, op.err
 	}
 	return &reply{status: op.resultStatus}, nil

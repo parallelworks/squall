@@ -3,6 +3,7 @@ package arm
 import (
 	"cmp"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/netip"
 	"slices"
@@ -18,13 +19,13 @@ var (
 			"maxNumberOfVirtualNetworkLinksWithRegistration", "numberOfRecordSets", "numberOfVirtualNetworkLinks",
 			"numberOfVirtualNetworkLinksWithRegistration", "provisioningState",
 		},
-		located: true, etag: plainETag,
+		located: true, location: "global", etag: plainETag,
 	}
 	linkKind = &kind{
 		typ: "Microsoft.Network/privateDnsZones/virtualNetworkLinks", plural: "virtualNetworkLinks", typeName: "VirtualNetworkLink",
 		props:    []string{"registrationEnabled", "resolutionPolicy", "virtualNetwork"},
 		readOnly: []string{"provisioningState", "virtualNetworkLinkState"},
-		located:  true, etag: plainETag,
+		located:  true, location: "global", etag: quotedETag,
 	}
 	recordKind = &kind{
 		typ: "Microsoft.Network/privateDnsZones/A", plural: "A", typeName: "RecordSet",
@@ -46,24 +47,22 @@ func recordID(c *call) string { return zoneID(c) + "/A/" + c.val("name") }
 func dnsPaths(c *call, _ string) opPaths { return dnsOps(c) }
 
 func (s *Server) putZone(c *call) (*reply, *apiError) {
-	return s.put(putSpec{
-		kind: zoneKind, id: zoneID, paths: dnsPaths, render: s.renderZone,
-		prepare: func(res *resource, p *parsed) (func(), *apiError) {
-			if p.location != "global" {
-				return nil, badRequest("The location '%s' is not valid for a private DNS zone; it must be 'global'.", p.location)
-			}
-			return func() { s.update(res, p) }, nil
-		},
-	})(c)
+	return s.put(putSpec{kind: zoneKind, id: zoneID, paths: dnsPaths, render: s.renderZone, emptyAccepted: true})(c)
 }
 
 func (s *Server) putLink(c *call) (*reply, *apiError) {
 	return s.put(putSpec{
-		kind: linkKind, id: linkID, parent: zoneID, paths: dnsPaths, render: s.renderLink,
-		prepare: func(res *resource, p *parsed) (func(), *apiError) {
-			if p.location != "global" {
-				return nil, badRequest("The location '%s' is not valid for a virtual network link; it must be 'global'.", p.location)
+		kind: linkKind, id: linkID, parent: zoneID, paths: dnsPaths, render: s.renderLink, emptyAccepted: true,
+		precondition: func(r *http.Request, existing *resource) *apiError {
+			err := checkPrecondition(r, existing)
+			if err != nil && existing != nil && r.Header.Get("If-None-Match") == "*" {
+				err = newError(http.StatusPreconditionFailed, "PreconditionFailed",
+					"The Virtual Network link %s for the Private DNS zone %s exists already and hence cannot be created again.", existing.name, zoneName(existing.id))
+				err.async = true
 			}
+			return err
+		},
+		prepare: func(res *resource, p *parsed) (func(), *apiError) {
 			vnet := refID(p.props, "virtualNetwork")
 			if vnet == "" {
 				return nil, badRequest("The virtual network link %s must reference a virtual network.", res.id)
@@ -72,13 +71,38 @@ func (s *Server) putLink(c *call) (*reply, *apiError) {
 			for _, other := range s.resources {
 				if other.kind == linkKind && other != res && strings.HasPrefix(key(other.id), zone+"/") &&
 					key(refID(other.props, "virtualNetwork")) == key(vnet) {
-					return nil, newError(http.StatusConflict, "Conflict",
-						"A virtual network cannot be linked to the same private DNS zone more than once. Virtual network %s is already linked by %s.", vnet, other.id)
+					name := zoneName(res.id)
+					err := badRequest("A virtual network cannot be linked to multiple zones with overlapping namespaces. You tried to link virtual network with '%s' and '%s' zones.", name, name)
+					err.async = true
+					return nil, err
 				}
 			}
 			return func() { s.update(res, p) }, nil
 		},
 	})(c)
+}
+
+// linkOperationPending turns away a change to the virtual network link res while op changes it.
+func linkOperationPending(res *resource, op *operation) *apiError {
+	e := newError(http.StatusConflict, "Conflict",
+		"Another operation is pending for requested object. Operation group '/operations/groups/id/|virtualNetworkLinks|%s|%s|%s|%s' already has 1 operations like '/operations/type/UpsertVirtualNetworkLink/id/%s' queued.",
+		res.sub, res.group, zoneName(res.id), res.name, op.id)
+	e.bare = true
+	return e
+}
+
+// recordPrecondition applies the If-Match and If-None-Match headers to a
+// change of the record set name, as private DNS answers them.
+func recordPrecondition(r *http.Request, existing *resource, name string) *apiError {
+	if checkPrecondition(r, existing) == nil {
+		return nil
+	}
+	e := newError(http.StatusPreconditionFailed, "PreconditionFailed", "The Record set %s has been modified (etag mismatch).", name)
+	if existing != nil && r.Header.Get("If-None-Match") == "*" {
+		e.Message = fmt.Sprintf("The Record set %s exists already and hence cannot be created again.", name)
+	}
+	e.bare = true
+	return e
 }
 
 // zoneName returns the zone of a link or record set ID.
@@ -96,13 +120,15 @@ func (s *Server) getZone(c *call) (*reply, *apiError) {
 }
 
 func (s *Server) getLink(c *call) (*reply, *apiError) {
-	return s.getDNS(c, linkKind, linkID(c), c.val("zone")+"/"+c.val("name"), s.renderLink)
+	return s.getDNS(c, linkKind, linkID(c), c.val("zone")+"/virtualNetworkLinks/"+c.val("name"), s.renderLink)
 }
 
 func (s *Server) getRecord(c *call) (*reply, *apiError) {
 	return s.getDNS(c, recordKind, recordID(c), c.val("zone")+"/A/"+c.val("name"), renderRecord)
 }
 
+// getDNS answers a get of the private DNS resource id of kind k, named in
+// errors by its path below Microsoft.Network/privateDnsZones.
 func (s *Server) getDNS(c *call, k *kind, id, name string, render func(*resource) map[string]any) (*reply, *apiError) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -110,10 +136,16 @@ func (s *Server) getDNS(c *call, k *kind, id, name string, render func(*resource
 		return nil, err
 	}
 	res := s.read(id)
-	if res == nil || res.kind != k {
-		return nil, resourceNotFound(zoneKind.typ, name, c.val("rg"))
+	if res != nil && res.kind == k {
+		return ok200(render(res)), nil
 	}
-	return ok200(render(res)), nil
+	if k == recordKind && s.read(zoneID(c)) != nil {
+		e := newError(http.StatusNotFound, "NotFound", "The resource record '%s' does not exist in resource group '%s' of subscription '%s'.",
+			c.val("name"), c.val("rg"), c.val("sub"))
+		e.bare = true
+		return nil, e
+	}
+	return nil, resourceNotFound(zoneKind.typ, name, c.val("rg"))
 }
 
 // zoneChildren counts the links (with registration) and record sets in the zone id. The caller holds s.mu.
@@ -204,11 +236,11 @@ func (s *Server) putRecord(c *call) (*reply, *apiError) {
 		return nil, err
 	}
 	if s.settled(zoneID(c)) == nil {
-		return nil, parentNotFound(c.val("zone"))
+		return nil, parentNotFound(recordKind, zoneID(c))
 	}
 	id := recordID(c)
 	res := s.settled(id)
-	if err := checkPrecondition(c.r, res); err != nil {
+	if err := recordPrecondition(c.r, res, c.val("name")); err != nil {
 		return nil, err
 	}
 	status := http.StatusOK
@@ -228,7 +260,7 @@ func (s *Server) deleteRecord(c *call) (*reply, *apiError) {
 		return nil, err
 	}
 	res := s.settled(recordID(c))
-	if err := checkPrecondition(c.r, res); err != nil {
+	if err := recordPrecondition(c.r, res, c.val("name")); err != nil {
 		return nil, err
 	}
 	if res == nil {

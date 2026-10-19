@@ -2,6 +2,7 @@ package arm
 
 import (
 	"cmp"
+	"fmt"
 	"maps"
 	"net/http"
 	"slices"
@@ -22,13 +23,23 @@ type kind struct {
 	// props are the properties the server records; readOnly are the ones it
 	// accepts, as the SDK sends them back, and drops.
 	props, readOnly []string
-	// located types have a location.
-	located bool
+	// located types have a location; location, when set, is the only one
+	// the type is offered in.
+	located  bool
+	location string
 	// etag formats the type's ETag from a UUID, or is nil for types without one.
 	etag func(string) string
+	// opName names the type in Microsoft.Network operation names, such as Nic in PutNicOperation.
+	opName string
 }
 
 func (k *kind) action(verb string) string { return k.typ + "/" + verb }
+
+// resourceType is the type without its namespace, such as privateDnsZones/A.
+func (k *kind) resourceType() string {
+	_, t, _ := strings.Cut(k.typ, "/")
+	return t
+}
 
 func weakETag(id string) string   { return `W/"` + id + `"` }
 func plainETag(id string) string  { return id }
@@ -105,6 +116,75 @@ func (s *Server) settled(id string) *resource {
 	return res
 }
 
+// claim returns the resource id names, for a change a call makes, or nil
+// when there is none. A change to it already in progress is resolved as the
+// resource's provider resolves it: Microsoft.Network and private DNS links
+// turn the call away while the other change runs, counting the call as a read
+// of that change; Compute lets the call preempt it, unless it is a deletion,
+// which verb, the name Compute gives the call's operation, is not allowed
+// during. Other changes in progress finish first. The caller holds s.mu.
+func (s *Server) claim(id, verb string) (*resource, *apiError) {
+	res := s.resources[key(id)]
+	if res == nil || res.pending == nil {
+		return res, nil
+	}
+	op := res.pending
+	switch res.kind {
+	case nsgKind, nicKind, pipKind, linkKind:
+		s.observe(op)
+		if op.complete == nil {
+			break
+		}
+		if res.kind == linkKind {
+			return nil, linkOperationPending(res, op)
+		}
+		return nil, anotherOperation(res, op)
+	case vmKind, vmssKind:
+		if res.state == stateDeleting {
+			return nil, markedForDeletion(res, verb)
+		}
+		s.preempt(op)
+	default:
+		s.finish(op)
+	}
+	return s.resources[key(id)], nil
+}
+
+// deletion returns the deletion of the resource id in progress, if any. The caller holds s.mu.
+func (s *Server) deletion(id string) *operation {
+	if res := s.resources[key(id)]; res != nil && res.state == stateDeleting {
+		return res.pending
+	}
+	return nil
+}
+
+// anotherOperation turns away a change to the network resource res while op changes it.
+func anotherOperation(res *resource, op *operation) *apiError {
+	verb := "Put"
+	if res.state == stateDeleting {
+		verb = "Delete"
+	}
+	e := newError(http.StatusTooManyRequests, "RetryableError", "A retryable error occurred.")
+	e.Details = []errorDetail{{
+		Code: "RetryableErrorDueToAnotherOperation",
+		Message: fmt.Sprintf("Operation %s%sOperation (%s) is updating resource %s. The call can be retried in 1 seconds.",
+			verb, res.kind.opName, op.id, res.id),
+	}}
+	e.Header = http.Header{"Retry-After-Ms": {retryAfterMS}}
+	return e
+}
+
+// markedForDeletion turns away the Compute operation verb on res while res is being deleted.
+func markedForDeletion(res *resource, verb string) *apiError {
+	what := "VM"
+	if res.kind == vmssKind {
+		what = "VM Scale Set"
+	}
+	return newError(http.StatusConflict, "OperationNotAllowed",
+		"Operation '%s' is not allowed on %s '%s' since the %s is marked for deletion. You can only retry the Delete operation (or wait for an ongoing one to complete).",
+		verb, what, res.name, what)
+}
+
 // read returns the resource id names, counting the read toward a change in
 // progress, or nil. The caller holds s.mu.
 func (s *Server) read(id string) *resource {
@@ -140,6 +220,9 @@ func parseBody(c *call, k *kind) (*parsed, *apiError) {
 		p.location = normalizeLocation(str(body, "location"))
 		if p.location == "" {
 			return nil, locationRequired()
+		}
+		if k.location != "" && p.location != k.location {
+			return nil, unregisteredLocation(k, p.location)
 		}
 	}
 	if p.tags, err = tagsOf(body); err != nil {
@@ -261,6 +344,8 @@ func (s *Server) remove(res *resource) {
 		s.releaseNIC(res)
 	case res.pip != nil:
 		delete(s.publicIPs, res.pip.address)
+	case res.vm != nil:
+		s.detachNICs(res, true)
 	case res.scale != nil:
 		for _, inst := range res.scale.instances {
 			s.releaseInstance(inst)

@@ -58,13 +58,14 @@ type ipConfigSpec struct {
 }
 
 type instance struct {
-	index   int
-	vmID    string
-	state   string
-	created time.Time
-	latest  bool
-	disk    string
-	nics    []*instanceNIC
+	index        int
+	vmID         string
+	computerName string
+	state        string
+	created      time.Time
+	latest       bool
+	disk         string
+	nics         []*instanceNIC
 }
 
 type instanceNIC struct {
@@ -95,13 +96,11 @@ func vmssID(c *call) string { return resourceID(c, vmssKind.typ, c.val("name")) 
 // vmssBody is a parsed scale set create or update.
 type vmssBody struct {
 	*parsed
-	skuName, skuTier string
-	capacity         int
-	capacitySet      bool
-	nics             []nicConfig
-	prefix           string
-	profile          string
-	userData         any
+	sku      *skuSpec
+	nics     []nicConfig
+	prefix   string
+	profile  string
+	userData any
 }
 
 var vmssOSMembers = []string{
@@ -109,27 +108,35 @@ var vmssOSMembers = []string{
 	"linuxConfiguration", "requireGuestProvisionSignal", "secrets", "windowsConfiguration",
 }
 
-// parseSKU reads a scale set's sku from top.
-func parseSKU(top map[string]any) (name, tier string, capacity int, capacitySet bool, err *apiError) {
+// skuSpec is a scale set's sku as a call gives it.
+type skuSpec struct {
+	name, tier  string
+	capacity    int
+	capacitySet bool
+}
+
+// parseSKU reads a scale set's sku from top, or nil when it has none.
+func parseSKU(top map[string]any) (*skuSpec, *apiError) {
 	sku, err := object(top, "sku")
 	if err != nil || sku == nil {
-		return "", "", 0, false, err
+		return nil, err
 	}
 	if err := checkMembers(sku, "Sku", "sku", "capacity", "name", "tier"); err != nil {
-		return "", "", 0, false, err
+		return nil, err
 	}
+	spec := &skuSpec{name: str(sku, "name"), tier: str(sku, "tier")}
 	if v, ok := sku["capacity"]; ok && v != nil {
 		n, ok := v.(json.Number)
 		c, convErr := n.Int64()
 		if !ok || convErr != nil || c < 0 {
-			return "", "", 0, false, invalidParameter("sku.capacity", "The value '%v' of sku.capacity is not valid.", v)
+			return nil, invalidParameter("sku.capacity", "The value '%v' of sku.capacity is not valid.", v)
 		}
 		if c > maxCapacity {
-			return "", "", 0, false, invalidParameter("sku.capacity", "The capacity %d exceeds the maximum of %d.", c, maxCapacity)
+			return nil, invalidParameter("sku.capacity", "The capacity %d exceeds the maximum of %d.", c, maxCapacity)
 		}
-		capacity, capacitySet = int(c), true
+		spec.capacity, spec.capacitySet = int(c), true
 	}
-	return str(sku, "name"), str(sku, "tier"), capacity, capacitySet, nil
+	return spec, nil
 }
 
 func parseScaleSet(c *call) (*vmssBody, *apiError) {
@@ -138,7 +145,7 @@ func parseScaleSet(c *call) (*vmssBody, *apiError) {
 		return nil, err
 	}
 	b := &vmssBody{parsed: p}
-	if b.skuName, b.skuTier, b.capacity, b.capacitySet, err = parseSKU(p.top); err != nil {
+	if b.sku, err = parseSKU(p.top); err != nil {
 		return nil, err
 	}
 	delete(p.top, "sku")
@@ -173,7 +180,7 @@ func parseScaleSet(c *call) (*vmssBody, *apiError) {
 		delete(os, "adminPassword")
 		delete(os, "customData")
 	}
-	b.prefix = cmp.Or(str(os, "computerNamePrefix"), c.val("name"))
+	b.prefix = str(os, "computerNamePrefix")
 	if b.nics, err = parseNICConfigs(vmp); err != nil {
 		return nil, err
 	}
@@ -297,33 +304,40 @@ func (s *Server) putScaleSet(c *call) (*reply, *apiError) {
 		return nil, err
 	}
 	id := vmssID(c)
-	existing := s.settled(id)
+	existing, err := s.claim(id, "Update VM Scale Set")
+	if err != nil {
+		return nil, err
+	}
 	if err := checkPrecondition(c.r, existing); err != nil {
 		return nil, err
 	}
 	res, status := existing, http.StatusOK
 	switch {
-	case res == nil && b.skuName == "":
+	case res == nil && b.sku == nil:
+		return nil, requiredParameter("sku")
+	case res == nil && b.sku.name == "":
 		return nil, requiredParameter("sku.name")
-	case res == nil && !b.capacitySet:
+	case b.sku != nil && !b.sku.capacitySet:
 		return nil, requiredParameter("sku.capacity")
 	case res == nil:
 		res, status = s.newResource(c, vmssKind, id, b.parsed), http.StatusCreated
 		res.scale = &scaleSet{instances: map[int]*instance{}}
 	case res.loc != b.location:
 		return nil, wrongLocation(res.name, res.loc, b.location, res.group)
+	case b.prefix != "" && !strings.EqualFold(b.prefix, res.scale.prefix):
+		return nil, changeNotAllowed("computerNamePrefix")
 	}
 	sc := res.scale
 	capacity := sc.capacity
-	if b.capacitySet {
-		capacity = b.capacity
+	if b.sku != nil {
+		capacity = b.sku.capacity
 	}
 	render := func() []byte { return encode(s.renderScaleSet(res)) }
 	paths := computeOps(c, b.location)
 	if c.opFault != nil {
 		op := s.begin(c, paths, 0, nil)
 		if status == http.StatusCreated {
-			sc.skuName, sc.skuTier, sc.capacity = b.skuName, b.skuTier, capacity
+			sc.skuName, sc.skuTier, sc.capacity = b.sku.name, b.sku.tier, capacity
 		}
 		return accepted(c, op, status, status, false, func() []byte { return withState(res, putState(status), render) }), nil
 	}
@@ -332,9 +346,10 @@ func (s *Server) putScaleSet(c *call) (*reply, *apiError) {
 			inst.latest = false
 		}
 	}
-	sc.skuName = cmp.Or(b.skuName, sc.skuName)
-	sc.skuTier = b.skuTier
-	sc.nics, sc.prefix, sc.profile, sc.userData = b.nics, b.prefix, b.profile, b.userData
+	if b.sku != nil {
+		sc.skuName, sc.skuTier = cmp.Or(b.sku.name, sc.skuName), cmp.Or(b.sku.tier, sc.skuTier)
+	}
+	sc.nics, sc.prefix, sc.profile, sc.userData = b.nics, cmp.Or(sc.prefix, b.prefix, c.val("name")), b.profile, b.userData
 	s.update(res, b.parsed)
 	s.resources[key(id)] = res
 	return s.rescale(c, res, capacity, status, putState(status)), nil
@@ -377,14 +392,17 @@ func (s *Server) rescale(c *call, res *resource, capacity, status int, state str
 // addresses its profile describes. The caller holds s.mu.
 func (s *Server) newInstance(res *resource) *instance {
 	sc := res.scale
-	inst := &instance{index: sc.next, vmID: s.newUUID(), state: stateSucceeded, created: s.now(), latest: true}
+	inst := &instance{
+		index: sc.next, vmID: s.newUUID(), computerName: computerName(sc.prefix, sc.next), state: stateSucceeded,
+		created: s.now(), latest: true,
+	}
 	sc.next++
 	inst.disk = fmt.Sprintf("%s_%d_OsDisk_1_%s", res.name, inst.index, s.newHex())
 	for _, cfg := range sc.nics {
 		nic := &instanceNIC{name: cfg.name, primary: cfg.primary}
 		nicID := inst.id(res) + "/networkInterfaces/" + cfg.name
 		for _, spec := range cfg.ips {
-			holder := key(nicID) + "/ipconfigurations/" + key(spec.name)
+			holder := nicID + "/ipConfigurations/" + spec.name
 			ip := &instanceIP{spec: spec, address: s.allocPrivate(spec.subnet, holder)}
 			if spec.pip != nil {
 				ip.public = s.allocPublic(holder)
@@ -431,7 +449,7 @@ func (s *Server) patchScaleSet(c *call) (*reply, *apiError) {
 	if props, _ := object(body, "properties"); len(props) > 0 {
 		return nil, unsupported("updating properties with PATCH is not supported; use PUT")
 	}
-	name, tier, capacity, capacitySet, err := parseSKU(body)
+	sku, err := parseSKU(body)
 	if err != nil {
 		return nil, err
 	}
@@ -445,7 +463,10 @@ func (s *Server) patchScaleSet(c *call) (*reply, *apiError) {
 	if err := s.writableGroup(c); err != nil {
 		return nil, err
 	}
-	res := s.settled(vmssID(c))
+	res, err := s.claim(vmssID(c), "Update VM Scale Set")
+	if err != nil {
+		return nil, err
+	}
 	if res == nil {
 		return nil, resourceNotFound(vmssKind.typ, c.val("name"), c.val("rg"))
 	}
@@ -453,8 +474,9 @@ func (s *Server) patchScaleSet(c *call) (*reply, *apiError) {
 		return nil, err
 	}
 	sc := res.scale
-	if !capacitySet {
-		capacity = sc.capacity
+	capacity := sc.capacity
+	if sku != nil && sku.capacitySet {
+		capacity = sku.capacity
 	}
 	if c.opFault != nil {
 		op := s.begin(c, computeOps(c, res.loc), 0, nil)
@@ -462,7 +484,9 @@ func (s *Server) patchScaleSet(c *call) (*reply, *apiError) {
 			return withState(res, stateUpdating, func() []byte { return encode(s.renderScaleSet(res)) })
 		}), nil
 	}
-	sc.skuName, sc.skuTier = cmp.Or(name, sc.skuName), cmp.Or(tier, sc.skuTier)
+	if sku != nil {
+		sc.skuName, sc.skuTier = cmp.Or(sku.name, sc.skuName), cmp.Or(sku.tier, sc.skuTier)
+	}
 	if hasTags {
 		res.tags = tags
 	}
@@ -513,7 +537,13 @@ func (s *Server) deleteScaleSet(c *call) (*reply, *apiError) {
 	if err := s.writableGroup(c); err != nil {
 		return nil, err
 	}
-	res := s.settled(vmssID(c))
+	if op := s.deletion(vmssID(c)); op != nil {
+		return accepted(c, op, http.StatusOK, http.StatusAccepted, true, noBody), nil
+	}
+	res, err := s.claim(vmssID(c), "")
+	if err != nil {
+		return nil, err
+	}
 	if res == nil {
 		return &reply{status: http.StatusNoContent}, nil
 	}
@@ -543,7 +573,10 @@ func (s *Server) deleteInstances(c *call) (*reply, *apiError) {
 	if err := s.writableGroup(c); err != nil {
 		return nil, err
 	}
-	res := s.settled(vmssID(c))
+	res, err := s.claim(vmssID(c), "deleteInstances")
+	if err != nil {
+		return nil, err
+	}
 	if res == nil {
 		return nil, resourceNotFound(vmssKind.typ, c.val("name"), c.val("rg"))
 	}
@@ -554,7 +587,7 @@ func (s *Server) deleteInstances(c *call) (*reply, *apiError) {
 		n, convErr := strconv.Atoi(sv)
 		inst := sc.instances[n]
 		if convErr != nil || inst == nil {
-			return nil, instanceNotFound()
+			return nil, invalidParameter("instanceIds", "The provided instanceId %v is not an active Virtual Machine Scale Set VM instanceId.", v)
 		}
 		if !slices.Contains(doomed, inst) {
 			doomed = append(doomed, inst)
@@ -636,7 +669,7 @@ func (s *Server) renderInstance(res *resource, inst *instance, expand bool) map[
 		instOS = map[string]any{}
 	}
 	delete(instOS, "computerNamePrefix")
-	instOS["computerName"] = computerName(sc.prefix, inst.index)
+	instOS["computerName"] = inst.computerName
 	props["osProfile"] = instOS
 	var nics []any
 	for _, nic := range inst.nics {
@@ -818,7 +851,7 @@ func (s *Server) ScaleSets() []ScaleSet {
 		}
 		for _, inst := range sc.sorted() {
 			vm := ScaleSetVM{
-				ID: inst.id(res), InstanceID: strconv.Itoa(inst.index), ComputerName: computerName(sc.prefix, inst.index),
+				ID: inst.id(res), InstanceID: strconv.Itoa(inst.index), ComputerName: inst.computerName,
 				ProvisioningState: inst.state,
 			}
 			for _, nic := range inst.nics {

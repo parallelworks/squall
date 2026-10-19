@@ -17,8 +17,9 @@
 //     public IP addresses (create or update, get, delete), and the IP
 //     configurations and public IP addresses of scale set VMs (get);
 //   - Microsoft.Network private DNS: zones and virtual network links in the
-//     global location (create or update, get), and A record sets (create or
-//     update, get, delete);
+//     global location (create or update, get; another location fails with
+//     MissingRegistrationForLocation), and A record sets (create or update,
+//     get, delete);
 //   - Microsoft.Compute virtual machines: create or update, get, list in a
 //     group, instance view, deallocate, start and delete;
 //   - Microsoft.Compute scale sets in the Uniform orchestration mode: create
@@ -40,9 +41,20 @@
 //     Deleting, for more reads of it or its operation, or until
 //     [Server.Settle]. Polling URLs carry a retry-after-ms of 10, so the SDK
 //     polls quickly. Deleting a resource group answers 202 with a Location
-//     URL only, as Azure does. A change to a resource that has another in
-//     progress finishes that one first; a change to a resource group being
-//     deleted, or to anything in it, fails with ResourceGroupBeingDeleted.
+//     URL only, and a private DNS zone or link change in progress answers 202
+//     with an empty object, as Azure does.
+//   - A change to a resource that has another in progress is answered as its
+//     provider answers it. Network security groups, network interfaces and
+//     public IP addresses fail it with 429 RetryableError
+//     (RetryableErrorDueToAnotherOperation) and virtual network links with 409
+//     Conflict, counting the call as a read of the change in progress. A VM
+//     or scale set change preempts the one in progress, which takes effect
+//     and ends Canceled with OperationPreempted, unless that one is a
+//     deletion: then a delete answers with it and other changes fail with 409
+//     OperationNotAllowed. Other changes in progress, such as a zone's, and
+//     those to resources a call references, finish first. A change to a
+//     resource group being deleted, or to anything in it, fails with
+//     ResourceGroupBeingDeleted.
 //   - Resource names, subscription IDs and locations are not validated, and
 //     names match without regard to case. Tags are not validated. Fields the
 //     server only records keep the JSON the caller sent; fields it does not
@@ -62,13 +74,12 @@
 //     sku.capacity creates VMs, each with the network interfaces and public
 //     IP addresses its profile describes; lowering it deletes the newest,
 //     whatever the scaleInPolicy. Overprovisioning is not modeled. A PUT that
-//     leaves out sku.capacity on an existing scale set keeps its capacity
-//     rather than scaling to zero: a PUT that changes the model must not
-//     delete VMs, and Azure documents no other default. A new scale set needs
-//     sku.name and sku.capacity. A PUT that changes the VM profile marks
-//     existing VMs latestModelApplied false. A PATCH takes sku and tags only.
-//     Deleting instances that do not exist fails with NotFound and deletes
-//     nothing. Scale set VMs are always running.
+//     leaves out sku keeps the scale set's sku and capacity; one that gives a
+//     sku must give its capacity, as must a new scale set. A PUT that changes
+//     the VM profile marks existing VMs latestModelApplied false, and one that
+//     changes computerNamePrefix fails with PropertyChangeNotAllowed. A PATCH
+//     takes sku and tags only. Deleting instances that do not exist fails with
+//     InvalidParameter and deletes nothing. Scale set VMs are always running.
 //   - Resource SKUs list none: a caller that checks availability sees no
 //     restrictions.
 //
@@ -81,10 +92,10 @@
 // with an operation that ends in the fault's error without the call taking
 // effect, whatever [WithSettleAfter] says; other calls fail as
 // [fault.ModeReject] does. A fault's Reason is the error code, except that the
-// fault package's generic reasons become the code for their status, such as
-// ServiceUnavailable or TooManyRequests. The SDK retries 408, 429 and 5xx
-// answers, and keeps polling a resource group deletion whose Location answers
-// one, so fail that operation with a status such as 409.
+// fault package's generic reasons become the code ARM uses, such as
+// ServiceUnavailable or SubscriptionRequestsThrottled. The SDK retries 408,
+// 429 and 5xx answers, and keeps polling a resource group deletion whose
+// Location answers one, so fail that operation with a status such as 409.
 //
 // A lost response aborts the handler with [http.ErrAbortHandler] after
 // sending the response header, so the [http.Server] serving it closes the
@@ -96,6 +107,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/netip"
 	"slices"
@@ -154,10 +166,10 @@ func WithClock(now func() time.Time) Option {
 }
 
 // WithSettleAfter sets how many reads see a change in progress before it
-// finishes: gets and lists that return the resource, and polls of its
-// operation. The default, 0, finishes every change before the call that makes
-// it returns, with no operation to poll. A negative n finishes changes only on
-// [Server.Settle].
+// finishes: gets and lists that return the resource, polls of its operation,
+// and calls turned away because of it. The default, 0, finishes every change
+// before the call that makes it returns, with no operation to poll. A
+// negative n finishes changes only on [Server.Settle].
 func WithSettleAfter(n int) Option {
 	return func(s *Server) { s.settleAfter = n }
 }
@@ -392,7 +404,7 @@ func readObject(r *http.Request) (map[string]any, *apiError) {
 // checkMembers rejects a key of m that is not in known, as ARM rejects members
 // it does not know. path names m in the request, for the message.
 func checkMembers(m map[string]any, typeName, path string, known ...string) *apiError {
-	for k := range m {
+	for _, k := range slices.Sorted(maps.Keys(m)) {
 		if !slices.Contains(known, k) {
 			return unknownMember(k, typeName, strings.TrimPrefix(path+"."+k, "."))
 		}
