@@ -133,7 +133,7 @@ type errorBody struct {
 }
 
 type errorDetail struct {
-	Code    string        `json:"code"`
+	Code    string        `json:"code,omitzero"`
 	Message string        `json:"message"`
 	Target  string        `json:"target,omitzero"`
 	Details []errorDetail `json:"details,omitzero"`

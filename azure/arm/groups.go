@@ -112,20 +112,58 @@ func (s *Server) deleteGroup(c *call) (*reply, *apiError) {
 			s.finish(res.pending)
 		}
 	}
-	op := s.begin(c, groupOps(c), http.StatusOK, func() {
-		for _, res := range s.resources {
-			if res.inGroup(gk) {
-				s.remove(res)
-			}
+	op := s.begin(c, groupOps(c), http.StatusOK, func() *apiError {
+		g.state, g.pending = stateSucceeded, nil
+		if err := s.emptyGroup(g, gk); err != nil {
+			return err
 		}
 		if s.groups[gk] == g {
 			delete(s.groups, gk)
 		}
+		return nil
 	})
 	if op.status == opInProgress {
 		g.state, g.pending = stateDeleting, op
 	}
 	return accepted(c, op, http.StatusOK, http.StatusAccepted, true, noBody), nil
+}
+
+// emptyGroup deletes what the group g, with key gk, holds, each resource once
+// nothing still uses it, and fails with ResourceGroupDeletionBlocked when
+// something outside the group keeps some in use. The caller holds s.mu.
+func (s *Server) emptyGroup(g *group, gk string) *apiError {
+	for removed := true; removed; {
+		removed = false
+		for _, res := range s.resources {
+			if res.inGroup(gk) && s.checkUnused(res) == nil {
+				s.remove(res)
+				removed = true
+			}
+		}
+	}
+	var left []*resource
+	for _, res := range s.resources {
+		if res.inGroup(gk) {
+			left = append(left, res)
+		}
+	}
+	if len(left) == 0 {
+		return nil
+	}
+	slices.SortFunc(left, func(a, b *resource) int { return cmp.Compare(key(a.id), key(b.id)) })
+	names := make([]string, 0, len(left))
+	details := make([]errorDetail, 0, len(left))
+	for _, res := range left {
+		names = append(names, res.kind.typ+"/"+res.name)
+		inner := s.checkUnused(res)
+		body := map[string]any{"error": map[string]any{"code": inner.Code, "message": inner.Message, "details": []any{}}}
+		details = append(details, errorDetail{Target: res.id, Message: string(encode(body))})
+	}
+	e := newError(http.StatusConflict, "ResourceGroupDeletionBlocked",
+		"Deletion of resource group '%s' failed as resources with identifiers '%s' could not be deleted. The provisioning state of the resource group will be rolled back. The tracking Id is '%s'. Please check audit logs for more details.",
+		g.name, strings.Join(names, ","), s.newUUID())
+	e.Details = details
+	return e
 }
 
 func (s *Server) listGroups(c *call) (*reply, *apiError) {

@@ -31,8 +31,9 @@ type operation struct {
 	start, end time.Time
 	// wait is how many more reads see the operation in progress.
 	wait int
-	// complete applies the call's effect; it is nil once the operation is done.
-	complete func()
+	// complete applies the call's effect, returning the error the operation
+	// ends in if it fails; it is nil once the operation is done.
+	complete func() *apiError
 }
 
 type opStatusBody struct {
@@ -77,7 +78,7 @@ func groupOps(c *call) opPaths {
 // complete running. Otherwise complete applies the call's effect, at once or
 // after the reads [WithSettleAfter] sets; until then the caller shows the
 // resource in progress. The caller holds s.mu.
-func (s *Server) begin(c *call, paths opPaths, resultStatus int, complete func()) *operation {
+func (s *Server) begin(c *call, paths opPaths, resultStatus int, complete func() *apiError) *operation {
 	id := s.newUUID()
 	op := &operation{
 		id: id, resultPath: paths.result + id, resultStatus: cmp.Or(resultStatus, http.StatusNoContent),
@@ -91,8 +92,7 @@ func (s *Server) begin(c *call, paths opPaths, resultStatus int, complete func()
 	case c.opFault != nil:
 		op.status, op.err, op.end = opFailed, c.opFault, s.now()
 	case s.settleAfter == 0:
-		complete()
-		op.status, op.end = opSucceeded, s.now()
+		op.done(complete(), s.now())
 	default:
 		op.status, op.complete, op.wait = opInProgress, complete, max(s.settleAfter, 0)
 		s.pending[op] = struct{}{}
@@ -121,8 +121,15 @@ func (s *Server) finish(op *operation) {
 	complete := op.complete
 	op.complete = nil
 	delete(s.pending, op)
-	complete()
-	op.status, op.end = opSucceeded, s.now()
+	op.done(complete(), s.now())
+}
+
+// done ends op at t, Failed with err when set and Succeeded otherwise.
+func (op *operation) done(err *apiError, t time.Time) {
+	op.status, op.err, op.end = opSucceeded, err, t
+	if err != nil {
+		op.status = opFailed
+	}
 }
 
 // preempt ends op as Compute ends an operation a newer call supersedes: what

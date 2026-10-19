@@ -354,6 +354,91 @@ func TestDeleteResourceGroupFailedOperation(t *testing.T) {
 	}
 }
 
+func TestDeleteResourceGroupBlockedByResourcesInUse(t *testing.T) {
+	c := setup(t)
+	c.createGroup(t, group, nil)
+	c.createGroup(t, "app", nil)
+	nsg := c.createNSG(t, "nsg")
+	pip := c.createPIP(t, "pip")
+	c.createNSG(t, "spare")
+	c.createVM(t, "vm", c.createNIC(t, group, "own", nsg.ID))
+	shared := c.createNIC(t, group, "shared", nil)
+	np, err := c.nics.BeginCreateOrUpdate(t.Context(), "app", "app-nic", nicBody(nsg.ID, pip.ID), nil)
+	if _, err = wait(t, np, err); err != nil {
+		t.Fatal(err)
+	}
+	vp, err := c.vms.BeginCreateOrUpdate(t.Context(), "app", "app-vm", vmBody(shared.ID), nil)
+	if _, err = wait(t, vp, err); err != nil {
+		t.Fatal(err)
+	}
+	p, err := c.groups.BeginDelete(t.Context(), group, nil)
+	_, err = wait(t, p, err)
+	if code(err) != "ResourceGroupDeletionBlocked" || status(err) != http.StatusConflict {
+		t.Fatalf("deleting a group whose resources are in use = %v", err)
+	}
+	for _, want := range []string{"NicInUse", "InUseNetworkSecurityGroupCannotBeDeleted", "PublicIPAddressCannotBeDeleted"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error does not report %s: %v", want, err)
+		}
+	}
+	if got := c.server.ResourceGroups(); len(got) != 2 || got[1].Name != group || got[1].ProvisioningState != "Succeeded" {
+		t.Fatalf("groups after a blocked deletion = %+v", got)
+	}
+	prefix := "/subscriptions/" + subscription + "/resourceGroups/" + group + "/providers/Microsoft.Network/"
+	var left []string
+	for _, r := range c.server.Resources() {
+		if rest, ok := strings.CutPrefix(r.ID, prefix); ok {
+			left = append(left, rest)
+		}
+	}
+	if want := []string{"networkInterfaces/shared", "networkSecurityGroups/nsg", "publicIPAddresses/pip"}; !slices.Equal(left, want) {
+		t.Fatalf("left in the group = %v, want %v", left, want)
+	}
+	dp, err := c.groups.BeginDelete(t.Context(), "app", nil)
+	if _, err = wait(t, dp, err); err != nil {
+		t.Fatal(err)
+	}
+	p, err = c.groups.BeginDelete(t.Context(), group, nil)
+	if _, err = wait(t, p, err); err != nil {
+		t.Fatalf("deleting the group once nothing uses it = %v", err)
+	}
+	if got := c.server.Resources(); len(got) != 0 {
+		t.Fatalf("resources = %+v", got)
+	}
+}
+
+func TestDeleteResourceGroupBlockedWhileSettling(t *testing.T) {
+	c := setup(t, arm.WithSettleAfter(-1))
+	c.createGroup(t, group, nil)
+	c.createGroup(t, "app", nil)
+	c.server.Settle()
+	nic := c.createNIC(t, group, "nic", nil)
+	c.server.Settle()
+	vp, err := c.vms.BeginCreateOrUpdate(t.Context(), "app", "vm", vmBody(nic.ID), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.server.Settle()
+	if _, err := vp.PollUntilDone(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	p, err := c.groups.BeginDelete(t.Context(), group, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pollOnce(t, p)
+	c.server.Settle()
+	if _, err := p.PollUntilDone(t.Context(), nil); code(err) != "ResourceGroupDeletionBlocked" {
+		t.Fatalf("a blocked deletion = %v", err)
+	}
+	if g, err := c.groups.Get(t.Context(), group, nil); err != nil || *g.Properties.ProvisioningState != "Succeeded" {
+		t.Fatalf("group after a blocked deletion = %+v, %v", g, err)
+	}
+	if _, err := c.nics.Get(t.Context(), group, "nic", nil); err != nil {
+		t.Fatalf("the interface in use = %v", err)
+	}
+}
+
 func TestResourceSKUsListNone(t *testing.T) {
 	c := setup(t)
 	page, err := c.skus.NewListPager(&armcompute.ResourceSKUsClientListOptions{Filter: new("location eq 'eastus'")}).NextPage(t.Context())

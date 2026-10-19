@@ -341,6 +341,9 @@ func (s *Server) putScaleSet(c *call) (*reply, *apiError) {
 		}
 		return accepted(c, op, status, status, false, func() []byte { return withState(res, putState(status), render) }), nil
 	}
+	if err := s.checkScaleOut(b.nics, capacity-len(sc.sorted())); err != nil {
+		return nil, err
+	}
 	if sc.profile != "" && sc.profile != b.profile {
 		for _, inst := range sc.instances {
 			inst.latest = false
@@ -415,6 +418,24 @@ func (s *Server) newInstance(res *resource) *instance {
 	return inst
 }
 
+// checkScaleOut fails adding n VMs with the interfaces nics when the address
+// ranges cannot hold their addresses. The caller holds s.mu.
+func (s *Server) checkScaleOut(nics []nicConfig, n int) *apiError {
+	var subnets []string
+	public := 0
+	for range max(n, 0) {
+		for _, cfg := range nics {
+			for _, spec := range cfg.ips {
+				subnets = append(subnets, spec.subnet)
+				if spec.pip != nil {
+					public++
+				}
+			}
+		}
+	}
+	return s.checkFree(subnets, public, "")
+}
+
 // dropInstance removes a VM from its scale set. The caller holds s.mu.
 func (s *Server) dropInstance(sc *scaleSet, inst *instance) {
 	s.releaseInstance(inst)
@@ -483,6 +504,9 @@ func (s *Server) patchScaleSet(c *call) (*reply, *apiError) {
 		return accepted(c, op, http.StatusOK, http.StatusOK, false, func() []byte {
 			return withState(res, stateUpdating, func() []byte { return encode(s.renderScaleSet(res)) })
 		}), nil
+	}
+	if err := s.checkScaleOut(sc.nics, capacity-len(sc.sorted())); err != nil {
+		return nil, err
 	}
 	if sku != nil {
 		sc.skuName, sc.skuTier = cmp.Or(sku.name, sc.skuName), cmp.Or(sku.tier, sc.skuTier)

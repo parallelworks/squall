@@ -234,6 +234,15 @@ func (s *Server) prepareNIC(res *resource, p *parsed) (func(), *apiError) {
 		}
 		taken[k] = true
 	}
+	var subnets []string
+	for _, ic := range configs {
+		if !ic.static || s.private.contains(ic.address) {
+			subnets = append(subnets, ic.subnet)
+		}
+	}
+	if err := s.checkFree(subnets, 0, res.id); err != nil {
+		return nil, err
+	}
 	return func() {
 		if res.nic != nil {
 			s.releaseNIC(res)
@@ -342,6 +351,11 @@ func (s *Server) preparePIP(res *resource, p *parsed) (func(), *apiError) {
 		}
 	} else {
 		p.top["sku"] = map[string]any{"name": "Standard", "tier": "Regional"}
+	}
+	if res.pip == nil {
+		if err := s.checkFree(nil, 1, ""); err != nil {
+			return nil, err
+		}
 	}
 	return func() {
 		if res.pip == nil {
@@ -578,18 +592,6 @@ func macAddress(guid string) string {
 	return fmt.Sprintf("00-0D-3A-%02X-%02X-%02X", b[1], b[2], b[3])
 }
 
-// allocPrivate takes the next free private address in subnet for holder. The caller holds s.mu.
-func (s *Server) allocPrivate(subnet, holder string) netip.Addr {
-	used := s.privateIPs[key(subnet)]
-	for {
-		s.nextPrivate = s.nextPrivate.Next()
-		if used[s.nextPrivate] == "" {
-			s.takePrivate(subnet, s.nextPrivate, holder)
-			return s.nextPrivate
-		}
-	}
-}
-
 func (s *Server) takePrivate(subnet string, a netip.Addr, holder string) {
 	used := s.privateIPs[key(subnet)]
 	if used == nil {
@@ -601,17 +603,6 @@ func (s *Server) takePrivate(subnet string, a netip.Addr, holder string) {
 
 func (s *Server) releasePrivate(subnet string, a netip.Addr) {
 	delete(s.privateIPs[key(subnet)], a)
-}
-
-// allocPublic takes the next free public address for holder. The caller holds s.mu.
-func (s *Server) allocPublic(holder string) netip.Addr {
-	for {
-		s.nextPublic = s.nextPublic.Next()
-		if s.publicIPs[s.nextPublic] == "" {
-			s.publicIPs[s.nextPublic] = holder
-			return s.nextPublic
-		}
-	}
 }
 
 // releaseNIC frees the addresses of the interface res. The caller holds s.mu.

@@ -2,6 +2,8 @@ package arm_test
 
 import (
 	"net/http"
+	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 
@@ -294,5 +296,52 @@ func TestNetworkChangeInProgressConvergesWhenRetried(t *testing.T) {
 	d, err := c.pips.BeginDelete(t.Context(), group, "pip", nil)
 	if _, err = wait(t, d, err); err != nil {
 		t.Fatalf("deleting a public IP being created = %v", err)
+	}
+}
+
+func TestAddressRangesRunOut(t *testing.T) {
+	c := setup(t, arm.WithPrivateRange(netip.MustParsePrefix("10.9.0.0/29")), arm.WithPublicRange(netip.MustParsePrefix("100.64.0.0/30")))
+	c.createGroup(t, group, nil)
+	var got []string
+	for _, name := range []string{"nic-1", "nic-2", "nic-3"} {
+		nic := c.createNIC(t, group, name, nil)
+		got = append(got, *nic.Properties.IPConfigurations[0].Properties.PrivateIPAddress)
+	}
+	if want := []string{"10.9.0.4", "10.9.0.5", "10.9.0.6"}; !slices.Equal(got, want) {
+		t.Fatalf("addresses = %v, want %v", got, want)
+	}
+	p, err := c.nics.BeginCreateOrUpdate(t.Context(), group, "nic-4", nicBody(nil, nil), nil)
+	if _, err = wait(t, p, err); code(err) != "SubnetIsFull" || status(err) != http.StatusBadRequest {
+		t.Fatalf("an interface in a full subnet = %v", err)
+	}
+	if _, err := c.nics.Get(t.Context(), group, "nic-4", nil); code(err) != "ResourceNotFound" {
+		t.Fatalf("the interface that did not fit = %v", err)
+	}
+	if _, err := c.sets.BeginCreateOrUpdate(t.Context(), group, "set", scaleSetBody(new(int64(1))), nil); code(err) != "SubnetIsFull" {
+		t.Fatalf("a scale set in a full subnet = %v", err)
+	}
+	other := nicBody(nil, nil)
+	other.Properties.IPConfigurations[0].Properties.Subnet.ID = new(vnet + "/subnets/other")
+	p, err = c.nics.BeginCreateOrUpdate(t.Context(), group, "nic-4", other, nil)
+	if _, err = wait(t, p, err); err != nil {
+		t.Fatalf("an interface in another subnet = %v", err)
+	}
+	dp, err := c.nics.BeginDelete(t.Context(), group, "nic-2", nil)
+	if _, err = wait(t, dp, err); err != nil {
+		t.Fatal(err)
+	}
+	if nic := c.createNIC(t, group, "nic-5", nil); *nic.Properties.IPConfigurations[0].Properties.PrivateIPAddress != "10.9.0.5" {
+		t.Fatalf("a freed address = %s, want 10.9.0.5", *nic.Properties.IPConfigurations[0].Properties.PrivateIPAddress)
+	}
+
+	for _, name := range []string{"pip-1", "pip-2", "pip-3"} {
+		c.createPIP(t, name)
+	}
+	pp, err := c.pips.BeginCreateOrUpdate(t.Context(), group, "pip-4", armnetwork.PublicIPAddress{Location: new(location)}, nil)
+	if _, err = wait(t, pp, err); code(err) != "PublicIPCountLimitReached" || status(err) != http.StatusBadRequest {
+		t.Fatalf("a public IP address past the range = %v", err)
+	}
+	if got := c.server.PublicIPAddresses(); len(got) != 3 || got[2].IPAddress != "100.64.0.3" {
+		t.Fatalf("public addresses = %+v", got)
 	}
 }

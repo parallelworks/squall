@@ -12,7 +12,8 @@
 // It covers:
 //
 //   - resource groups: get, check existence, create or update, list (with
-//     tag filters) and delete, which deletes everything in the group;
+//     tag filters) and delete, which deletes everything in the group that
+//     nothing outside it uses;
 //   - Microsoft.Network: network security groups, network interfaces and
 //     public IP addresses (create or update, get, delete), and the IP
 //     configurations and public IP addresses of scale set VMs (get);
@@ -55,6 +56,17 @@
 //     those to resources a call references, finish first. A change to a
 //     resource group being deleted, or to anything in it, fails with
 //     ResourceGroupBeingDeleted.
+//   - Deleting a resource group deletes each resource in it once nothing uses
+//     it. When something outside the group still uses a resource in it, such
+//     as a VM in another group attached to one of its network interfaces, or
+//     an interface elsewhere that references its network security group or
+//     public IP address, the deletion deletes the rest and its operation fails
+//     with 409 ResourceGroupDeletionBlocked, leaving the group Succeeded with
+//     the resources in use and what they use. The error has a detail for each
+//     resource left, whose target is its ID and whose message is the error
+//     deleting it alone answers, such as NicInUse, as Azure reports it. The
+//     status, and that everything else is deleted before the operation
+//     fails, are inferred.
 //   - Resource names, subscription IDs and locations are not validated, and
 //     names match without regard to case. Tags are not validated. Fields the
 //     server only records keep the JSON the caller sent; fields it does not
@@ -62,9 +74,14 @@
 //     model, such as a Flexible scale set, with BadRequest.
 //   - Virtual networks and subnets are not modeled: subnet and virtual network
 //     IDs are recorded, not checked. Private IP addresses come from
-//     10.0.0.0/8, unique within a subnet ID; public ones from 100.64.0.0/10,
-//     unique across the server, assigned when the address is created whatever
-//     its allocation method. Network security groups list no default rules.
+//     10.0.0.0/8 ([WithPrivateRange]), unique within a subnet ID, without the
+//     range's first four and last addresses, which Azure reserves in a
+//     subnet; public ones from 100.64.0.0/10 ([WithPublicRange]), unique
+//     across the server, assigned when the address is created whatever its
+//     allocation method. A change that needs more addresses than the range
+//     has free fails with SubnetIsFull or PublicIPCountLimitReached, the
+//     codes Azure answers for a full subnet and the public IP address quota.
+//     Network security groups list no default rules.
 //   - A virtual machine takes existing network interfaces only, not
 //     networkInterfaceConfigurations. Its OS disk gets a name and a managed
 //     disk ID, with the group's name upper-cased as Azure writes it, but disks
@@ -138,18 +155,18 @@ type Server struct {
 	settleAfter int
 	routes      []route
 
-	mu          sync.Mutex
-	seq         uint64
-	groups      map[string]*group
-	resources   map[string]*resource
-	ops         map[string]*operation
-	opOrder     []string
-	opNext      int
-	pending     map[*operation]struct{}
-	privateIPs  map[string]map[netip.Addr]string
-	publicIPs   map[netip.Addr]string
-	nextPrivate netip.Addr
-	nextPublic  netip.Addr
+	mu         sync.Mutex
+	seq        uint64
+	groups     map[string]*group
+	resources  map[string]*resource
+	ops        map[string]*operation
+	opOrder    []string
+	opNext     int
+	pending    map[*operation]struct{}
+	privateIPs map[string]map[netip.Addr]string
+	publicIPs  map[netip.Addr]string
+	private    *pool
+	public     *pool
 }
 
 // Option configures a [Server].
@@ -185,8 +202,8 @@ func New(opts ...Option) *Server {
 		privateIPs: map[string]map[netip.Addr]string{},
 		publicIPs:  map[netip.Addr]string{},
 		// Neither range is routable on the internet, so a test cannot reach a real host by mistake.
-		nextPrivate: netip.MustParseAddr("10.0.0.3"),
-		nextPublic:  netip.MustParseAddr("100.64.0.0"),
+		private: newPool(netip.MustParsePrefix("10.0.0.0/8"), 4, 1),
+		public:  newPool(netip.MustParsePrefix("100.64.0.0/10"), 1, 0),
 	}
 	for _, opt := range opts {
 		opt(s)

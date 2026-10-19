@@ -307,11 +307,12 @@ func envelope(res *resource) (map[string]any, map[string]any) {
 // finishes, then Succeeded; done, when set, applies the rest of the effect.
 // The caller holds s.mu.
 func (s *Server) change(c *call, res *resource, paths opPaths, resultStatus int, state string, done func()) *operation {
-	op := s.begin(c, paths, resultStatus, func() {
+	op := s.begin(c, paths, resultStatus, func() *apiError {
 		res.state, res.pending = stateSucceeded, nil
 		if done != nil {
 			done()
 		}
+		return nil
 	})
 	if op.status == opInProgress {
 		res.state, res.pending = state, op
