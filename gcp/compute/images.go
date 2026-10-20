@@ -22,16 +22,6 @@ type Image struct {
 	SelfLink   string
 }
 
-// Snapshot is a disk snapshot that instances and disks are created from.
-// Register one with [Server.PutSnapshot].
-type Snapshot struct {
-	Name string
-	// DiskSizeGB is the size of the disk the snapshot was taken of: 10 when zero.
-	DiskSizeGB int64
-	ID         uint64
-	SelfLink   string
-}
-
 // PutImage registers img in project, replacing an image of the same name, and
 // returns it with its ID and selfLink. A disk or instance can boot only from
 // an image registered here. Public images live in their own projects, such
@@ -47,21 +37,6 @@ func (s *Server) PutImage(project string, img Image) (Image, error) {
 	img.DiskSizeGB = cmp.Or(img.DiskSizeGB, defaultDiskSizeGB)
 	s.images[path] = &img
 	return img, nil
-}
-
-// PutSnapshot registers snap in project, replacing a snapshot of the same
-// name, and returns it with its ID and selfLink.
-func (s *Server) PutSnapshot(project string, snap Snapshot) (Snapshot, error) {
-	if !validName(snap.Name) {
-		return Snapshot{}, invalid("Invalid value for field 'resource.name': '%s'. Must be a match of regex '(?:[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?)'", snap.Name)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	path := "projects/" + project + "/global/snapshots/" + snap.Name
-	snap.ID, snap.SelfLink = s.newID(), selfLinkBase+path
-	snap.DiskSizeGB = cmp.Or(snap.DiskSizeGB, defaultDiskSizeGB)
-	s.snapshots[path] = &snap
-	return snap, nil
 }
 
 // relPath turns a resource reference, a full or partial URL, into a path
@@ -113,10 +88,13 @@ func (s *Server) resolveSource(project, field, image, snapshot string) (source, 
 		}
 		return source{image: img.SelfLink, imageID: img.ID, sizeGB: Int64(img.DiskSizeGB)}, nil
 	case snapshot != "":
-		path := relPath(snapshot, project)
-		snap, ok := s.snapshots[path]
+		global, name, _ := strings.Cut(relPath(snapshot, project), "/snapshots/")
+		snap, ok := lookupIn(s.snapshots, global, name)
 		if !ok {
 			return source{}, missingRef(field+".sourceSnapshot", snapshot, "snapshot")
+		}
+		if snap.Status != snapshotReady {
+			return source{}, notReady(strings.TrimPrefix(snap.SelfLink, selfLinkBase))
 		}
 		return source{snapshot: snap.SelfLink, sizeGB: Int64(snap.DiskSizeGB)}, nil
 	}

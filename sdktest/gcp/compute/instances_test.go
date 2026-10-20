@@ -32,6 +32,7 @@ type clients struct {
 	zoneOps    *gcompute.ZoneOperationsClient
 	zones      *gcompute.ZonesClient
 	disks      *gcompute.DisksClient
+	snapshots  *gcompute.SnapshotsClient
 	addresses  *gcompute.AddressesClient
 	routes     *gcompute.RoutesClient
 	templates  *gcompute.InstanceTemplatesClient
@@ -58,6 +59,7 @@ func setup(t *testing.T, opts ...compute.Option) *clients {
 		func() error { c.zoneOps, err = gcompute.NewZoneOperationsRESTClient(ctx, o...); return err },
 		func() error { c.zones, err = gcompute.NewZonesRESTClient(ctx, o...); return err },
 		func() error { c.disks, err = gcompute.NewDisksRESTClient(ctx, o...); return err },
+		func() error { c.snapshots, err = gcompute.NewSnapshotsRESTClient(ctx, o...); return err },
 		func() error { c.addresses, err = gcompute.NewAddressesRESTClient(ctx, o...); return err },
 		func() error { c.routes, err = gcompute.NewRoutesRESTClient(ctx, o...); return err },
 		func() error { c.templates, err = gcompute.NewInstanceTemplatesRESTClient(ctx, o...); return err },

@@ -121,6 +121,10 @@ func imageFields(img *Image) func(string) ([]string, bool) {
 		switch name {
 		case "architecture":
 			return one(img.Architecture), true
+		case "block-device-mapping.device-name":
+			return mappingValues(img, func(m BlockDeviceMapping) string { return m.DeviceName }), true
+		case "block-device-mapping.snapshot-id":
+			return mappingValues(img, func(m BlockDeviceMapping) string { return m.SnapshotID }), true
 		case "description":
 			return one(img.Description), true
 		case "image-id":
@@ -146,6 +150,16 @@ func imageFields(img *Image) func(string) ([]string, bool) {
 		}
 		return tagFilter(img.Tags, name)
 	}
+}
+
+func mappingValues(img *Image, value func(BlockDeviceMapping) string) []string {
+	var out []string
+	for _, m := range img.BlockDeviceMappings {
+		if v := value(m); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func (img *Image) ownedBy(owners []string) bool {
@@ -237,6 +251,18 @@ func (s *Server) describeImages(c *call) (response, *apiError) {
 // returns it as stored. It fills in what img leaves empty, such as the ID,
 // architecture and root volume.
 func (s *Server) PutImage(region string, img Image) (Image, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	stored, err := s.storeImage(region, img)
+	if err != nil {
+		return Image{}, err
+	}
+	return stored, nil
+}
+
+// storeImage fills in what img leaves empty and stores it in region. The
+// caller holds s.mu.
+func (s *Server) storeImage(region string, img Image) (Image, *apiError) {
 	if img.ImageID != "" && !strings.HasPrefix(img.ImageID, "ami-") {
 		return Image{}, invalidValue("Invalid image ID '%s'.", img.ImageID)
 	}
@@ -252,8 +278,6 @@ func (s *Server) PutImage(region string, img Image) (Image, error) {
 	if img.RootDeviceName == "" {
 		img.RootDeviceName = defaultRootDevice
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if len(img.BlockDeviceMappings) == 0 {
 		img.BlockDeviceMappings = []BlockDeviceMapping{{
 			DeviceName: img.RootDeviceName, SnapshotID: s.newID("snap"), VolumeSize: defaultVolumeSize, DeleteOnTermination: true,
@@ -263,7 +287,7 @@ func (s *Server) PutImage(region string, img Image) (Image, error) {
 	for i := range img.BlockDeviceMappings {
 		m := &img.BlockDeviceMappings[i]
 		if m.DeviceName == "" {
-			return Image{}, errors.New("ec2: an image's block device mapping needs a device name")
+			return Image{}, clientError("InvalidBlockDeviceMapping", "An image's block device mapping needs a device name.")
 		}
 		if m.VolumeType == "" {
 			m.VolumeType = defaultImageVolume
@@ -287,6 +311,132 @@ func (s *Server) PutImage(region string, img Image) (Image, error) {
 	stored := img.clone()
 	rs.images[img.ImageID] = &stored
 	return stored.clone(), nil
+}
+
+func (s *Server) registerImageTarget(c *call) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c.id = unusedID(s, "ami", s.lookupRegion(c.region).images)
+	return c.region + "/" + c.id
+}
+
+type registerImageResponse struct {
+	meta
+	ImageID string `xml:"imageId"`
+}
+
+// validImageName reports whether name is an AMI name EC2 accepts: 3 to 128
+// letters, digits and the characters ( ) [ ] . / - ' @ _ and space.
+func validImageName(name string) bool {
+	if len(name) < 3 || len(name) > 128 {
+		return false
+	}
+	return !strings.ContainsFunc(name, func(c rune) bool {
+		return (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && !strings.ContainsRune("()[] ./-'@_", c)
+	})
+}
+
+func (s *Server) registerImage(c *call) (response, *apiError) {
+	name, err := c.p.required("Name")
+	if err != nil {
+		return nil, err
+	}
+	if !validImageName(name) {
+		return nil, clientError("InvalidAMIName.Malformed", "AMI names must be between 3 and 128 characters long, and may contain letters, numbers, '(', ')', '.', '-', '/' and '_'")
+	}
+	root, err := c.p.required("RootDeviceName")
+	if err != nil {
+		return nil, err
+	}
+	img := Image{Name: name, Description: c.p.get("Description"), RootDeviceName: root}
+	if img.Architecture, err = c.p.enum("Architecture", archX86, architectures...); err != nil {
+		return nil, err
+	}
+	if _, err := c.p.enum("VirtualizationType", "hvm", "hvm"); err != nil {
+		return nil, err
+	}
+	if ena, err := c.p.bool("EnaSupport", true); err != nil {
+		return nil, err
+	} else if !ena {
+		return nil, invalidValue("Value (false) for parameter enaSupport is invalid. squall images always support ENA.")
+	}
+	devices, err := readDevices(c.p)
+	if err != nil {
+		return nil, err
+	}
+	if img.Tags, err = c.p.tags("image"); err != nil {
+		return nil, err
+	}
+	if err := c.p.done(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rs := s.lookupRegion(c.region)
+	for _, id := range slices.Sorted(maps.Keys(rs.images)) {
+		if other := rs.images[id]; other.OwnerID == "" && other.Name == name {
+			return nil, clientError("InvalidAMIName.Duplicate", "AMI name %s is already in use by AMI %s", name, id)
+		}
+	}
+	rootSnapshot := false
+	for _, d := range devices {
+		m := d.BlockDeviceMapping
+		if slices.ContainsFunc(img.BlockDeviceMappings, func(o BlockDeviceMapping) bool { return o.DeviceName == m.DeviceName }) {
+			return nil, clientError("InvalidBlockDeviceMapping", "The device '%s' is mapped more than once.", m.DeviceName)
+		}
+		switch {
+		case m.SnapshotID != "":
+			snap, err := rs.snapshot(m.SnapshotID)
+			if err != nil {
+				return nil, err
+			}
+			if m.VolumeSize == 0 {
+				m.VolumeSize = snap.VolumeSize
+			}
+			if m.VolumeSize < snap.VolumeSize {
+				return nil, clientError("InvalidBlockDeviceMapping", "Volume of size %dGB is smaller than snapshot '%s', expect size >= %dGB",
+					m.VolumeSize, m.SnapshotID, snap.VolumeSize)
+			}
+			if !d.setEncrypted {
+				m.Encrypted = snap.Encrypted
+			}
+			rootSnapshot = rootSnapshot || m.DeviceName == root
+		case m.VolumeSize == 0:
+			return nil, clientError("InvalidBlockDeviceMapping", "The device '%s' needs a volume size or a snapshot ID.", m.DeviceName)
+		}
+		if err := checkVolume(m); err != nil {
+			return nil, err
+		}
+		fillVolume(&m)
+		img.BlockDeviceMappings = append(img.BlockDeviceMappings, m)
+	}
+	if !rootSnapshot {
+		return nil, clientError("InvalidBlockDeviceMapping", "The root device '%s' needs a block device mapping with a snapshot ID.", root)
+	}
+	img.ImageID = c.id
+	stored, err := s.storeImage(c.region, img)
+	if err != nil {
+		return nil, err
+	}
+	return &registerImageResponse{ImageID: stored.ImageID}, nil
+}
+
+func (s *Server) deregisterImage(c *call) (response, *apiError) {
+	id, err := c.p.required("ImageId")
+	if err != nil {
+		return nil, err
+	}
+	if err := c.p.done(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rs := s.lookupRegion(c.region)
+	if _, err := rs.image(id); err != nil {
+		return nil, err
+	}
+	delete(rs.images, id)
+	return &returnResponse{Return: true}, nil
 }
 
 // Images returns every image the server holds, ordered by region and ID.

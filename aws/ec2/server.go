@@ -14,9 +14,10 @@
 // (CreateNetworkInterface, DescribeNetworkInterfaces, DeleteNetworkInterface),
 // instances (RunInstances, DescribeInstances, StartInstances, StopInstances,
 // TerminateInstances, ModifyInstanceAttribute for the instance type), images
-// (DescribeImages), instance types (DescribeInstanceTypes), EBS volumes
-// (CreateVolume, DescribeVolumes, DeleteVolume, AttachVolume, DetachVolume),
-// placement groups (CreatePlacementGroup, DescribePlacementGroups,
+// (DescribeImages, RegisterImage, DeregisterImage), instance types
+// (DescribeInstanceTypes), EBS volumes (CreateVolume, DescribeVolumes,
+// DeleteVolume, AttachVolume, DetachVolume), EBS snapshots (CreateSnapshot,
+// DescribeSnapshots, DeleteSnapshot), placement groups (CreatePlacementGroup, DescribePlacementGroups,
 // DeletePlacementGroup) and tags (CreateTags, DeleteTags), with the real API's
 // error codes. Other actions answer 404 with the code InvalidAction. Where it
 // differs from EC2:
@@ -98,16 +99,28 @@
 //     supported; the owner "self" matches images with no OwnerID, and other
 //     owners match the OwnerID or OwnerAlias. Unknown image IDs fail with
 //     InvalidAMIID.NotFound.
+//   - RegisterImage registers an EBS-backed HVM image of the caller's own
+//     from snapshots the server holds: its root device needs a mapping with a
+//     snapshot ID. The snapshot's state is not checked, and an image is
+//     available at once. A mapping's volume type is gp2 unless set.
+//     DeregisterImage removes any registered image, whatever its owner,
+//     and leaves its snapshots.
 //   - Volumes go from creating to available, and attachments from attaching
 //     to attached and from detaching to detached, the same way instances
-//     move. Snapshots are not modeled: a snapshot ID is recorded, not read,
-//     and a volume from one without a size is 8 GiB. Volumes and placement
-//     groups are deleted at once rather than passing through a deleting
-//     state. CreatePlacementGroup needs a GroupName and a Strategy, which
-//     EC2 makes optional.
-//   - CreateTags and DeleteTags work on instances, volumes, images, placement
-//     groups (by group ID), network interfaces and Elastic IP addresses, and
-//     change nothing unless every resource exists.
+//     move. Snapshots go from pending to completed the same way, as
+//     DescribeSnapshots sees them, and record the volume's size and
+//     encryption, not its data. A volume from a snapshot the server holds is
+//     the snapshot's size unless set; any other snapshot ID is recorded, not
+//     read, and a volume from it without a size is 8 GiB. Volumes, snapshots
+//     and placement groups are deleted at once rather than passing through a
+//     deleting state. DeleteSnapshot fails with InvalidSnapshot.InUse while a
+//     registered image maps the snapshot. Every snapshot is the caller's own:
+//     DescribeSnapshots with an owner other than "self" lists none, and
+//     snapshots report no owner ID. CreatePlacementGroup needs a GroupName
+//     and a Strategy, which EC2 makes optional.
+//   - CreateTags and DeleteTags work on instances, volumes, snapshots,
+//     images, placement groups (by group ID), network interfaces and Elastic
+//     IP addresses, and change nothing unless every resource exists.
 //
 // Fault method names are "ec2." and the action, such as "ec2.AllocateAddress".
 // A call's resource is the region and the ID it acts on, such as
@@ -177,6 +190,7 @@ type regionState struct {
 	instances       map[string]*Instance
 	images          map[string]*Image
 	volumes         map[string]*Volume
+	snapshots       map[string]*Snapshot
 	placementGroups map[string]*PlacementGroup
 }
 
@@ -195,12 +209,13 @@ func WithAddressLimit(n int) Option {
 	return func(s *Server) { s.addressLimit = n }
 }
 
-// WithSettleAfter sets how many describes see an instance or volume in a
-// transitional state, such as pending or stopping, before one shows the state
-// it settles in: DescribeInstances calls for an instance, DescribeVolumes calls
-// for a volume, counting each call that names it or names no IDs. The
-// default, 0, settles it on the first describe, so the SDK's waiters return
-// at once. A negative n settles it only on [Server.Settle].
+// WithSettleAfter sets how many describes see an instance, volume or snapshot
+// in a transitional state, such as pending or stopping, before one shows the
+// state it settles in: DescribeInstances calls for an instance,
+// DescribeVolumes calls for a volume and DescribeSnapshots calls for a
+// snapshot, counting each call that names it or names no IDs. The default, 0,
+// settles it on the first describe, so the SDK's waiters return at once. A
+// negative n settles it only on [Server.Settle].
 func WithSettleAfter(n int) Option {
 	return func(s *Server) { s.settleAfter = n }
 }
@@ -237,11 +252,16 @@ func New(opts ...Option) *Server {
 		"ModifyInstanceAttribute":   {named("InstanceId"), s.modifyInstanceAttribute},
 		"DescribeInstanceTypes":     {collection("instance-types"), s.describeInstanceTypes},
 		"DescribeImages":            {collection("images"), s.describeImages},
+		"RegisterImage":             {s.registerImageTarget, s.registerImage},
+		"DeregisterImage":           {named("ImageId"), s.deregisterImage},
 		"CreateVolume":              {s.createVolumeTarget, s.createVolume},
 		"DescribeVolumes":           {collection("volumes"), s.describeVolumes},
 		"DeleteVolume":              {named("VolumeId"), s.deleteVolume},
 		"AttachVolume":              {named("VolumeId"), s.attachVolume},
 		"DetachVolume":              {named("VolumeId"), s.detachVolume},
+		"CreateSnapshot":            {s.createSnapshotTarget, s.createSnapshot},
+		"DescribeSnapshots":         {collection("snapshots"), s.describeSnapshots},
+		"DeleteSnapshot":            {named("SnapshotId"), s.deleteSnapshot},
 		"CreatePlacementGroup":      {named("GroupName"), s.createPlacementGroup},
 		"DescribePlacementGroups":   {collection("placement-groups"), s.describePlacementGroups},
 		"DeletePlacementGroup":      {named("GroupName"), s.deletePlacementGroup},
@@ -394,7 +414,8 @@ func (s *Server) region(region string) *regionState {
 	if !ok {
 		rs = &regionState{
 			addresses: map[string]*Address{}, interfaces: map[string]*NetworkInterface{}, instances: map[string]*Instance{},
-			images: map[string]*Image{}, volumes: map[string]*Volume{}, placementGroups: map[string]*PlacementGroup{},
+			images: map[string]*Image{}, volumes: map[string]*Volume{}, snapshots: map[string]*Snapshot{},
+			placementGroups: map[string]*PlacementGroup{},
 		}
 		s.regions[region] = rs
 	}
