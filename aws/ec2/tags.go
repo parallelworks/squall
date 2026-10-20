@@ -21,6 +21,12 @@ func (rs *regionState) tagsOf(id string) (*map[string]string, *apiError) {
 			return nil, err
 		}
 		return &vol.Tags, nil
+	case "snap":
+		snap, err := rs.snapshot(id)
+		if err != nil {
+			return nil, err
+		}
+		return &snap.Tags, nil
 	case "ami":
 		img, err := rs.image(id)
 		if err != nil {

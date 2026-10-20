@@ -21,9 +21,9 @@ failure replays from its seed.
 | Package | What it does |
 | --- | --- |
 | [`fault`](https://pkg.go.dev/github.com/parallelworks/squall/fault) | Decides which calls fail and how: rejected, applied with the response lost, applied with an error, an operation that ends in an error, or slow. Scripted rules and a seeded random rate. |
-| [`aws/ec2`](https://pkg.go.dev/github.com/parallelworks/squall/aws/ec2) | Amazon EC2: instances (run with client tokens, describe with filters and pages, start, stop, terminate, change type), images, instance types, EBS volumes (create, describe, attach, detach, delete), placement groups, tags, Elastic IP addresses (allocate, describe, release, associate with an interface or instance, disassociate) and network interfaces (create with client tokens, describe, delete). |
+| [`aws/ec2`](https://pkg.go.dev/github.com/parallelworks/squall/aws/ec2) | Amazon EC2: instances (run with client tokens, describe with filters and pages, start, stop, terminate, change type), images (describe, register from snapshots, deregister), instance types, EBS volumes (create, describe, attach, detach, delete), EBS snapshots (create, describe with filters and pages, delete), placement groups, tags, Elastic IP addresses (allocate, describe, release, associate with an interface or instance, disassociate) and network interfaces (create with client tokens, describe, delete). |
 | [`azure/arm`](https://pkg.go.dev/github.com/parallelworks/squall/azure/arm) | Azure Resource Manager: resource groups (get, create or update, list with tag filters, delete with everything in them that nothing outside uses), virtual machines (create or update, get, list, instance view, deallocate, start, delete), Uniform scale sets (create or update, update, get, list, delete, delete instances) and their VMs, network security groups, network interfaces and public IP addresses, the IP configurations of scale set VMs, private DNS zones, virtual network links and A record sets, and long-running operations to poll. |
-| [`gcp/compute`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/compute) | Compute Engine: instances (bulkInsert, insert, get, list, aggregatedList, delete, stop, start, setLabels, setMachineType, addAccessConfig, attachDisk, detachDisk), disks (get, list, aggregatedList, insert, delete), zones, regional addresses (get, list, insert, delete, setLabels), resource policies, instance templates, routes, and zone, region and global operations (get, wait). |
+| [`gcp/compute`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/compute) | Compute Engine: instances (bulkInsert, insert, get, list, aggregatedList, delete, stop, start, setLabels, setMachineType, addAccessConfig, attachDisk, detachDisk), disks (get, list, aggregatedList, insert, delete), snapshots (insert, get, list, delete), zones, regional addresses (get, list, insert, delete, setLabels), resource policies, instance templates, routes, and zone, region and global operations (get, wait). |
 
 Coverage grows with use: each stand-in implements the methods someone needed,
 answers anything else with 404, and documents how faithful it is. Contributions
@@ -67,20 +67,24 @@ Each stand-in follows the real API's requests, response shapes and error codes f
 methods it covers, and is tested through the official Go client library. Where
 it simplifies, the package documentation says so. For Compute Engine:
 
-- Changes to instances and disks finish before the call that makes them
-  returns, so the SDK's `Operation.Wait` returns at once. `WithSettleAfter(n)`
-  keeps them in progress, with their operation `RUNNING`, for `n` more reads
-  of the resource or its operation, or until the test calls `Settle`: a new
-  instance is `PROVISIONING` and then `STAGING`, a stopping or deleted one
-  `STOPPING`, a starting one `STAGING`. An `operations.wait` finishes the
+- Changes to instances, disks and snapshots finish before the call that makes
+  them returns, so the SDK's `Operation.Wait` returns at once.
+  `WithSettleAfter(n)` keeps them in progress, with their operation `RUNNING`,
+  for `n` more reads of the resource or its operation, or until the test calls
+  `Settle`: a new instance is `PROVISIONING` and then `STAGING`, a stopping or
+  deleted one `STOPPING`, a starting one `STAGING`, a new snapshot `CREATING`
+  and a deleted one `DELETING`. An `operations.wait` finishes the
   operation it waits for. A change to an instance that has another in
   progress finishes that one first. Every other change finishes at once.
 - A call that repeats an earlier call's `requestId` in the same project, for
   the same method, gets that call's operation back without taking effect
   again, as the real API does for retries. The server keeps the last 10,000
   operations.
-- Images and snapshots are registered by the test with `PutImage` and
-  `PutSnapshot`, and an image family names the newest image in it. Machine and
+- Images are registered by the test with `PutImage`, and an image family
+  names the newest image in it. Snapshots are taken of a `READY` disk with
+  `snapshots.insert`, or registered with `PutSnapshot`; they record the disk's
+  size, not its data, and a disk from one that is not `READY` fails with
+  `resourceNotReady`. Machine and
   disk types are any well-formed name in the call's zone. Zones come from a
   fixed set per region, which `WithZones` changes.
 - Networks, subnetworks, service accounts and accelerators are not checked.
@@ -117,8 +121,13 @@ For Amazon EC2:
 - Subnet and security group IDs and key pair names are not validated, and
   there are no VPCs, default or otherwise: `RunInstances` needs a subnet or a
   network interface.
-  Images are registered by the test with `PutImage`; instance types come from
-  a small built-in set or `PutInstanceType`.
+  Images are registered by the test with `PutImage`, or with `RegisterImage`
+  from snapshots the stand-in holds; instance types come from a small built-in
+  set or `PutInstanceType`.
+- Snapshots record the volume's size and encryption, not its data, and every
+  one is the caller's own: `DescribeSnapshots` with an owner other than `self`
+  lists none. `DeleteSnapshot` fails with `InvalidSnapshot.InUse` while a
+  registered image maps the snapshot.
 - `RunInstances` records metadata, private DNS name and CPU options, and the
   primary interface's type (`interface` or `efa`; with an existing interface,
   only that interface's type) and network card index (only 0, the same launch
@@ -127,11 +136,11 @@ For Amazon EC2:
   against the instance type. CPU options take up to the type's default cores
   and threads per core, which `DescribeInstanceTypes` reports, and any core
   count from 1 up, where EC2 accepts only the counts it lists for each type.
-- Instances and volumes move through EC2's states when describes see them. By
-  default the first `DescribeInstances` or `DescribeVolumes` after a change
-  shows the state it settles in, so the SDK's waiters return at once;
-  `WithSettleAfter` holds them in transition for more describes, or until the
-  test calls `Settle`. Describes are consistent at once, not eventually.
+- Instances, volumes and snapshots move through EC2's states when describes
+  see them. By default the first `DescribeInstances`, `DescribeVolumes` or
+  `DescribeSnapshots` after a change shows the state it settles in, so the
+  SDK's waiters return at once; `WithSettleAfter` holds them in transition for
+  more describes, or until the test calls `Settle`. Describes are consistent at once, not eventually.
 - Terminated instances stay visible, as in EC2, until the test calls
   `ForgetInstance`. Termination deletes the interface and volumes marked to
   delete on termination and releases the rest.

@@ -16,6 +16,7 @@
 //     start, setLabels, setMachineType, addAccessConfig, attachDisk,
 //     detachDisk;
 //   - disks: get, list, aggregatedList, insert, delete;
+//   - snapshots: insert, get, list, delete;
 //   - resource policies, on the beta API: list, get, insert, delete;
 //   - instance templates: list, get, insert, delete;
 //   - instance group managers: aggregatedList, which is always empty;
@@ -24,19 +25,27 @@
 //
 // Other methods answer 404. Where it differs from Compute Engine:
 //
-//   - Changes to instances and disks finish before the call that makes them
-//     returns, so the SDK's Operation.Wait returns at once. [WithSettleAfter]
-//     holds them in progress, with their operation RUNNING, for more reads
-//     or until [Server.Settle]: a new instance is PROVISIONING and then
-//     STAGING, a stopping or deleted one STOPPING, a starting one STAGING. A
+//   - Changes to instances, disks and snapshots finish before the call that
+//     makes them returns, so the SDK's Operation.Wait returns at once.
+//     [WithSettleAfter] holds them in progress, with their operation RUNNING,
+//     for more reads or until [Server.Settle]: a new instance is PROVISIONING
+//     and then STAGING, a stopping or deleted one STOPPING, a starting one
+//     STAGING, a new snapshot CREATING and a deleted one DELETING. A
 //     change to an instance that has another in progress finishes that one
 //     first. Every other change finishes before its call returns.
 //   - A call that repeats an earlier call's requestId in the same project, for
 //     the same method, gets that call's operation back without taking effect
 //     again. The server keeps the last 10,000 operations.
-//   - Images and snapshots must be registered with [Server.PutImage] and
-//     [Server.PutSnapshot]; a disk or instance made from any other fails as
-//     the API fails one made from an image that does not exist. Machine and
+//   - Images must be registered with [Server.PutImage], and snapshots taken
+//     with snapshots.insert or registered with [Server.PutSnapshot]; a disk
+//     or instance made from any other fails as the API fails one made from an
+//     image that does not exist, and one made from a snapshot that is not
+//     READY fails with resourceNotReady. A snapshot records its source disk's
+//     size, not its data, and is stored in the multi-region its disk's zone
+//     is in, such as "us", unless storageLocations says otherwise. It is
+//     taken only of a READY disk, and the disk can be deleted while snapshots
+//     of it remain. Snapshot fields other than name, description,
+//     sourceDisk, storageLocations and labels are rejected. Machine and
 //     disk types are any well-formed name, in the zone of the call; nothing
 //     checks that they exist or fit together.
 //   - Zones come from a fixed set per region, which [WithZones] changes.
@@ -135,7 +144,7 @@ type Server struct {
 	instances  map[string]*collection[*Instance]
 	disks      map[string]*collection[*Disk]
 	images     map[string]*Image
-	snapshots  map[string]*Snapshot
+	snapshots  map[string]*collection[*Snapshot]
 	policies   map[string]*collection[*ResourcePolicy]
 	templates  map[string]*collection[*InstanceTemplate]
 	routes     map[string]*collection[*Route]
@@ -154,12 +163,12 @@ func WithClock(now func() time.Time) Option {
 	return func(s *Server) { s.now = now }
 }
 
-// WithSettleAfter sets how many reads see a change to an instance or disk in
-// progress before it finishes: gets and lists that return the resource, and
-// gets of its operation. The default, 0, finishes every change before the call
-// that makes it returns, so the operation it answers with is already done. A
-// negative n finishes changes only on [Server.Settle]. An operations.wait
-// finishes the operation it waits for unless n is negative.
+// WithSettleAfter sets how many reads see a change to an instance, disk or
+// snapshot in progress before it finishes: gets and lists that return the
+// resource, and gets of its operation. The default, 0, finishes every change
+// before the call that makes it returns, so the operation it answers with is
+// already done. A negative n finishes changes only on [Server.Settle]. An
+// operations.wait finishes the operation it waits for unless n is negative.
 func WithSettleAfter(n int) Option {
 	return func(s *Server) { s.settleAfter = n }
 }
@@ -193,7 +202,7 @@ func New(opts ...Option) *Server {
 		instances:   map[string]*collection[*Instance]{},
 		disks:       map[string]*collection[*Disk]{},
 		images:      map[string]*Image{},
-		snapshots:   map[string]*Snapshot{},
+		snapshots:   map[string]*collection[*Snapshot]{},
 		policies:    map[string]*collection[*ResourcePolicy]{},
 		templates:   map[string]*collection[*InstanceTemplate]{},
 		routes:      map[string]*collection[*Route]{},
@@ -243,6 +252,11 @@ func (s *Server) registerRoutes() {
 	s.route("POST "+zone+"/disks", "compute.disks.insert", "", s.insertDisk, withNameFromBody)
 	s.route("GET "+zone+"/disks/{name}", "compute.disks.get", "", s.getDisk, nil)
 	s.route("DELETE "+zone+"/disks/{name}", "compute.disks.delete", "", s.deleteDisk, nil)
+
+	s.route("GET "+global+"/snapshots", "compute.snapshots.list", "", s.listSnapshots, nil)
+	s.route("POST "+global+"/snapshots", "compute.snapshots.insert", "", s.insertSnapshot, withNameFromBody)
+	s.route("GET "+global+"/snapshots/{name}", "compute.snapshots.get", "", s.getSnapshot, nil)
+	s.route("DELETE "+global+"/snapshots/{name}", "compute.snapshots.delete", "", s.deleteSnapshot, nil)
 
 	s.route("GET "+beta+"/resourcePolicies", "compute.resourcePolicies.list", "", s.listPolicies, nil)
 	s.route("POST "+beta+"/resourcePolicies", "compute.resourcePolicies.insert", "", s.insertPolicy, withNameFromBody)

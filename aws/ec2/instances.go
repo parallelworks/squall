@@ -1038,7 +1038,7 @@ func (s *Server) LookupInstance(region, id string) (Instance, bool) {
 
 // Settle completes every transition in progress, as enough describes would:
 // pending instances run, stopping ones stop, shutting-down ones terminate,
-// and volumes finish creating, attaching and detaching.
+// volumes finish creating, attaching and detaching, and snapshots complete.
 func (s *Server) Settle() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1048,6 +1048,9 @@ func (s *Server) Settle() {
 		}
 		for _, vol := range rs.volumes {
 			vol.settle()
+		}
+		for _, snap := range rs.snapshots {
+			snap.State, snap.wait = snapshotCompleted, 0
 		}
 	}
 }

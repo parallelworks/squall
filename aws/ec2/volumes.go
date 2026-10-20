@@ -290,9 +290,7 @@ func (s *Server) createVolume(c *call) (response, *apiError) {
 	switch {
 	case m.VolumeSize == 0 && m.SnapshotID == "":
 		return nil, clientError("MissingParameter", "The request must contain the parameter size or snapshotId")
-	case m.VolumeSize == 0:
-		m.VolumeSize = defaultVolumeSize
-	case m.VolumeSize < 1 || m.VolumeSize > 65536:
+	case m.VolumeSize < 0 || m.VolumeSize > 65536:
 		return nil, invalidValue("Volume size %d is out of range.", m.VolumeSize)
 	}
 	if !strings.HasPrefix(zone, c.region) {
@@ -301,7 +299,6 @@ func (s *Server) createVolume(c *call) (response, *apiError) {
 	if err := checkVolume(m); err != nil {
 		return nil, err
 	}
-	fillVolume(&m)
 	fingerprint := c.p.fingerprint()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -314,6 +311,13 @@ func (s *Server) createVolume(c *call) (response, *apiError) {
 		return &createVolumeResponse{volumeXML: created.xml()}, nil
 	}
 	rs := s.region(c.region)
+	if m.VolumeSize == 0 {
+		m.VolumeSize = defaultVolumeSize
+		if snap, ok := rs.snapshots[m.SnapshotID]; ok {
+			m.VolumeSize = snap.VolumeSize
+		}
+	}
+	fillVolume(&m)
 	vol := s.newVolume(rs, c.id, c.region, zone, m, tags, time.Now())
 	s.remember(c.region, "volumes", token, fingerprint, vol.VolumeID, vol.clone())
 	return &createVolumeResponse{volumeXML: vol.xml()}, nil
