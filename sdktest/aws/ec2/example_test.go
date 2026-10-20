@@ -13,9 +13,9 @@ import (
 	"github.com/parallelworks/squall/fault"
 )
 
-// The first allocation takes effect but its response is lost, so the caller
-// sees an error even though the address now exists. Code under test must find
-// and adopt it, by its tags, rather than leak it.
+// The first allocation takes effect but its response is lost. With retries
+// off the caller sees an error even though the address now exists, so code
+// under test must find and adopt it, by its tags, rather than leak it.
 func Example() {
 	ctx := context.Background()
 	faults := fault.New().Add(fault.Rule{Method: "ec2.AllocateAddress", Nth: 1, Fault: fault.LoseResponse()})
@@ -24,9 +24,10 @@ func Example() {
 	defer srv.Close()
 
 	client := awsec2.New(awsec2.Options{
-		Region:       "us-east-1",
-		BaseEndpoint: aws.String(srv.URL),
-		Credentials:  credentials.NewStaticCredentialsProvider("AKID", "SECRET", ""),
+		Region:           "us-east-1",
+		BaseEndpoint:     aws.String(srv.URL),
+		Credentials:      credentials.NewStaticCredentialsProvider("AKID", "SECRET", ""),
+		RetryMaxAttempts: 1,
 	})
 	_, err := client.AllocateAddress(ctx, &awsec2.AllocateAddressInput{Domain: "vpc"})
 	fmt.Println("allocate failed:", err != nil)
