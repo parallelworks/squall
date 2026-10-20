@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/parallelworks/squall/compare/v0.6.1...v0.7.0) (2026-10-20)
+
+
+### Features
+
+* Amazon EC2 snapshots and image registration, and Compute Engine snapshots ([#16](https://github.com/parallelworks/squall/issues/16)) ([2a218f1](https://github.com/parallelworks/squall/commit/2a218f1183321132c58271182740dc43d0216ec9))
+
 ## [0.6.1](https://github.com/parallelworks/squall/compare/v0.6.0...v0.6.1) (2026-10-19)
 
 
