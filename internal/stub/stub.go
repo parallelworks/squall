@@ -27,6 +27,8 @@ func Serve(w http.ResponseWriter, r *http.Request, f fault.Fault, reject bool, c
 	}
 	answer, ok := run()
 	switch {
+	case f.Mode == fault.ModeLoseResponse && r.Method == http.MethodHead:
+		loseHeadResponse(w)
 	case f.Mode == fault.ModeLoseResponse:
 		loseResponse(w, contentType)
 	case !ok:
@@ -48,4 +50,15 @@ func loseResponse(w http.ResponseWriter, contentType string) {
 	w.WriteHeader(http.StatusOK)
 	_ = http.NewResponseController(w).Flush()
 	panic(http.ErrAbortHandler)
+}
+
+// loseHeadResponse breaks off inside the status line, since a sent HEAD header would read as an answer.
+func loseHeadResponse(w http.ResponseWriter) {
+	conn, buf, err := http.NewResponseController(w).Hijack()
+	if err != nil {
+		panic(http.ErrAbortHandler)
+	}
+	defer conn.Close()
+	_, _ = buf.WriteString("HTTP/1.1 2")
+	_ = buf.Flush()
 }

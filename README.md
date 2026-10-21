@@ -22,8 +22,10 @@ failure replays from its seed.
 | --- | --- |
 | [`fault`](https://pkg.go.dev/github.com/parallelworks/squall/fault) | Decides which calls fail and how: rejected, applied with the response lost, applied with an error, an operation that ends in an error, or slow. Scripted rules and a seeded random rate. |
 | [`aws/ec2`](https://pkg.go.dev/github.com/parallelworks/squall/aws/ec2) | Amazon EC2: instances (run with client tokens, describe with filters and pages, start, stop, terminate, change type), images (describe, register from snapshots, deregister), instance types, EBS volumes (create, describe, attach, detach, delete), EBS snapshots (create, describe with filters and pages, delete), placement groups, tags, Elastic IP addresses (allocate, describe, release, associate with an interface or instance, disassociate) and network interfaces (create with client tokens, describe, delete). |
+| [`aws/s3`](https://pkg.go.dev/github.com/parallelworks/squall/aws/s3) | Amazon S3: general purpose buckets (create, head, list with pages and filters, delete), their tags, versioning, policy and CORS rules, and objects (put, delete one or many, list versions and delete markers). |
 | [`azure/arm`](https://pkg.go.dev/github.com/parallelworks/squall/azure/arm) | Azure Resource Manager: resource groups (get, create or update, list with tag filters, delete with everything in them that nothing outside uses), virtual machines (create or update, get, list, instance view, deallocate, start, delete), Uniform scale sets (create or update, update, get, list, delete, delete instances) and their VMs, network security groups, network interfaces and public IP addresses, the IP configurations of scale set VMs, private DNS zones, virtual network links and A record sets, and long-running operations to poll. |
 | [`gcp/compute`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/compute) | Compute Engine: instances (bulkInsert, insert, get, list, aggregatedList, delete, stop, start, setLabels, setMachineType, addAccessConfig, attachDisk, detachDisk), disks (get, list, aggregatedList, insert, delete), snapshots (insert, get, list, delete), zones, regional addresses (get, list, insert, delete, setLabels), resource policies, instance templates, routes, and zone, region and global operations (get, wait). |
+| [`gcp/storage`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/storage) | Cloud Storage: buckets (insert, get, list, patch labels, versioning and CORS, delete) and objects (multipart and media uploads, list with versions, delete by generation). |
 
 Coverage grows with use: each stand-in implements the methods someone needed,
 answers anything else with 404, and documents how faithful it is. Contributions
@@ -159,6 +161,47 @@ For Amazon EC2:
   as `us-east-1/eipalloc-…`, and for a create, the resource being created (the
   first instance, for `RunInstances`). A rejected call has no effect, so a
   rejected describe does not move an instance along.
+
+For Amazon S3:
+
+- Requests are path-style, which the SDK uses for an IP endpoint such as
+  httptest's. Signatures are not checked; the region comes from the SigV4
+  credential scope. A call on a bucket in another region fails with 301
+  `PermanentRedirect` and `x-amz-bucket-region`, as S3 answers it.
+- There is one account. `PutForeignBucket` holds a name for another one, so
+  creating it fails with `BucketAlreadyExists` and calls on it with
+  `AccessDenied` (403 for `HeadBucket`). Creating an owned bucket again
+  succeeds in us-east-1 and fails with `BucketAlreadyOwnedByYou` elsewhere.
+- `ListBuckets` reports regions and pages only when `max-buckets` is set.
+  `ListObjectVersions` orders by key and then newest first, and its markers
+  are positions, so the next page still follows one whose versions were just
+  deleted. `DeleteBucket` fails with `BucketNotEmpty` while any version or
+  delete marker remains.
+- Objects keep their size and ETag, not their data. Checksums are not
+  verified, and multipart uploads, copies, object tags and lifecycle are not
+  supported. Policies and CORS rules are recorded, not enforced.
+- A fault rule's `Resource` is the bucket name, or `bucket/key` for an object
+  call. A lost `HeadBucket` breaks off inside its status line, since a sent
+  header would read as an answer.
+
+For Cloud Storage:
+
+- Point the client at `srv.URL + "/storage/v1/"`, or set
+  `STORAGE_EMULATOR_HOST`. There is one caller, which reaches every project;
+  `PutForeignBucket` holds a name it cannot reach, so inserting it fails with
+  409 `conflict` and calls on it with 403 `forbidden`. A repeated insert of
+  the caller's own bucket fails with 409, as the client's retry of a create
+  that took effect does.
+- Bucket names and labels follow the API's rules; locations are upper-cased
+  but not checked. Fields the server does not model, such as lifecycle rules
+  or retention, are rejected with 400.
+- Objects keep their size, MD5 and CRC32C, which an upload's checksums must
+  match. With versioning on, overwrites and deletes keep the old generation as
+  noncurrent, and a bucket with any generation left cannot be deleted. Page
+  tokens are positions, so a listing survives deletes between pages.
+  Resumable uploads, reads, IAM policies and HMAC keys are not supported.
+- A fault rule's `Resource` is the path below `/storage/v1/`, such as
+  `b/my-bucket/o/my-object`, and for an insert the bucket or object it makes.
 
 For Azure Resource Manager:
 
