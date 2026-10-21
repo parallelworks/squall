@@ -2,6 +2,8 @@ module github.com/parallelworks/squall/sdktest
 
 go 1.27.0
 
+toolchain go1.27.3
+
 require (
 	cloud.google.com/go/compute v1.71.0
 	cloud.google.com/go/storage v1.69.0
