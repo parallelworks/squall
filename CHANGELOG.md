@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/parallelworks/squall/compare/v0.7.0...v0.8.0) (2026-10-21)
+
+
+### Features
+
+* Amazon S3 and Cloud Storage buckets ([#24](https://github.com/parallelworks/squall/issues/24)) ([4e7f106](https://github.com/parallelworks/squall/commit/4e7f106d47d9cb6fcff7195a33635e1da677c788))
+
 ## [0.7.0](https://github.com/parallelworks/squall/compare/v0.6.1...v0.7.0) (2026-10-20)
 
 
