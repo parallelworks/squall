@@ -60,8 +60,8 @@
 //     one whose versions were deleted; it takes no delimiter or
 //     encoding-type.
 //   - Tags follow S3's rules: up to 50, keys of 1 to 128 characters, values
-//     of up to 256, letters, digits, spaces and "+-=._:/@", no duplicates
-//     and no "aws:" prefix. PutBucketTagging with an empty tag set removes
+//     of up to 256, Unicode letters, numbers, separators and "+-=._:/@", no
+//     duplicates and no "aws:" prefix. PutBucketTagging with an empty tag set removes
 //     the tags, so GetBucketTagging fails with NoSuchTagSet, as it does for
 //     a bucket never tagged. Bucket policies must be JSON and are recorded,
 //     not enforced; CORS rules are checked for an allowed method and origin

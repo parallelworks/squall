@@ -302,7 +302,7 @@ func (s *Server) getBucketTagging(c *call) (*reply, *apiError) {
 
 func validTagText(s string) bool {
 	for _, r := range s {
-		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && !unicode.IsSpace(r) && !strings.ContainsRune("+-=._:/@", r) {
+		if !unicode.In(r, unicode.L, unicode.Z, unicode.N) && !strings.ContainsRune("+-=._:/@", r) {
 			return false
 		}
 	}

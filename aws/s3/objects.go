@@ -89,6 +89,12 @@ func (b *bucket) write(key string, v *version) {
 	b.objects[key] = append([]*version{v}, versions...)
 }
 
+// forget removes every version of key. The caller holds s.mu.
+func (b *bucket) forget(key string) {
+	delete(b.objects, key)
+	delete(b.nullSeqs, key)
+}
+
 // deleted is the result of deleting one object or version.
 type deleted struct {
 	Key                   string `xml:"Key"`
@@ -111,14 +117,14 @@ func (s *Server) remove(b *bucket, key, id string) deleted {
 		}
 		versions = slices.Delete(versions, i, i+1)
 		if len(versions) == 0 {
-			delete(b.objects, key)
+			b.forget(key)
 		} else {
 			b.objects[key] = versions
 		}
 		return out
 	}
 	if b.Versioning == "" {
-		delete(b.objects, key)
+		b.forget(key)
 		return deleted{Key: key}
 	}
 	marker := s.newVersion(b)
@@ -190,11 +196,13 @@ func (s *Server) deleteObject(c *call) (*reply, *apiError) {
 }
 
 type deleteXML struct {
-	Quiet   bool `xml:"Quiet"`
-	Objects []struct {
-		Key       string `xml:"Key"`
-		VersionID string `xml:"VersionId"`
-	} `xml:"Object"`
+	Quiet   bool                  `xml:"Quiet"`
+	Objects []objectIdentifierXML `xml:"Object"`
+}
+
+type objectIdentifierXML struct {
+	Key       string `xml:"Key"`
+	VersionID string `xml:"VersionId"`
 }
 
 type deleteResultXML struct {
@@ -215,7 +223,8 @@ func (s *Server) deleteObjects(c *call) (*reply, *apiError) {
 	if err := decodeXML(c.body, &in); err != nil {
 		return nil, err
 	}
-	if len(in.Objects) == 0 || len(in.Objects) > maxKeys {
+	emptyKey := slices.ContainsFunc(in.Objects, func(o objectIdentifierXML) bool { return o.Key == "" })
+	if len(in.Objects) == 0 || len(in.Objects) > maxKeys || emptyKey {
 		return nil, malformedXML()
 	}
 	s.mu.Lock()
@@ -226,6 +235,10 @@ func (s *Server) deleteObjects(c *call) (*reply, *apiError) {
 	}
 	out := deleteResultXML{}
 	for _, o := range in.Objects {
+		if len(o.Key) > maxKeyBytes {
+			out.Errors = append(out.Errors, deleteErrorXML{o.Key, o.VersionID, "KeyTooLongError", "Your key is too long"})
+			continue
+		}
 		if o.VersionID != "" {
 			if _, ok := validVersionID(o.VersionID); !ok {
 				out.Errors = append(out.Errors, deleteErrorXML{o.Key, o.VersionID, "NoSuchVersion", "The specified version does not exist."})
