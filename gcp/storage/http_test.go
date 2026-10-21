@@ -1,6 +1,8 @@
 package storage_test
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -60,6 +62,10 @@ func TestRequestsTheServerCannotRead(t *testing.T) {
 		{"an unknown field", http.MethodPost, "/storage/v1/b?project=p", `{"name":"x-bucket","website":{}}`, http.StatusBadRequest, "invalid"},
 		{"lifecycle rules", http.MethodPost, "/storage/v1/b?project=p", `{"name":"x-bucket","lifecycle":{"rule":[{}]}}`, http.StatusBadRequest, "invalid"},
 		{"malformed JSON", http.MethodPost, "/storage/v1/b?project=p", `{`, http.StatusBadRequest, "invalid"},
+		{"data after the JSON", http.MethodPost, "/storage/v1/b?project=p", `{"name":"x-bucket"} {}`, http.StatusBadRequest, "invalid"},
+		{"cors that is not a list", http.MethodPost, "/storage/v1/b?project=p", `{"name":"x-bucket","cors":5}`, http.StatusBadRequest, "invalid"},
+		{"a patch of cors that is not a list", http.MethodPatch, "/storage/v1/b/known", `{"cors":[null]}`, http.StatusBadRequest, "invalid"},
+		{"an ACME challenge name", http.MethodPost, "/upload/storage/v1/b/known/o?uploadType=media&name=.well-known%2Facme-challenge%2Fx", "x", http.StatusBadRequest, "invalid"},
 		{"an unknown parameter", http.MethodGet, "/storage/v1/b?project=p&bogus=1", "", http.StatusBadRequest, "invalid"},
 		{"another alt", http.MethodGet, "/storage/v1/b/known?alt=media", "", http.StatusBadRequest, "invalid"},
 		{"a public ACL", http.MethodPost, "/storage/v1/b?project=p&predefinedAcl=publicRead", `{"name":"x-bucket"}`, http.StatusBadRequest, "invalid"},
@@ -96,6 +102,7 @@ func TestPatchClearsNullFields(t *testing.T) {
 	if _, err := s.PutBucket(storage.Bucket{
 		Name: "cleared", Project: "p", Labels: map[string]string{"a": "1", "b": "2"},
 		Versioning: &storage.Versioning{Enabled: true}, Encryption: &storage.Encryption{DefaultKmsKeyName: "k"},
+		CORS: json.RawMessage(`[{"origin":["*"]}]`),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -105,11 +112,47 @@ func TestPatchClearsNullFields(t *testing.T) {
 	if b, _ := s.LookupBucket("cleared"); len(b.Labels) != 1 || b.Labels["b"] != "2" {
 		t.Fatalf("labels = %v", b.Labels)
 	}
-	code, body := do(t, s, http.MethodPatch, "/storage/v1/b/cleared", "application/json", `{"labels":null,"versioning":null,"encryption":null}`)
+	code, body := do(t, s, http.MethodPatch, "/storage/v1/b/cleared", "application/json", `{"labels":null,"versioning":null,"encryption":null,"cors":null}`)
 	if code != http.StatusOK {
 		t.Fatalf("patch = %d %s", code, body)
 	}
-	if b, _ := s.LookupBucket("cleared"); b.Labels != nil || b.Versioning != nil || b.Encryption != nil || b.Metageneration != 3 {
+	if b, _ := s.LookupBucket("cleared"); b.Labels != nil || b.Versioning != nil || b.Encryption != nil || b.CORS != nil || b.Metageneration != 3 {
 		t.Fatalf("bucket = %+v", b)
 	}
+}
+
+func FuzzServeHTTP(f *testing.F) {
+	multipartBody := "--x\r\nContent-Type: application/json\r\n\r\n{\"name\":\"o\"}\r\n--x\r\nContent-Type: text/plain\r\n\r\nhi\r\n--x--\r\n"
+	for _, seed := range []struct{ method, target, contentType, body string }{
+		{http.MethodPost, "/storage/v1/b?project=p", "application/json", `{"name":"other","labels":{"a":"b"},"cors":[{"origin":["*"]}]}`},
+		{http.MethodPatch, "/storage/v1/b/fuzz?ifMetagenerationMatch=1", "application/json", `{"labels":{"a":null},"versioning":null}`},
+		{http.MethodGet, "/storage/v1/b/fuzz/o?versions=true&maxResults=1&pageToken=YQ&startOffset=a&endOffset=z", "", ""},
+		{http.MethodPost, "/upload/storage/v1/b/fuzz/o?uploadType=multipart", "multipart/related; boundary=x", multipartBody},
+		{http.MethodPost, "/upload/storage/v1/b/fuzz/o?uploadType=media&name=a%2F..%2Fb&ifGenerationMatch=0", "text/plain", "x"},
+		{http.MethodDelete, "/storage/v1/b/fuzz/o/k?generation=1", "", ""},
+	} {
+		f.Add(seed.method, seed.target, seed.contentType, []byte(seed.body))
+	}
+	f.Fuzz(func(t *testing.T, method, target, contentType string, body []byte) {
+		req, err := http.NewRequestWithContext(t.Context(), method, "http://storage.test"+target, bytes.NewReader(body))
+		if err != nil {
+			return
+		}
+		req.Header.Set("Content-Type", contentType)
+		s := storage.New()
+		if _, err := s.PutBucket(storage.Bucket{Name: "fuzz", Project: "p", Versioning: &storage.Versioning{Enabled: true}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.PutObject("fuzz", "k", []byte("v")); err != nil {
+			t.Fatal(err)
+		}
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, req)
+		if rec.Code < 200 || rec.Code > 599 {
+			t.Fatalf("%s %s = %d", method, target, rec.Code)
+		}
+		if rec.Code != http.StatusNoContent && method != http.MethodHead && !json.Valid(rec.Body.Bytes()) {
+			t.Fatalf("%s %s = %d %q, not JSON", method, target, rec.Code, rec.Body)
+		}
+	})
 }

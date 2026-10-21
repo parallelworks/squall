@@ -1,0 +1,5 @@
+go test fuzz v1
+string("DELETE")
+string("/storage/v1/b/0/o")
+string("")
+[]byte("")

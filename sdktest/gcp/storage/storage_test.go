@@ -420,6 +420,7 @@ func TestFaults(t *testing.T) {
 }
 
 func TestSweepsConvergeThroughFaults(t *testing.T) {
+	injected := 0
 	for seed := range uint64(20) {
 		faults := fault.New(fault.Seed(seed)).Random(0.3, fault.LoseResponse(), fault.Unavailable(), fault.FailAfter(http.StatusInternalServerError))
 		s := storage.New(storage.WithFaults(faults))
@@ -439,9 +440,13 @@ func TestSweepsConvergeThroughFaults(t *testing.T) {
 				break
 			}
 		}
+		injected += len(faults.Injected())
 		if got := s.Buckets(); len(got) != 0 {
 			t.Fatalf("seed %d left %+v after %v", seed, got, faults.Injected())
 		}
+	}
+	if injected == 0 {
+		t.Fatal("no seed injected a fault")
 	}
 }
 

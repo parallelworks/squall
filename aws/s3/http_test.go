@@ -1,6 +1,10 @@
 package s3_test
 
 import (
+	"bytes"
+	"encoding/xml"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -63,6 +67,7 @@ func TestRequestsTheServerCannotRead(t *testing.T) {
 		{"an unknown parameter", http.MethodGet, "/?bogus=1", authorization, "", http.StatusBadRequest, "InvalidArgument"},
 		{"malformed XML", http.MethodPut, "/b?tagging", authorization, "<Tagging>", http.StatusBadRequest, "MalformedXML"},
 		{"an empty delete", http.MethodPost, "/b?delete", authorization, "<Delete></Delete>", http.StatusBadRequest, "MalformedXML"},
+		{"a delete of an empty key", http.MethodPost, "/b?delete", authorization, "<Delete><Object><Key></Key></Object></Delete>", http.StatusBadRequest, "MalformedXML"},
 		{"a bad versioning status", http.MethodPut, "/b?versioning", authorization, "<VersioningConfiguration><Status>On</Status></VersioningConfiguration>", http.StatusBadRequest, "MalformedXML"},
 		{"a bad continuation token", http.MethodGet, "/?continuation-token=%25", authorization, "", http.StatusBadRequest, "InvalidArgument"},
 		{"a malformed chunked body", http.MethodPut, "/b?tagging", authorization, "", http.StatusBadRequest, "IncompleteBody"},
@@ -144,7 +149,76 @@ func TestHostileBodies(t *testing.T) {
 			}
 		})
 	}
+	if _, err := s.PutBucket(s3.Bucket{Name: "hostile", Region: "us-east-1", Versioning: "Enabled"}); err != nil {
+		t.Fatal(err)
+	}
+	long := strings.Repeat("k", 1025)
+	code, _, body := do(t, s, http.MethodPost, "/hostile?delete", authorization, "<Delete><Object><Key>"+long+"</Key></Object></Delete>")
+	if code != http.StatusOK || !strings.Contains(body, "<Code>KeyTooLongError</Code>") || strings.Contains(body, "<Deleted>") {
+		t.Fatalf("a delete of a long key = %d %s", code, body)
+	}
+	for _, tag := range []string{"a\tb", "a\nb"} {
+		code, _, body := do(t, s, http.MethodPut, "/hostile?tagging", authorization, "<Tagging><TagSet><Tag><Key>"+tag+"</Key><Value>v</Value></Tag></TagSet></Tagging>")
+		if code != http.StatusBadRequest || !strings.Contains(body, "<Code>InvalidTag</Code>") {
+			t.Fatalf("a tag key %q = %d %s", tag, code, body)
+		}
+	}
 	if got := s.ObjectVersions("hostile"); len(got) != 0 {
 		t.Fatalf("versions = %+v", got)
+	}
+}
+
+func FuzzServeHTTP(f *testing.F) {
+	for _, seed := range []struct{ method, target, header, body string }{
+		{http.MethodPut, "/fuzz/k", "Content-Encoding: aws-chunked", "5;chunk-signature=0\r\nhello\r\n0\r\n\r\n"},
+		{http.MethodGet, "/fuzz?versions&key-marker=k&version-id-marker=null&max-keys=1", "", ""},
+		{http.MethodPost, "/fuzz?delete", "", "<Delete><Object><Key>k</Key><VersionId>null</VersionId></Object></Delete>"},
+		{http.MethodPut, "/fuzz?tagging", "X-Amz-Content-Sha256: STREAMING-UNSIGNED-PAYLOAD-TRAILER", "0\r\n\r\n"},
+		{http.MethodGet, "/?max-buckets=1&continuation-token=YQ&bucket-region=us-east-1", "", ""},
+		{http.MethodPut, "/other", "", "<CreateBucketConfiguration><LocationConstraint>eu-west-1</LocationConstraint></CreateBucketConfiguration>"},
+	} {
+		f.Add(seed.method, seed.target, seed.header, []byte(seed.body))
+	}
+	f.Fuzz(func(t *testing.T, method, target, header string, body []byte) {
+		req, err := http.NewRequestWithContext(t.Context(), method, "http://s3.test"+target, bytes.NewReader(body))
+		if err != nil {
+			return
+		}
+		req.Header.Set("Authorization", authorization)
+		if name, value, ok := strings.Cut(header, ":"); ok && validHeaderName(name) {
+			req.Header.Set(name, strings.TrimSpace(value))
+		}
+		s := s3.New()
+		if _, err := s.PutBucket(s3.Bucket{Name: "fuzz", Region: "us-east-1", Versioning: "Enabled"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.PutObject("fuzz", "k", []byte("v")); err != nil {
+			t.Fatal(err)
+		}
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, req)
+		if rec.Code < 200 || rec.Code > 599 {
+			t.Fatalf("%s %s = %d", method, target, rec.Code)
+		}
+		if rec.Body.Len() > 0 && !wellFormed(rec.Body.Bytes()) {
+			t.Fatalf("%s %s = %d %q, not XML", method, target, rec.Code, rec.Body)
+		}
+	})
+}
+
+func validHeaderName(name string) bool {
+	return name != "" && strings.Trim(name, "-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz") == ""
+}
+
+func wellFormed(b []byte) bool {
+	dec := xml.NewDecoder(bytes.NewReader(b))
+	for {
+		_, err := dec.Token()
+		if errors.Is(err, io.EOF) {
+			return true
+		}
+		if err != nil {
+			return false
+		}
 	}
 }
