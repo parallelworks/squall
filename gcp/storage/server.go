@@ -384,8 +384,8 @@ func page[T any](r *http.Request, items []T, key func(T) string) ([]T, string, *
 		if n < 0 {
 			return nil, "", invalid("Invalid value for maxResults: %d", n)
 		}
-		if n > 0 {
-			limit = int(min(n, maxList))
+		if n > 0 && n < maxList {
+			limit = int(n)
 		}
 	}
 	if token := r.URL.Query().Get("pageToken"); token != "" {
