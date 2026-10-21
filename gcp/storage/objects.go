@@ -272,8 +272,10 @@ type objectList struct {
 	NextPageToken string   `json:"nextPageToken,omitzero"`
 }
 
-// versionKey orders generations by name and then generation.
-func versionKey(o Object) string { return fmt.Sprintf("%s\x00%020d", o.Name, o.Generation) }
+// versionKey orders generations by name and then generation, escaping NUL so a name that extends another sorts after it.
+func versionKey(o Object) string {
+	return strings.ReplaceAll(o.Name, "\x00", "\x00\xff") + fmt.Sprintf("\x00\x00%020d", o.Generation)
+}
 
 func (s *Server) listObjects(r *http.Request) (any, *apiError) {
 	q := r.URL.Query()

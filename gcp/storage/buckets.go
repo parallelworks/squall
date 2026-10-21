@@ -296,13 +296,13 @@ func (s *Server) store(b Bucket) (*bucket, *apiError) {
 	if s.foreign[b.Name] {
 		return nil, &apiError{
 			Status: http.StatusConflict, Reason: "conflict",
-			Message: "The requested bucket name is not available. The bucket namespace is shared by all users of the system. Please select a different name and try again.",
+			Message: "Sorry, that name is not available. Please try a different one.",
 		}
 	}
 	if _, ok := s.buckets[b.Name]; ok {
 		return nil, &apiError{
 			Status: http.StatusConflict, Reason: "conflict",
-			Message: "Your previous request to create the named bucket succeeded and you already own it.",
+			Message: "You already own this bucket. Please select another name.",
 		}
 	}
 	now := s.now().UTC().Format(timeFormat)
@@ -351,6 +351,11 @@ func (s *Server) patchBucket(r *http.Request) (any, *apiError) {
 	if in.Name != "" || in.Location != "" || in.CustomPlacementConfig != nil || in.RPO != "" {
 		return nil, invalid("squall: a patch may change only labels, versioning, cors, storageClass and encryption")
 	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return nil, invalid("Invalid JSON payload received: %v", err)
+	}
+	cleared := func(field string) bool { return string(fields[field]) == "null" }
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b, err := s.lookup(r.PathValue("bucket"), "storage.buckets.update")
@@ -361,7 +366,7 @@ func (s *Server) patchBucket(r *http.Request) (any, *apiError) {
 		return nil, err
 	}
 	labels := maps.Clone(b.Labels)
-	if labels == nil {
+	if labels == nil || cleared("labels") {
 		labels = map[string]string{}
 	}
 	for k, v := range in.Labels {
@@ -387,6 +392,8 @@ func (s *Server) patchBucket(r *http.Request) (any, *apiError) {
 	b.Labels, b.StorageClass = labels, class
 	if in.Versioning != nil {
 		b.Versioning = new(*in.Versioning)
+	} else if cleared("versioning") {
+		b.Versioning = nil
 	}
 	if in.CORS != nil {
 		b.CORS = slices.Clone(in.CORS)
@@ -396,6 +403,8 @@ func (s *Server) patchBucket(r *http.Request) (any, *apiError) {
 	}
 	if in.Encryption != nil {
 		b.Encryption = new(*in.Encryption)
+	} else if cleared("encryption") {
+		b.Encryption = nil
 	}
 	s.touch(b)
 	return b.clone(), nil

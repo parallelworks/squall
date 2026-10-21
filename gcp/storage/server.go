@@ -34,6 +34,8 @@
 //     rejected with 400, as are ACLs other than private and projectPrivate.
 //     cors, encryption and rpo are recorded, not enforced. There is no IAM,
 //     soft delete, retention, lifecycle, autoclass or hierarchical namespace.
+//     buckets.patch has patch semantics: it merges labels, deleting one set
+//     to null, and clears labels, versioning, cors or encryption set to null.
 //   - Objects record their size, MD5 and CRC32C, not their data; a crc32c or
 //     md5Hash in the upload's metadata must match the data. Resumable
 //     uploads, reads, copies, composes and object ACLs are not supported.
@@ -237,10 +239,13 @@ func uploadTarget(r *http.Request) string {
 	return prefix + "/" + named.Name
 }
 
-// peekBody reads r's body and puts it back, to name a call's resource before it is handled.
+// peekBody reads up to an upload's worth of r's body and puts it back, to name a call's resource before it is handled.
 func peekBody(r *http.Request) []byte {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxObject+maxBody))
-	r.Body = io.NopCloser(bytes.NewReader(body))
+	r.Body = struct {
+		io.Reader
+		io.Closer
+	}{io.MultiReader(bytes.NewReader(body), r.Body), r.Body}
 	if err != nil {
 		return nil
 	}

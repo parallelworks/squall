@@ -18,6 +18,7 @@ import (
 
 	"github.com/parallelworks/squall/fault"
 	"github.com/parallelworks/squall/gcp/storage"
+	"github.com/parallelworks/squall/sdktest/internal/sdkerr"
 )
 
 const project = "my-project"
@@ -44,13 +45,6 @@ func clientAt(t *testing.T, url string) *gcs.Client {
 func newClient(t *testing.T, s *storage.Server) *gcs.Client {
 	t.Helper()
 	return clientAt(t, serve(t, s))
-}
-
-func apiCode(err error) int {
-	if e, ok := errors.AsType[*googleapi.Error](err); ok {
-		return e.Code
-	}
-	return 0
 }
 
 func write(t *testing.T, c *gcs.Client, bucket, name, data string) *gcs.ObjectAttrs {
@@ -130,7 +124,7 @@ func TestCreateReadUpdateDelete(t *testing.T) {
 	if got, ok := s.LookupBucket("data-bucket"); !ok || got.Project != project || !strings.Contains(string(got.CORS), `"maxAgeSeconds":3600`) {
 		t.Fatalf("lookup = %+v, %v", got, ok)
 	}
-	if _, err := b.If(gcs.BucketConditions{MetagenerationMatch: 1}).Update(t.Context(), ua); apiCode(err) != http.StatusPreconditionFailed {
+	if _, err := b.If(gcs.BucketConditions{MetagenerationMatch: 1}).Update(t.Context(), ua); sdkerr.GoogleCode(err) != http.StatusPreconditionFailed {
 		t.Fatalf("a stale update = %v", err)
 	}
 
@@ -140,7 +134,7 @@ func TestCreateReadUpdateDelete(t *testing.T) {
 	if _, err := b.Attrs(t.Context()); !errors.Is(err, gcs.ErrBucketNotExist) {
 		t.Fatalf("attrs after delete = %v", err)
 	}
-	if err := b.Delete(t.Context()); apiCode(err) != http.StatusNotFound {
+	if err := b.Delete(t.Context()); sdkerr.GoogleCode(err) != http.StatusNotFound {
 		t.Fatalf("delete again = %v", err)
 	}
 }
@@ -199,7 +193,7 @@ func TestBucketErrors(t *testing.T) {
 		{"listing someone else's objects", func() error { _, err := c.Bucket("taken-name").Objects(t.Context(), nil).Next(); return err }(), http.StatusForbidden, nil},
 		{"an unimplemented method", func() error { _, err := c.Bucket("mine").IAM().Policy(t.Context()); return err }(), http.StatusNotFound, nil},
 	} {
-		if tc.exact != nil && !errors.Is(tc.err, tc.exact) || tc.exact == nil && apiCode(tc.err) != tc.code {
+		if tc.exact != nil && !errors.Is(tc.err, tc.exact) || tc.exact == nil && sdkerr.GoogleCode(tc.err) != tc.code {
 			t.Errorf("%s = %v, want %d %v", tc.name, tc.err, tc.code, tc.exact)
 		}
 	}
@@ -251,7 +245,7 @@ func TestEmptyThenDelete(t *testing.T) {
 	for i := range 5 {
 		write(t, c, "full", fmt.Sprintf("dir/file-%d.txt", i), strings.Repeat("x", i))
 	}
-	if err := b.Delete(t.Context()); apiCode(err) != http.StatusConflict {
+	if err := b.Delete(t.Context()); sdkerr.GoogleCode(err) != http.StatusConflict {
 		t.Fatalf("delete a full bucket = %v", err)
 	}
 	it := b.Objects(t.Context(), nil)
@@ -303,7 +297,7 @@ func TestVersionedBucketsKeepNoncurrentGenerations(t *testing.T) {
 	if len(all) != 2 || all[0].Generation != first.Generation || all[0].Deleted.IsZero() || all[1].Deleted.IsZero() {
 		t.Fatalf("versions = %+v", all)
 	}
-	if err := b.Delete(t.Context()); apiCode(err) != http.StatusConflict {
+	if err := b.Delete(t.Context()); sdkerr.GoogleCode(err) != http.StatusConflict {
 		t.Fatalf("delete with noncurrent generations = %v", err)
 	}
 	for _, o := range all {
@@ -316,6 +310,27 @@ func TestVersionedBucketsKeepNoncurrentGenerations(t *testing.T) {
 	}
 }
 
+func TestPagesOfVersionsFollowNameOrder(t *testing.T) {
+	s := storage.New()
+	if _, err := s.PutBucket(storage.Bucket{Name: "ordered", Project: project, Versioning: &storage.Versioning{Enabled: true}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"a", "a\x00", "a", "a\x00b"} {
+		if _, err := s.PutObject("ordered", name, []byte(name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	it := newClient(t, s).Bucket("ordered").Objects(t.Context(), &gcs.Query{Versions: true})
+	it.PageInfo().MaxSize = 1
+	var got []string
+	for _, o := range objects(t, it) {
+		got = append(got, o.Name)
+	}
+	if !slices.Equal(got, []string{"a", "a", "a\x00", "a\x00b"}) {
+		t.Fatalf("names = %q", got)
+	}
+}
+
 func TestUploadPreconditionsAndChecksums(t *testing.T) {
 	s := storage.New()
 	c := newClient(t, s)
@@ -325,13 +340,13 @@ func TestUploadPreconditionsAndChecksums(t *testing.T) {
 	write(t, c, "uploads", "a/b c.txt", "hello")
 	w := c.Bucket("uploads").Object("a/b c.txt").If(gcs.Conditions{DoesNotExist: true}).NewWriter(t.Context())
 	_, _ = w.Write([]byte("again"))
-	if err := w.Close(); apiCode(err) != http.StatusPreconditionFailed {
+	if err := w.Close(); sdkerr.GoogleCode(err) != http.StatusPreconditionFailed {
 		t.Fatalf("a create-only write over an object = %v", err)
 	}
 	w = c.Bucket("uploads").Object("checked").NewWriter(t.Context())
 	w.SendCRC32C, w.CRC32C = true, 12345
 	_, _ = w.Write([]byte("data"))
-	if err := w.Close(); apiCode(err) != http.StatusBadRequest {
+	if err := w.Close(); sdkerr.GoogleCode(err) != http.StatusBadRequest {
 		t.Fatalf("a write with the wrong CRC32C = %v", err)
 	}
 	got := s.Objects("uploads")
@@ -347,7 +362,7 @@ func TestUploadPreconditionsAndChecksums(t *testing.T) {
 	if listed := objects(t, c.Bucket("uploads").Objects(t.Context(), &gcs.Query{Prefix: "see"})); len(listed) != 1 || listed[0].Name != "seeded" {
 		t.Fatalf("listed = %+v", listed)
 	}
-	if _, err := c.Bucket("uploads").Objects(t.Context(), &gcs.Query{Delimiter: "/"}).Next(); apiCode(err) != http.StatusBadRequest {
+	if _, err := c.Bucket("uploads").Objects(t.Context(), &gcs.Query{Delimiter: "/"}).Next(); sdkerr.GoogleCode(err) != http.StatusBadRequest {
 		t.Fatalf("a delimiter = %v", err)
 	}
 }
@@ -379,21 +394,21 @@ func TestFaults(t *testing.T) {
 	s := storage.New(storage.WithFaults(faults))
 	c := newClient(t, s)
 	err := c.Bucket("lost").Create(t.Context(), project, nil)
-	if apiCode(err) != http.StatusConflict {
+	if sdkerr.GoogleCode(err) != http.StatusConflict {
 		t.Fatalf("a create whose response was lost = %v, want the retry's conflict", err)
 	}
 	if _, ok := s.LookupBucket("lost"); !ok {
 		t.Fatal("the lost create did not take effect")
 	}
-	if _, err := c.Buckets(t.Context(), "locked").Next(); apiCode(err) != http.StatusForbidden {
+	if _, err := c.Buckets(t.Context(), "locked").Next(); sdkerr.GoogleCode(err) != http.StatusForbidden {
 		t.Fatalf("a denied list = %v", err)
 	}
 	w := c.Bucket("lost").Object("dir/denied").NewWriter(t.Context())
 	_, _ = w.Write([]byte("x"))
-	if err := w.Close(); apiCode(err) != http.StatusForbidden {
+	if err := w.Close(); sdkerr.GoogleCode(err) != http.StatusForbidden {
 		t.Fatalf("a denied upload = %v", err)
 	}
-	if err := c.Bucket("lost").Delete(t.Context()); apiCode(err) != http.StatusNotFound {
+	if err := c.Bucket("lost").Delete(t.Context()); sdkerr.GoogleCode(err) != http.StatusNotFound {
 		t.Fatalf("a delete failing after it took effect = %v, want the retry's 404", err)
 	}
 	if got := s.Buckets(); len(got) != 0 {
@@ -459,7 +474,7 @@ func sweep(t *testing.T, c *gcs.Client) error {
 				return err
 			}
 		}
-		if err := b.Delete(t.Context()); err != nil && apiCode(err) != http.StatusNotFound {
+		if err := b.Delete(t.Context()); err != nil && sdkerr.GoogleCode(err) != http.StatusNotFound {
 			return err
 		}
 	}

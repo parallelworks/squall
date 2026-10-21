@@ -77,3 +77,39 @@ func TestRequestsTheServerCannotRead(t *testing.T) {
 		})
 	}
 }
+
+func TestOversizedMultipartUploads(t *testing.T) {
+	s := storage.New()
+	if code, body := do(t, s, http.MethodPost, "/storage/v1/b?project=p", "application/json", `{"name":"big"}`); code != http.StatusOK {
+		t.Fatalf("insert = %d %s", code, body)
+	}
+	body := "--x\r\nContent-Type: application/json\r\n\r\n{\"name\":\"o\"}\r\n--x\r\nContent-Type: text/plain\r\n\r\n" +
+		strings.Repeat("x", 18<<20) + "\r\n--x--\r\n"
+	code, resp := do(t, s, http.MethodPost, "/upload/storage/v1/b/big/o?uploadType=multipart", "multipart/related; boundary=x", body)
+	if code != http.StatusRequestEntityTooLarge || !strings.Contains(resp, `"reason":"uploadTooLarge"`) {
+		t.Fatalf("upload = %d %.200s", code, resp)
+	}
+}
+
+func TestPatchClearsNullFields(t *testing.T) {
+	s := storage.New()
+	if _, err := s.PutBucket(storage.Bucket{
+		Name: "cleared", Project: "p", Labels: map[string]string{"a": "1", "b": "2"},
+		Versioning: &storage.Versioning{Enabled: true}, Encryption: &storage.Encryption{DefaultKmsKeyName: "k"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := do(t, s, http.MethodPatch, "/storage/v1/b/cleared", "application/json", `{"labels":{"a":null}}`); code != http.StatusOK {
+		t.Fatalf("patch a label = %d %s", code, body)
+	}
+	if b, _ := s.LookupBucket("cleared"); len(b.Labels) != 1 || b.Labels["b"] != "2" {
+		t.Fatalf("labels = %v", b.Labels)
+	}
+	code, body := do(t, s, http.MethodPatch, "/storage/v1/b/cleared", "application/json", `{"labels":null,"versioning":null,"encryption":null}`)
+	if code != http.StatusOK {
+		t.Fatalf("patch = %d %s", code, body)
+	}
+	if b, _ := s.LookupBucket("cleared"); b.Labels != nil || b.Versioning != nil || b.Encryption != nil || b.Metageneration != 3 {
+		t.Fatalf("bucket = %+v", b)
+	}
+}
