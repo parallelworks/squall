@@ -13,6 +13,7 @@ import (
 
 	"github.com/parallelworks/squall/fault"
 	"github.com/parallelworks/squall/gcp/compute"
+	"github.com/parallelworks/squall/sdktest/internal/sdkerr"
 )
 
 func (c *clients) listPolicies(t *testing.T, filter string) ([]string, error) {
@@ -56,7 +57,7 @@ func TestResourcePolicies(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := c.insertPolicy(t, "u-p-1-a"); apiCode(err) != http.StatusConflict {
+	if err := c.insertPolicy(t, "u-p-1-a"); sdkerr.GoogleCode(err) != http.StatusConflict {
 		t.Fatalf("inserting a name in use = %v, want HTTP 409", err)
 	}
 	if got, err := c.listPolicies(t, "name eq u-p-1-.*"); err != nil || fmt.Sprint(got) != "[u-p-1-a u-p-1-b]" {
@@ -80,13 +81,13 @@ func TestResourcePolicies(t *testing.T) {
 	missing := bulkRequest("s", "node-3")
 	missing.BulkInsertInstanceResourceResource.InstanceProperties.ResourcePolicies = []string{"nope"}
 	err = c.bulkInsert(t, missing)
-	if apiCode(err) != http.StatusBadRequest || !strings.Contains(err.Error(),
+	if sdkerr.GoogleCode(err) != http.StatusBadRequest || !strings.Contains(err.Error(),
 		"Invalid value for field 'resource.instanceProperties.resourcePolicies[0]': 'nope'. The referenced resourcePolicy resource cannot be found.") {
 		t.Errorf("a missing policy = %v, want HTTP 400 naming the field", err)
 	}
 	gone := single("vm-3", "s")
 	gone.ResourcePolicies = []string{"regions/us-east1/resourcePolicies/nope"}
-	if err := c.insert(t, gone); apiCode(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "resource.resourcePolicies[0]") {
+	if err := c.insert(t, gone); sdkerr.GoogleCode(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "resource.resourcePolicies[0]") {
 		t.Errorf("insert with a missing policy = %v, want HTTP 400 naming the field", err)
 	}
 
@@ -97,13 +98,13 @@ func TestResourcePolicies(t *testing.T) {
 		}
 		return op.Wait(t.Context())
 	}
-	if err := del("u-p-1-a"); apiCode(err) != http.StatusBadRequest {
+	if err := del("u-p-1-a"); sdkerr.GoogleCode(err) != http.StatusBadRequest {
 		t.Fatalf("deleting a policy in use = %v, want HTTP 400", err)
 	}
 	if err := del("u-p-1-b"); err != nil {
 		t.Fatal(err)
 	}
-	if err := del("u-p-1-b"); apiCode(err) != http.StatusNotFound {
+	if err := del("u-p-1-b"); sdkerr.GoogleCode(err) != http.StatusNotFound {
 		t.Fatalf("deleting it again = %v, want HTTP 404", err)
 	}
 	if got := c.server.ResourcePolicies(); len(got) != 2 {
@@ -168,7 +169,7 @@ func TestInstanceTemplatesAndGroupManagers(t *testing.T) {
 	err = c.bulkInsert(t, &computepb.BulkInsertInstanceRequest{Project: project, Zone: zone, BulkInsertInstanceResourceResource: &computepb.BulkInsertInstanceResource{
 		Count: &one, NamePattern: new("other-#"), SourceInstanceTemplate: new("global/instanceTemplates/missing"),
 	}})
-	if apiCode(err) != http.StatusBadRequest || !strings.Contains(err.Error(),
+	if sdkerr.GoogleCode(err) != http.StatusBadRequest || !strings.Contains(err.Error(),
 		"Invalid value for field 'resource.sourceInstanceTemplate': 'global/instanceTemplates/missing'. The referenced instanceTemplate resource cannot be found.") {
 		t.Errorf("bulkInsert from a missing template = %v, want HTTP 400 naming the field", err)
 	}
@@ -185,10 +186,10 @@ func TestInstanceTemplatesAndGroupManagers(t *testing.T) {
 		t.Fatalf("group managers = %v, %v; want none", pair, err)
 	}
 	bad := c.managers.AggregatedList(t.Context(), &computepb.AggregatedListInstanceGroupManagersRequest{Project: project, Filter: new("targetSize = 1")})
-	if _, err := bad.Next(); apiCode(err) != http.StatusBadRequest {
+	if _, err := bad.Next(); sdkerr.GoogleCode(err) != http.StatusBadRequest {
 		t.Fatalf("an unsupported filter = %v, want HTTP 400", err)
 	}
-	if _, err := c.managers.Get(t.Context(), &computepb.GetInstanceGroupManagerRequest{Project: project, Zone: zone, InstanceGroupManager: "g"}); apiCode(err) != http.StatusNotFound {
+	if _, err := c.managers.Get(t.Context(), &computepb.GetInstanceGroupManagerRequest{Project: project, Zone: zone, InstanceGroupManager: "g"}); sdkerr.GoogleCode(err) != http.StatusNotFound {
 		t.Fatalf("get of a group manager = %v, want HTTP 404", err)
 	}
 }
@@ -196,7 +197,7 @@ func TestInstanceTemplatesAndGroupManagers(t *testing.T) {
 func TestRoutes(t *testing.T) {
 	c := setup(t)
 	_, err := c.routes.Delete(t.Context(), &computepb.DeleteRouteRequest{Project: project, Route: "nat-gateway-s"})
-	if apiCode(err) != http.StatusNotFound {
+	if sdkerr.GoogleCode(err) != http.StatusNotFound {
 		t.Fatalf("deleting a missing route = %v, want HTTP 404", err)
 	}
 	route := &computepb.Route{
@@ -215,7 +216,7 @@ func TestRoutes(t *testing.T) {
 	if err := insert(); err != nil {
 		t.Fatal(err)
 	}
-	if err := insert(); apiCode(err) != http.StatusConflict {
+	if err := insert(); sdkerr.GoogleCode(err) != http.StatusConflict {
 		t.Fatalf("inserting it again = %v, want HTTP 409", err)
 	}
 	got, err := c.routes.Get(t.Context(), &computepb.GetRouteRequest{Project: project, Route: "nat-gateway-s"})
@@ -223,7 +224,7 @@ func TestRoutes(t *testing.T) {
 		t.Fatalf("get = %v, %v", got, err)
 	}
 	route.Name, route.DestRange = new("bad"), new("10.0.0.1/8")
-	if err := insert(); apiCode(err) != http.StatusBadRequest {
+	if err := insert(); sdkerr.GoogleCode(err) != http.StatusBadRequest {
 		t.Fatalf("a range with host bits = %v, want HTTP 400", err)
 	}
 	op, err := c.routes.Delete(t.Context(), &computepb.DeleteRouteRequest{Project: project, Route: "nat-gateway-s"})
@@ -259,7 +260,7 @@ func TestDisks(t *testing.T) {
 		{"an unknown image", &computepb.Disk{Name: new("d-3"), SourceImage: new("projects/debian-cloud/global/images/missing")}, http.StatusBadRequest},
 		{"a type in another zone", &computepb.Disk{Name: new("d-4"), Type: new("zones/us-east1-c/diskTypes/pd-ssd")}, http.StatusBadRequest},
 	} {
-		if err := insert(tc.disk); apiCode(err) != tc.code {
+		if err := insert(tc.disk); sdkerr.GoogleCode(err) != tc.code {
 			t.Errorf("insert with %s = %v, want HTTP %d", tc.name, err, tc.code)
 		}
 	}
@@ -269,7 +270,7 @@ func TestDisks(t *testing.T) {
 	if err := insert(&computepb.Disk{Name: new("d-5"), SourceSnapshot: new("global/snapshots/snap-1"), Labels: map[string]string{"session-id": "s"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := insert(&computepb.Disk{Name: new("lost")}); err == nil || apiCode(err) != 0 {
+	if err := insert(&computepb.Disk{Name: new("lost")}); err == nil || sdkerr.GoogleCode(err) != 0 {
 		t.Fatalf("insert whose response is lost = %v", err)
 	}
 	it := c.disks.List(t.Context(), &computepb.ListDisksRequest{Project: project, Zone: zone, Filter: new("sizeGb = 40 OR name = lost")})
@@ -290,7 +291,7 @@ func TestDisks(t *testing.T) {
 	if got := c.aggregatedDisks(t, `labels.session-id="s"`); fmt.Sprint(got) != "[zones/us-east1-b/d-5]" {
 		t.Errorf("aggregated = %v", got)
 	}
-	if _, err := c.disks.Get(t.Context(), &computepb.GetDiskRequest{Project: project, Zone: zone, Disk: "missing"}); apiCode(err) != http.StatusNotFound {
+	if _, err := c.disks.Get(t.Context(), &computepb.GetDiskRequest{Project: project, Zone: zone, Disk: "missing"}); sdkerr.GoogleCode(err) != http.StatusNotFound {
 		t.Errorf("get of a missing disk = %v", err)
 	}
 }
@@ -309,7 +310,7 @@ func TestDeletingADiskAgainFinishesTheFirstDelete(t *testing.T) {
 	if _, err := c.disks.Delete(t.Context(), del); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.disks.Delete(t.Context(), del); apiCode(err) != http.StatusNotFound {
+	if _, err := c.disks.Delete(t.Context(), del); sdkerr.GoogleCode(err) != http.StatusNotFound {
 		t.Fatalf("deleting a disk being deleted = %v, want HTTP 404 once the first delete finishes", err)
 	}
 	insert()

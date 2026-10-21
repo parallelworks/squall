@@ -11,6 +11,7 @@ import (
 
 	"github.com/parallelworks/squall/aws/ec2"
 	"github.com/parallelworks/squall/fault"
+	"github.com/parallelworks/squall/sdktest/internal/sdkerr"
 )
 
 func createVolume(t *testing.T, c *awsec2.Client, size int32) string {
@@ -192,7 +193,7 @@ func TestSnapshots(t *testing.T) {
 			return err
 		}, "InvalidParameterValue"},
 	} {
-		if err := tc.call(); code(err) != tc.code {
+		if err := tc.call(); sdkerr.AWSCode(err) != tc.code {
 			t.Errorf("%s = %v, want %s", tc.name, err, tc.code)
 		}
 	}
@@ -200,13 +201,13 @@ func TestSnapshots(t *testing.T) {
 	if _, err := c.DeregisterImage(t.Context(), &awsec2.DeregisterImageInput{ImageId: aws.String(image)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.DeregisterImage(t.Context(), &awsec2.DeregisterImageInput{ImageId: aws.String(image)}); code(err) != "InvalidAMIID.NotFound" {
+	if _, err := c.DeregisterImage(t.Context(), &awsec2.DeregisterImageInput{ImageId: aws.String(image)}); sdkerr.AWSCode(err) != "InvalidAMIID.NotFound" {
 		t.Fatalf("deregistering it again = %v, want InvalidAMIID.NotFound", err)
 	}
 	if _, err := c.DeleteSnapshot(t.Context(), &awsec2.DeleteSnapshotInput{SnapshotId: aws.String(snap)}); err != nil {
 		t.Fatalf("deleting the snapshot once its image is gone: %v", err)
 	}
-	if _, err := c.DeleteSnapshot(t.Context(), &awsec2.DeleteSnapshotInput{SnapshotId: aws.String(snap)}); code(err) != "InvalidSnapshot.NotFound" {
+	if _, err := c.DeleteSnapshot(t.Context(), &awsec2.DeleteSnapshotInput{SnapshotId: aws.String(snap)}); sdkerr.AWSCode(err) != "InvalidSnapshot.NotFound" {
 		t.Fatalf("deleting it again = %v, want InvalidSnapshot.NotFound", err)
 	}
 	if got := s.Snapshots(); len(got) != 1 || got[0].SnapshotID != other {
@@ -272,10 +273,10 @@ func TestSnapshotFaults(t *testing.T) {
 		t.Fatalf("snapshots after a lost response = %v, %v; want the one taken", got, err)
 	}
 	snap := got[0]
-	if _, err := c.RegisterImage(t.Context(), registerInput("golden-1", snap)); code(err) != "InternalError" {
+	if _, err := c.RegisterImage(t.Context(), registerInput("golden-1", snap)); sdkerr.AWSCode(err) != "InternalError" {
 		t.Fatalf("a register that fails after taking effect = %v, want InternalError", err)
 	}
-	if _, err := c.RegisterImage(t.Context(), registerInput("golden-1", snap)); code(err) != "InvalidAMIName.Duplicate" {
+	if _, err := c.RegisterImage(t.Context(), registerInput("golden-1", snap)); sdkerr.AWSCode(err) != "InvalidAMIName.Duplicate" {
 		t.Fatalf("registering again = %v, want InvalidAMIName.Duplicate", err)
 	}
 	if imgs := s.Images(); len(imgs) != 1 {
@@ -284,7 +285,7 @@ func TestSnapshotFaults(t *testing.T) {
 	if _, err := c.DeregisterImage(t.Context(), &awsec2.DeregisterImageInput{ImageId: aws.String(s.Images()[0].ImageID)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.DeleteSnapshot(t.Context(), &awsec2.DeleteSnapshotInput{SnapshotId: aws.String(snap)}); code(err) != "Unavailable" {
+	if _, err := c.DeleteSnapshot(t.Context(), &awsec2.DeleteSnapshotInput{SnapshotId: aws.String(snap)}); sdkerr.AWSCode(err) != "Unavailable" {
 		t.Fatalf("a rejected delete = %v, want Unavailable", err)
 	}
 	if len(s.Snapshots()) != 1 {
@@ -305,7 +306,7 @@ func TestAFaultRuleCanTargetOneSnapshot(t *testing.T) {
 	if _, err := c.DeleteSnapshot(t.Context(), &awsec2.DeleteSnapshotInput{SnapshotId: aws.String(keep)}); err != nil {
 		t.Fatalf("deleting another snapshot: %v", err)
 	}
-	if _, err := c.DeleteSnapshot(t.Context(), &awsec2.DeleteSnapshotInput{SnapshotId: aws.String(target)}); code(err) != "Unavailable" {
+	if _, err := c.DeleteSnapshot(t.Context(), &awsec2.DeleteSnapshotInput{SnapshotId: aws.String(target)}); sdkerr.AWSCode(err) != "Unavailable" {
 		t.Fatalf("deleting the targeted snapshot = %v, want Unavailable", err)
 	}
 }

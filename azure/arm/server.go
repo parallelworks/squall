@@ -123,7 +123,9 @@
 //
 // A lost response aborts the handler with [http.ErrAbortHandler] after
 // sending the response header, so the [http.Server] serving it closes the
-// connection. Calling ServeHTTP directly propagates that panic.
+// connection. Calling ServeHTTP directly propagates that panic. A HEAD's
+// header is its whole answer, so a lost one instead ends the connection
+// inside its status line.
 package arm
 
 import (

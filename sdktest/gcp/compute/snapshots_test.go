@@ -12,6 +12,7 @@ import (
 
 	"github.com/parallelworks/squall/fault"
 	"github.com/parallelworks/squall/gcp/compute"
+	"github.com/parallelworks/squall/sdktest/internal/sdkerr"
 )
 
 func (c *clients) insertDisk(t *testing.T, d *computepb.Disk) {
@@ -91,7 +92,7 @@ func TestSnapshots(t *testing.T) {
 		{"an invalid name", &computepb.Snapshot{Name: new("Data"), SourceDisk: new(disk)}, http.StatusBadRequest},
 		{"an unsupported field", &computepb.Snapshot{Name: new("data-3"), SourceDisk: new(disk), SnapshotType: new("ARCHIVE")}, http.StatusBadRequest},
 	} {
-		if err := c.insertSnapshot(t, tc.snap); apiCode(err) != tc.code {
+		if err := c.insertSnapshot(t, tc.snap); sdkerr.GoogleCode(err) != tc.code {
 			t.Errorf("insert with %s = %v, want HTTP %d", tc.name, err, tc.code)
 		}
 	}
@@ -105,7 +106,7 @@ func TestSnapshots(t *testing.T) {
 			t.Errorf("list %q = %v, %v; want %s", filter, got, err, want)
 		}
 	}
-	if _, err := c.listSnapshots(t, "storageBytes = 1"); apiCode(err) != http.StatusBadRequest {
+	if _, err := c.listSnapshots(t, "storageBytes = 1"); sdkerr.GoogleCode(err) != http.StatusBadRequest {
 		t.Errorf("an unsupported filter = %v, want HTTP 400", err)
 	}
 
@@ -123,10 +124,10 @@ func TestSnapshots(t *testing.T) {
 	if err := c.deleteSnapshot(t, "data-1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.snapshots.Get(t.Context(), &computepb.GetSnapshotRequest{Project: project, Snapshot: "data-1"}); apiCode(err) != http.StatusNotFound {
+	if _, err := c.snapshots.Get(t.Context(), &computepb.GetSnapshotRequest{Project: project, Snapshot: "data-1"}); sdkerr.GoogleCode(err) != http.StatusNotFound {
 		t.Fatalf("get of a deleted snapshot = %v, want HTTP 404", err)
 	}
-	if err := c.deleteSnapshot(t, "data-1"); apiCode(err) != http.StatusNotFound {
+	if err := c.deleteSnapshot(t, "data-1"); sdkerr.GoogleCode(err) != http.StatusNotFound {
 		t.Fatalf("deleting it again = %v, want HTTP 404", err)
 	}
 	if got := c.server.Snapshots(); len(got) != 1 || got[0].Name != "data-2" || fmt.Sprint(got[0].StorageLocations) != "[us-east1]" {
@@ -141,7 +142,7 @@ func TestSnapshotsSettle(t *testing.T) {
 	}
 	if _, err := c.snapshots.Insert(t.Context(), &computepb.InsertSnapshotRequest{Project: project, SnapshotResource: &computepb.Snapshot{
 		Name: new("data-1"), SourceDisk: new("zones/us-east1-b/disks/data"),
-	}}); apiCode(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "is not ready") {
+	}}); sdkerr.GoogleCode(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "is not ready") {
 		t.Fatalf("a snapshot of a disk being created = %v, want resourceNotReady", err)
 	}
 	c.server.Settle()
@@ -160,7 +161,7 @@ func TestSnapshotsSettle(t *testing.T) {
 	_, err = c.disks.Insert(t.Context(), &computepb.InsertDiskRequest{Project: project, Zone: zone, DiskResource: &computepb.Disk{
 		Name: new("restored"), SourceSnapshot: new("global/snapshots/data-1"),
 	}})
-	if apiCode(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "is not ready") {
+	if sdkerr.GoogleCode(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "is not ready") {
 		t.Fatalf("a disk from a snapshot being created = %v, want resourceNotReady", err)
 	}
 	c.server.Settle()
@@ -188,7 +189,7 @@ func TestSnapshotFaults(t *testing.T) {
 	c := setup(t, compute.WithFaults(faults))
 	c.insertDisk(t, &computepb.Disk{Name: new("data")})
 	source := new("zones/us-east1-b/disks/data")
-	if err := c.insertSnapshot(t, &computepb.Snapshot{Name: new("lost"), SourceDisk: source}); err == nil || apiCode(err) != 0 {
+	if err := c.insertSnapshot(t, &computepb.Snapshot{Name: new("lost"), SourceDisk: source}); err == nil || sdkerr.GoogleCode(err) != 0 {
 		t.Fatalf("insert whose response is lost = %v", err)
 	}
 	if _, ok := c.server.LookupSnapshot(project, "lost"); !ok {

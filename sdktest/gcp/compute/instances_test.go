@@ -20,6 +20,7 @@ import (
 
 	"github.com/parallelworks/squall/fault"
 	"github.com/parallelworks/squall/gcp/compute"
+	"github.com/parallelworks/squall/sdktest/internal/sdkerr"
 )
 
 const zone = "us-east1-b"
@@ -258,12 +259,12 @@ func TestBulkInsertNamesFromAPattern(t *testing.T) {
 	}
 	bad := pattern(2)
 	bad.BulkInsertInstanceResourceResource.NamePattern = new("vm-##-##")
-	if err := c.bulkInsert(t, bad); apiCode(err) != http.StatusBadRequest {
+	if err := c.bulkInsert(t, bad); sdkerr.GoogleCode(err) != http.StatusBadRequest {
 		t.Errorf("a pattern with two runs = %v, want HTTP 400", err)
 	}
 	none := pattern(3)
 	none.BulkInsertInstanceResourceResource.NamePattern = nil
-	if err := c.bulkInsert(t, none); apiCode(err) != http.StatusBadRequest {
+	if err := c.bulkInsert(t, none); sdkerr.GoogleCode(err) != http.StatusBadRequest {
 		t.Errorf("a count with neither names nor a pattern = %v, want HTTP 400", err)
 	}
 }
@@ -272,7 +273,7 @@ func TestBulkInsertRetriedAfterALostResponse(t *testing.T) {
 	faults := fault.New().Add(fault.Rule{Method: "compute.instances.bulkInsert", Nth: 1, Fault: fault.LoseResponse()})
 	c := setup(t, compute.WithFaults(faults))
 	req := bulkRequest("s", "node-1", "node-2")
-	if _, err := c.instances.BulkInsert(t.Context(), req); err == nil || apiCode(err) != 0 {
+	if _, err := c.instances.BulkInsert(t.Context(), req); err == nil || sdkerr.GoogleCode(err) != 0 {
 		t.Fatalf("first bulkInsert = %v, want a transport error", err)
 	}
 	if got := len(c.server.Instances()); got != 2 {
@@ -280,7 +281,7 @@ func TestBulkInsertRetriedAfterALostResponse(t *testing.T) {
 	}
 	// Without a request ID the retry is a new request, and the names are taken.
 	err := c.bulkInsert(t, req)
-	if apiCode(err) != http.StatusConflict || !strings.Contains(err.Error(), "CONFLICT") || !strings.Contains(err.Error(), "RESOURCE_ALREADY_EXISTS") ||
+	if sdkerr.GoogleCode(err) != http.StatusConflict || !strings.Contains(err.Error(), "CONFLICT") || !strings.Contains(err.Error(), "RESOURCE_ALREADY_EXISTS") ||
 		!strings.Contains(err.Error(), "VM_MIN_COUNT_NOT_REACHED") || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("retry = %v, want a 409 operation error naming the existing instances", err)
 	}
@@ -335,7 +336,7 @@ func TestInstanceInsertErrors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			inst := single("vm-new", "s")
 			tc.change(inst)
-			if err := c.insert(t, inst); apiCode(err) != tc.code {
+			if err := c.insert(t, inst); sdkerr.GoogleCode(err) != tc.code {
 				t.Fatalf("insert = %v, want HTTP %d", err, tc.code)
 			}
 		})
@@ -344,13 +345,13 @@ func TestInstanceInsertErrors(t *testing.T) {
 		t.Fatalf("%d instances, want only the first", got)
 	}
 	_, err := c.instances.Insert(t.Context(), &computepb.InsertInstanceRequest{Project: project, Zone: "us-east1-z", InstanceResource: single("vm", "s")})
-	if apiCode(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "Unknown zone") {
+	if sdkerr.GoogleCode(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "Unknown zone") {
 		t.Errorf("insert in an unknown zone = %v", err)
 	}
 	_, err = c.instances.Insert(t.Context(), &computepb.InsertInstanceRequest{
 		Project: project, Zone: zone, SourceInstanceTemplate: new("global/instanceTemplates/t"), InstanceResource: single("vm", "s"),
 	})
-	if apiCode(err) != http.StatusBadRequest {
+	if sdkerr.GoogleCode(err) != http.StatusBadRequest {
 		t.Errorf("insert from a template = %v, want HTTP 400 rather than the template ignored", err)
 	}
 }
@@ -375,11 +376,11 @@ func TestGetAndDeleteByID(t *testing.T) {
 	if insts, err := c.list(t, "id="+id, 0); err != nil || len(insts) != 0 {
 		t.Fatalf("list by ID after delete = %s, %v", names(insts), err)
 	}
-	if _, err := c.get(t, "vm-1"); apiCode(err) != http.StatusNotFound {
+	if _, err := c.get(t, "vm-1"); sdkerr.GoogleCode(err) != http.StatusNotFound {
 		t.Errorf("get after delete = %v", err)
 	}
 	_, err = c.instances.Delete(t.Context(), &computepb.DeleteInstanceRequest{Project: project, Zone: zone, Instance: id})
-	if apiCode(err) != http.StatusNotFound {
+	if sdkerr.GoogleCode(err) != http.StatusNotFound {
 		t.Errorf("deleting it again = %v, want HTTP 404", err)
 	}
 }
@@ -401,7 +402,7 @@ func TestDeleteHonorsAutoDelete(t *testing.T) {
 		t.Fatalf("disks = %v", d)
 	}
 	_, err := c.disks.Delete(t.Context(), &computepb.DeleteDiskRequest{Project: project, Zone: zone, Disk: "vm-1-data"})
-	if apiCode(err) != http.StatusBadRequest || apiReason(err) != "resourceInUseByAnotherResource" {
+	if sdkerr.GoogleCode(err) != http.StatusBadRequest || apiReason(err) != "resourceInUseByAnotherResource" {
 		t.Fatalf("deleting an attached disk = %v", err)
 	}
 	op, err := c.instances.Delete(t.Context(), &computepb.DeleteInstanceRequest{Project: project, Zone: zone, Instance: "vm-1"})
@@ -461,7 +462,7 @@ func TestStopStartAndSetMachineType(t *testing.T) {
 		}
 		return op.Wait(t.Context())
 	}
-	if err := setType("zones/" + zone + "/machineTypes/n2-standard-8"); apiCode(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "RESOURCE_NOT_READY") {
+	if err := setType("zones/" + zone + "/machineTypes/n2-standard-8"); sdkerr.GoogleCode(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "RESOURCE_NOT_READY") {
 		t.Fatalf("setMachineType while running = %v, want an operation that fails with RESOURCE_NOT_READY", err)
 	}
 	stop, err := c.instances.Stop(t.Context(), &computepb.StopInstanceRequest{Project: project, Zone: zone, Instance: "vm-1"})
@@ -523,7 +524,7 @@ func TestSetLabelsChecksTheInstanceFingerprint(t *testing.T) {
 	if after.GetLabels()["stopped-by"] != "me" || after.GetLabelFingerprint() == inst.GetLabelFingerprint() {
 		t.Fatalf("labels = %v", after.GetLabels())
 	}
-	if err := setLabels(inst.GetLabelFingerprint(), nil); apiCode(err) != http.StatusPreconditionFailed {
+	if err := setLabels(inst.GetLabelFingerprint(), nil); sdkerr.GoogleCode(err) != http.StatusPreconditionFailed {
 		t.Fatalf("a stale fingerprint = %v, want HTTP 412", err)
 	}
 }
@@ -549,10 +550,10 @@ func TestAddAccessConfigClaimsAReservedAddress(t *testing.T) {
 		}
 		return op.Wait(t.Context())
 	}
-	if err := add("nic0", "100.64.9.9"); apiCode(err) != http.StatusBadRequest {
+	if err := add("nic0", "100.64.9.9"); sdkerr.GoogleCode(err) != http.StatusBadRequest {
 		t.Fatalf("an address nobody reserved = %v, want HTTP 400", err)
 	}
-	if err := add("nic1", reserved.Address); apiCode(err) != http.StatusBadRequest {
+	if err := add("nic1", reserved.Address); sdkerr.GoogleCode(err) != http.StatusBadRequest {
 		t.Fatalf("a missing interface = %v, want HTTP 400", err)
 	}
 	if err := add("nic0", reserved.Address); err != nil {
@@ -565,7 +566,7 @@ func TestAddAccessConfigClaimsAReservedAddress(t *testing.T) {
 	if a, _ := c.server.LookupAddress(project, region, "ip-1"); a.Status != "IN_USE" || len(a.Users) != 1 {
 		t.Fatalf("address = %+v", a)
 	}
-	if err := add("nic0", reserved.Address); apiCode(err) != http.StatusBadRequest || apiReason(err) != "badRequest" {
+	if err := add("nic0", reserved.Address); sdkerr.GoogleCode(err) != http.StatusBadRequest || apiReason(err) != "badRequest" {
 		t.Fatalf("a second access config = %v, want HTTP 400 badRequest", err)
 	}
 	deleteInstance := func(name string) {
@@ -599,7 +600,7 @@ func TestAddAccessConfigClaimsAReservedAddress(t *testing.T) {
 	if got, _ := c.get(t, "vm-2"); got.GetNetworkInterfaces()[0].GetAccessConfigs()[0].GetNatIP() != reserved.Address {
 		t.Fatalf("access config after the address went = %v", got.GetNetworkInterfaces()[0].GetAccessConfigs())
 	}
-	if err := insert(t, c.addresses, &computepb.Address{Name: new("ip-2"), Address: new(reserved.Address)}); apiCode(err) != http.StatusBadRequest {
+	if err := insert(t, c.addresses, &computepb.Address{Name: new("ip-2"), Address: new(reserved.Address)}); sdkerr.GoogleCode(err) != http.StatusBadRequest {
 		t.Fatalf("reserving the IP the instance still holds = %v, want HTTP 400", err)
 	}
 	deleteInstance("vm-2")
@@ -645,7 +646,7 @@ func TestAttachAndDetachDisk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("attaching a disk in use = %v, want the call accepted and its operation failed", err)
 	}
-	if err := again.Wait(t.Context()); apiCode(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "RESOURCE_IN_USE_BY_ANOTHER_RESOURCE") {
+	if err := again.Wait(t.Context()); sdkerr.GoogleCode(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "RESOURCE_IN_USE_BY_ANOTHER_RESOURCE") {
 		t.Fatalf("attaching a disk in use = %v, want an operation that fails with RESOURCE_IN_USE_BY_ANOTHER_RESOURCE", err)
 	}
 	detach := func(device string) error {
@@ -658,7 +659,7 @@ func TestAttachAndDetachDisk(t *testing.T) {
 	if err := detach("data-1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := detach("data-1"); apiCode(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "INVALID_USAGE") ||
+	if err := detach("data-1"); sdkerr.GoogleCode(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "INVALID_USAGE") ||
 		!strings.Contains(err.Error(), "No attached disk found with device name 'data-1'") {
 		t.Fatalf("detaching it again = %v, want an operation that fails with INVALID_USAGE", err)
 	}
@@ -699,7 +700,7 @@ func TestListFiltersAndPagesInstances(t *testing.T) {
 		}
 	}
 	for _, bad := range []string{"cpuPlatform = x", "name eq a AND name eq b", "name = vm-*"} {
-		if _, err := c.list(t, bad, 0); apiCode(err) != http.StatusBadRequest {
+		if _, err := c.list(t, bad, 0); sdkerr.GoogleCode(err) != http.StatusBadRequest {
 			t.Errorf("list %q = %v, want HTTP 400", bad, err)
 		}
 	}
@@ -767,10 +768,10 @@ func TestZonesList(t *testing.T) {
 		t.Errorf("all zones = %v", got)
 	}
 	_, err := c.instances.Get(t.Context(), &computepb.GetInstanceRequest{Project: project, Zone: "us-east1-d", Instance: "vm"})
-	if apiCode(err) != http.StatusBadRequest {
+	if sdkerr.GoogleCode(err) != http.StatusBadRequest {
 		t.Errorf("a zone WithZones removed = %v, want HTTP 400", err)
 	}
-	if _, err := c.zones.Get(t.Context(), &computepb.GetZoneRequest{Project: project, Zone: "us-east1-d"}); apiCode(err) != http.StatusNotFound {
+	if _, err := c.zones.Get(t.Context(), &computepb.GetZoneRequest{Project: project, Zone: "us-east1-d"}); sdkerr.GoogleCode(err) != http.StatusNotFound {
 		t.Errorf("zones.get of a removed zone = %v, want HTTP 404", err)
 	}
 }
@@ -809,21 +810,21 @@ func TestOperationsSettleAfterReads(t *testing.T) {
 	}
 	// A change waits for the one in progress, which here leaves nothing to change.
 	_, err = c.instances.Stop(t.Context(), &computepb.StopInstanceRequest{Project: project, Zone: zone, Instance: "vm-1"})
-	if apiCode(err) != http.StatusNotFound {
+	if sdkerr.GoogleCode(err) != http.StatusNotFound {
 		t.Fatalf("stop while deleting = %v, want HTTP 404", err)
 	}
 	waited, err := c.zoneOps.Wait(t.Context(), &computepb.WaitZoneOperationRequest{Project: project, Zone: zone, Operation: del.Name()})
 	if err != nil || waited.GetStatus() != computepb.Operation_DONE {
 		t.Fatalf("zoneOperations.wait = %v, %v", waited, err)
 	}
-	if _, err := c.get(t, "vm-1"); apiCode(err) != http.StatusNotFound {
+	if _, err := c.get(t, "vm-1"); sdkerr.GoogleCode(err) != http.StatusNotFound {
 		t.Fatalf("get after the delete finished = %v", err)
 	}
 	got, err := c.zoneOps.Get(t.Context(), &computepb.GetZoneOperationRequest{Project: project, Zone: zone, Operation: del.Name()})
 	if err != nil || got.GetStatus() != computepb.Operation_DONE || got.GetOperationType() != "delete" || got.GetEndTime() == "" {
 		t.Fatalf("zoneOperations.get = %v, %v", got, err)
 	}
-	if _, err := c.zoneOps.Get(t.Context(), &computepb.GetZoneOperationRequest{Project: project, Zone: zone, Operation: "operation-1"}); apiCode(err) != http.StatusNotFound {
+	if _, err := c.zoneOps.Get(t.Context(), &computepb.GetZoneOperationRequest{Project: project, Zone: zone, Operation: "operation-1"}); sdkerr.GoogleCode(err) != http.StatusNotFound {
 		t.Errorf("a missing operation = %v", err)
 	}
 }
@@ -872,13 +873,13 @@ func TestInstanceFaults(t *testing.T) {
 		}
 		return op.Wait(t.Context())
 	}
-	if err := del(); apiCode(err) != http.StatusInternalServerError {
+	if err := del(); sdkerr.GoogleCode(err) != http.StatusInternalServerError {
 		t.Fatalf("delete with a failed operation = %v, want HTTP 500", err)
 	}
 	if _, ok := c.server.LookupInstance(project, zone, "vm-1"); !ok {
 		t.Fatal("a failed delete took effect")
 	}
-	if err := del(); apiCode(err) != http.StatusForbidden {
+	if err := del(); sdkerr.GoogleCode(err) != http.StatusForbidden {
 		t.Fatalf("delete whose poll fails = %v, want HTTP 403", err)
 	}
 	if _, ok := c.server.LookupInstance(project, zone, "vm-1"); ok {
@@ -898,7 +899,7 @@ func createNodes(t *testing.T, c *clients, session string, nodes ...string) erro
 			return nil
 		}
 		last = err
-		if apiCode(err) != http.StatusConflict || !strings.Contains(err.Error(), "RESOURCE_ALREADY_EXISTS") {
+		if sdkerr.GoogleCode(err) != http.StatusConflict || !strings.Contains(err.Error(), "RESOURCE_ALREADY_EXISTS") {
 			continue
 		}
 		filter := fmt.Sprintf("labels.session-id=%s AND (name=%s)", session, strings.Join(nodes, " OR name="))
@@ -963,7 +964,7 @@ func TestAReadThatFinishesADeleteNoLongerSeesIt(t *testing.T) {
 	if got, err := c.get(t, "vm-3"); err != nil || got.GetStatus() != "STOPPING" {
 		t.Fatalf("get while deleting = %v, %v", got, err)
 	}
-	if _, err := c.get(t, "vm-3"); apiCode(err) != http.StatusNotFound {
+	if _, err := c.get(t, "vm-3"); sdkerr.GoogleCode(err) != http.StatusNotFound {
 		t.Errorf("the get that finishes the delete = %v, want HTTP 404", err)
 	}
 }
@@ -1039,7 +1040,7 @@ func TestBulkInsertRejectsDiskNamesItWouldCreateTwice(t *testing.T) {
 	req := bulkRequest("s", "vm", "vm-1")
 	props := req.BulkInsertInstanceResourceResource.InstanceProperties
 	props.Disks = append(props.Disks, &computepb.AttachedDisk{AutoDelete: new(true), InitializeParams: &computepb.AttachedDiskInitializeParams{}})
-	if err := c.bulkInsert(t, req); apiCode(err) != http.StatusConflict || !strings.Contains(err.Error(), "disks/vm-1' already exists") {
+	if err := c.bulkInsert(t, req); sdkerr.GoogleCode(err) != http.StatusConflict || !strings.Contains(err.Error(), "disks/vm-1' already exists") {
 		t.Fatalf("bulkInsert = %v, want a 409 operation error naming disk vm-1", err)
 	}
 	if got := len(c.server.Disks()); got != 0 {
@@ -1071,7 +1072,7 @@ func TestBulkInsertCreatesTheFreeNamesAboveMinCount(t *testing.T) {
 
 	req = bulkRequest("s", "node-2", "node-3", "node-4")
 	req.BulkInsertInstanceResourceResource.MinCount = new(int64(2))
-	if err := c.bulkInsert(t, req); apiCode(err) != http.StatusConflict || !strings.Contains(err.Error(), "VM_MIN_COUNT_NOT_REACHED") {
+	if err := c.bulkInsert(t, req); sdkerr.GoogleCode(err) != http.StatusConflict || !strings.Contains(err.Error(), "VM_MIN_COUNT_NOT_REACHED") {
 		t.Fatalf("bulkInsert that can create 1 of minCount 2 = %v, want a 409 operation error", err)
 	}
 	if got := len(c.server.Instances()); got != 3 {

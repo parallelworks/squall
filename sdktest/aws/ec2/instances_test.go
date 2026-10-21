@@ -13,6 +13,7 @@ import (
 
 	"github.com/parallelworks/squall/aws/ec2"
 	"github.com/parallelworks/squall/fault"
+	"github.com/parallelworks/squall/sdktest/internal/sdkerr"
 )
 
 func putImage(t *testing.T, s *ec2.Server, img ec2.Image) string {
@@ -234,7 +235,7 @@ func TestInstanceWaiters(t *testing.T) {
 	if err := s.ForgetInstance(region, id); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := describeInstances(t, c, in); code(err) != "InvalidInstanceID.NotFound" {
+	if _, err := describeInstances(t, c, in); sdkerr.AWSCode(err) != "InvalidInstanceID.NotFound" {
 		t.Fatalf("describing a forgotten instance = %v", err)
 	}
 }
@@ -248,7 +249,7 @@ func TestSettle(t *testing.T) {
 			t.Fatalf("state = %s, want pending until Settle", got.State.Name)
 		}
 	}
-	if _, err := c.StopInstances(t.Context(), &awsec2.StopInstancesInput{InstanceIds: []string{id}}); code(err) != "IncorrectInstanceState" {
+	if _, err := c.StopInstances(t.Context(), &awsec2.StopInstancesInput{InstanceIds: []string{id}}); sdkerr.AWSCode(err) != "IncorrectInstanceState" {
 		t.Fatalf("stopping a pending instance = %v", err)
 	}
 	if err := s.ForgetInstance(region, id); err == nil {
@@ -322,7 +323,7 @@ func TestInstanceStateErrors(t *testing.T) {
 		}, "InvalidParameterCombination"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := tc.call(); code(err) != tc.code {
+			if err := tc.call(); sdkerr.AWSCode(err) != tc.code {
 				t.Fatalf("= %v, want %s", err, tc.code)
 			}
 		})
@@ -345,7 +346,7 @@ func TestInstanceStateErrors(t *testing.T) {
 	for bad, want := range map[string]string{"t4g.micro": "InvalidParameterValue", "x9.huge": "InvalidInstanceAttributeValue"} {
 		if _, err := c.ModifyInstanceAttribute(t.Context(), &awsec2.ModifyInstanceAttributeInput{
 			InstanceId: aws.String(stopping), InstanceType: &types.AttributeValue{Value: aws.String(bad)},
-		}); code(err) != want {
+		}); sdkerr.AWSCode(err) != want {
 			t.Errorf("changing the type to %s = %v, want %s", bad, err, want)
 		}
 	}
@@ -399,7 +400,7 @@ func TestRunInstancesErrors(t *testing.T) {
 			}
 			in := runInput(image)
 			tc.change(in)
-			if _, err := c.RunInstances(t.Context(), in); code(err) != tc.code {
+			if _, err := c.RunInstances(t.Context(), in); sdkerr.AWSCode(err) != tc.code {
 				t.Fatalf("= %v, want %s", err, tc.code)
 			}
 			if got := s.Instances(); len(got) != 0 {
@@ -431,7 +432,7 @@ func TestRunInstancesClientToken(t *testing.T) {
 		t.Fatalf("client token = %q", aws.ToString(inst.ClientToken))
 	}
 	in.InstanceType = types.InstanceTypeT3Small
-	if _, err := c.RunInstances(t.Context(), in); code(err) != "IdempotentParameterMismatch" {
+	if _, err := c.RunInstances(t.Context(), in); sdkerr.AWSCode(err) != "IdempotentParameterMismatch" {
 		t.Fatalf("the token with other parameters = %v, want IdempotentParameterMismatch", err)
 	}
 	if got := len(s.Instances()); got != 1 {
@@ -449,7 +450,7 @@ func TestRunInstancesReplaysAcrossALostResponse(t *testing.T) {
 	c := newClient(t, s)
 	in := runInput(putImage(t, s, ec2.Image{}))
 	in.ClientToken = aws.String("launch-1")
-	if _, err := c.RunInstances(t.Context(), in); err == nil || code(err) != "" {
+	if _, err := c.RunInstances(t.Context(), in); err == nil || sdkerr.AWSCode(err) != "" {
 		t.Fatalf("the first run = %v, want a transport error", err)
 	}
 	out, err := c.RunInstances(t.Context(), in)
@@ -668,7 +669,7 @@ func TestAssociateAddressWithInstanceErrors(t *testing.T) {
 		{"no target", &awsec2.AssociateAddressInput{AllocationId: alloc}, "MissingParameter"},
 		{"two targets", &awsec2.AssociateAddressInput{AllocationId: alloc, InstanceId: aws.String(id), NetworkInterfaceId: aws.String("eni-1")}, "InvalidParameterCombination"},
 	} {
-		if _, err := c.AssociateAddress(t.Context(), tc.in); code(err) != tc.code {
+		if _, err := c.AssociateAddress(t.Context(), tc.in); sdkerr.AWSCode(err) != tc.code {
 			t.Errorf("%s = %v, want %s", tc.name, err, tc.code)
 		}
 	}
@@ -721,10 +722,10 @@ func TestImages(t *testing.T) {
 		len(img.BlockDeviceMappings) != 2 || aws.ToInt32(img.BlockDeviceMappings[0].Ebs.VolumeSize) != 20 || img.State != types.ImageStateAvailable {
 		t.Fatalf("image = %+v", img)
 	}
-	if _, err := describeImages(&awsec2.DescribeImagesInput{ImageIds: []string{mine, "ami-0000000000000dead"}}); code(err) != "InvalidAMIID.NotFound" {
+	if _, err := describeImages(&awsec2.DescribeImagesInput{ImageIds: []string{mine, "ami-0000000000000dead"}}); sdkerr.AWSCode(err) != "InvalidAMIID.NotFound" {
 		t.Fatalf("an unknown image = %v", err)
 	}
-	if _, err := describeImages(&awsec2.DescribeImagesInput{ImageIds: []string{"image-1"}}); code(err) != "InvalidAMIID.Malformed" {
+	if _, err := describeImages(&awsec2.DescribeImagesInput{ImageIds: []string{"image-1"}}); sdkerr.AWSCode(err) != "InvalidAMIID.Malformed" {
 		t.Fatalf("a malformed image ID = %v", err)
 	}
 
@@ -777,7 +778,7 @@ func TestInstanceTypes(t *testing.T) {
 	if err != nil || len(arm.InstanceTypes) != 2 {
 		t.Fatalf("arm types = %+v, %v", arm, err)
 	}
-	if _, err := c.DescribeInstanceTypes(t.Context(), &awsec2.DescribeInstanceTypesInput{InstanceTypes: []types.InstanceType{"x9.huge"}}); code(err) != "InvalidInstanceType" {
+	if _, err := c.DescribeInstanceTypes(t.Context(), &awsec2.DescribeInstanceTypesInput{InstanceTypes: []types.InstanceType{"x9.huge"}}); sdkerr.AWSCode(err) != "InvalidInstanceType" {
 		t.Fatalf("an unknown type = %v", err)
 	}
 	var all []types.InstanceType
@@ -878,7 +879,7 @@ func TestPlacementGroups(t *testing.T) {
 			return err
 		}, "InvalidPlacementGroup.InUse"},
 	} {
-		if err := tc.call(); code(err) != tc.code {
+		if err := tc.call(); sdkerr.AWSCode(err) != tc.code {
 			t.Errorf("%s = %v, want %s", tc.name, err, tc.code)
 		}
 	}
@@ -924,7 +925,7 @@ func TestVolumes(t *testing.T) {
 	if err != nil || aws.ToString(again.VolumeId) != vol {
 		t.Fatalf("repeating the token = %+v, %v", again, err)
 	}
-	if _, err := c.CreateVolume(t.Context(), &awsec2.CreateVolumeInput{AvailabilityZone: aws.String(region + "a"), Size: aws.Int32(5), ClientToken: aws.String("vol-1")}); code(err) != "IdempotentParameterMismatch" {
+	if _, err := c.CreateVolume(t.Context(), &awsec2.CreateVolumeInput{AvailabilityZone: aws.String(region + "a"), Size: aws.Int32(5), ClientToken: aws.String("vol-1")}); sdkerr.AWSCode(err) != "IdempotentParameterMismatch" {
 		t.Fatalf("the token with other parameters = %v", err)
 	}
 	waitFast := func(o *awsec2.VolumeAvailableWaiterOptions) {
@@ -934,7 +935,7 @@ func TestVolumes(t *testing.T) {
 		t.Fatalf("waiting for the volume: %v", err)
 	}
 	id := ids(run(t, c, runInput(putImage(t, s, ec2.Image{}))))[0]
-	if _, err := c.AttachVolume(t.Context(), &awsec2.AttachVolumeInput{Device: aws.String("/dev/sdf"), InstanceId: aws.String(id), VolumeId: aws.String(vol)}); code(err) != "IncorrectState" {
+	if _, err := c.AttachVolume(t.Context(), &awsec2.AttachVolumeInput{Device: aws.String("/dev/sdf"), InstanceId: aws.String(id), VolumeId: aws.String(vol)}); sdkerr.AWSCode(err) != "IncorrectState" {
 		t.Fatalf("attaching to a pending instance = %v", err)
 	}
 	s.Settle()
@@ -1000,7 +1001,7 @@ func TestVolumes(t *testing.T) {
 			return err
 		}, "MissingParameter"},
 	} {
-		if err := tc.call(); code(err) != tc.code {
+		if err := tc.call(); sdkerr.AWSCode(err) != tc.code {
 			t.Errorf("%s = %v, want %s", tc.name, err, tc.code)
 		}
 	}
@@ -1094,7 +1095,7 @@ func TestCreateAndDeleteTags(t *testing.T) {
 		{"snapshot-1", "InvalidID"},
 	} {
 		_, err := c.CreateTags(t.Context(), &awsec2.CreateTagsInput{Resources: []string{id, tc.resource}, Tags: []types.Tag{{Key: aws.String("x"), Value: aws.String("y")}}})
-		if code(err) != tc.code {
+		if sdkerr.AWSCode(err) != tc.code {
 			t.Errorf("tagging %s = %v, want %s", tc.resource, err, tc.code)
 		}
 	}
@@ -1114,7 +1115,7 @@ func TestInstanceFaults(t *testing.T) {
 		fault.Rule{Method: "ec2.TerminateInstances", Resource: region + "/" + target, Fault: fault.Unavailable()},
 		fault.Rule{Method: "ec2.DescribeInstances", Nth: 1, Fault: fault.Unavailable()},
 	)
-	if _, err := describeInstances(t, c, &awsec2.DescribeInstancesInput{}); code(err) != "Unavailable" {
+	if _, err := describeInstances(t, c, &awsec2.DescribeInstancesInput{}); sdkerr.AWSCode(err) != "Unavailable" {
 		t.Fatalf("the first describe = %v, want Unavailable", err)
 	}
 	if got, _ := s.LookupInstance(region, keep); got.State != "pending" {
@@ -1123,7 +1124,7 @@ func TestInstanceFaults(t *testing.T) {
 	if _, err := c.TerminateInstances(t.Context(), &awsec2.TerminateInstancesInput{InstanceIds: []string{keep}}); err != nil {
 		t.Fatalf("terminating another instance: %v", err)
 	}
-	if _, err := c.TerminateInstances(t.Context(), &awsec2.TerminateInstancesInput{InstanceIds: []string{target}}); code(err) != "Unavailable" {
+	if _, err := c.TerminateInstances(t.Context(), &awsec2.TerminateInstancesInput{InstanceIds: []string{target}}); sdkerr.AWSCode(err) != "Unavailable" {
 		t.Fatalf("terminating the targeted instance = %v, want Unavailable", err)
 	}
 }
@@ -1146,7 +1147,7 @@ func TestVolumeIopsAndThroughputAreCheckedNotAdjusted(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			in := tc.in
 			in.AvailabilityZone, in.Size = zone, aws.Int32(100)
-			if _, err := c.CreateVolume(t.Context(), &in); code(err) != tc.want {
+			if _, err := c.CreateVolume(t.Context(), &in); sdkerr.AWSCode(err) != tc.want {
 				t.Fatalf("CreateVolume = %v, want %s", err, tc.want)
 			}
 		})
@@ -1159,7 +1160,7 @@ func TestVolumeIopsAndThroughputAreCheckedNotAdjusted(t *testing.T) {
 	image := putImage(t, s, ec2.Image{})
 	in := runInput(image)
 	in.BlockDeviceMappings = []types.BlockDeviceMapping{{DeviceName: aws.String("/dev/xvda"), Ebs: &types.EbsBlockDevice{VolumeType: types.VolumeTypeGp2, Iops: aws.Int32(500)}}}
-	if _, err := c.RunInstances(t.Context(), in); code(err) != "InvalidParameterCombination" {
+	if _, err := c.RunInstances(t.Context(), in); sdkerr.AWSCode(err) != "InvalidParameterCombination" {
 		t.Fatalf("IOPS on a gp2 root = %v", err)
 	}
 	in.BlockDeviceMappings = []types.BlockDeviceMapping{{DeviceName: aws.String("/dev/xvda"), Ebs: &types.EbsBlockDevice{VolumeType: types.VolumeTypeGp2, VolumeSize: aws.Int32(400)}}}
