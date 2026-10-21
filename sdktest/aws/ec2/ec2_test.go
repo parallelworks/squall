@@ -17,10 +17,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	awsec2 "github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
-	"github.com/aws/smithy-go"
 
 	"github.com/parallelworks/squall/aws/ec2"
 	"github.com/parallelworks/squall/fault"
+	"github.com/parallelworks/squall/sdktest/internal/sdkerr"
 	"github.com/parallelworks/squall/sdktest/internal/sdkhttp"
 )
 
@@ -54,20 +54,6 @@ func clientAt(url, region string, opts ...func(*awsec2.Options)) *awsec2.Client 
 
 func withRetries(attempts int) func(*awsec2.Options) {
 	return func(o *awsec2.Options) { o.RetryMaxAttempts = attempts }
-}
-
-func code(err error) string {
-	if e, ok := errors.AsType[smithy.APIError](err); ok {
-		return e.ErrorCode()
-	}
-	return ""
-}
-
-func status(err error) int {
-	if e, ok := errors.AsType[*awshttp.ResponseError](err); ok {
-		return e.HTTPStatusCode()
-	}
-	return 0
 }
 
 func tagSpec(resource types.ResourceType, kv ...string) []types.TagSpecification {
@@ -173,7 +159,7 @@ func TestAllocateDescribeRelease(t *testing.T) {
 	if got := s.Addresses(); len(got) != 0 {
 		t.Fatalf("addresses after release = %v", got)
 	}
-	if _, err := describeAddresses(t, c, &awsec2.DescribeAddressesInput{AllocationIds: []string{id}}); code(err) != "InvalidAllocationID.NotFound" {
+	if _, err := describeAddresses(t, c, &awsec2.DescribeAddressesInput{AllocationIds: []string{id}}); sdkerr.AWSCode(err) != "InvalidAllocationID.NotFound" {
 		t.Fatalf("describe a released address = %v", err)
 	}
 }
@@ -249,7 +235,7 @@ func TestAddressErrors(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.call()
-			if code(err) != tc.code || status(err) != http.StatusBadRequest {
+			if sdkerr.AWSCode(err) != tc.code || sdkerr.AWSStatus(err) != http.StatusBadRequest {
 				t.Fatalf("err = %v, want %s with HTTP 400", err, tc.code)
 			}
 		})
@@ -264,7 +250,7 @@ func TestAddressLimit(t *testing.T) {
 	c := newClient(t, s)
 	allocate(t, c)
 	allocate(t, c)
-	if _, err := c.AllocateAddress(t.Context(), &awsec2.AllocateAddressInput{}); code(err) != "AddressLimitExceeded" {
+	if _, err := c.AllocateAddress(t.Context(), &awsec2.AllocateAddressInput{}); sdkerr.AWSCode(err) != "AddressLimitExceeded" {
 		t.Fatalf("a third allocation = %v, want AddressLimitExceeded", err)
 	}
 	other := clientAt(serve(t, s), "eu-west-1", withRetries(1))
@@ -415,7 +401,7 @@ func TestInterfaceErrors(t *testing.T) {
 		}, "InvalidParameterValue"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := tc.call(); code(err) != tc.code || status(err) != http.StatusBadRequest {
+			if err := tc.call(); sdkerr.AWSCode(err) != tc.code || sdkerr.AWSStatus(err) != http.StatusBadRequest {
 				t.Fatalf("err = %v, want %s with HTTP 400", err, tc.code)
 			}
 		})
@@ -530,7 +516,7 @@ func TestInterfaceFilters(t *testing.T) {
 			t.Errorf("filters %v = %v, %v; want %v", describe(tc.filters), names, err, tc.want)
 		}
 	}
-	if _, err := describeInterfaces(t, c, &awsec2.DescribeNetworkInterfacesInput{Filters: []types.Filter{filter("vpc-id", "vpc-1")}}); code(err) != "InvalidParameterValue" {
+	if _, err := describeInterfaces(t, c, &awsec2.DescribeNetworkInterfacesInput{Filters: []types.Filter{filter("vpc-id", "vpc-1")}}); sdkerr.AWSCode(err) != "InvalidParameterValue" {
 		t.Errorf("an unsupported filter = %v, want InvalidParameterValue", err)
 	}
 }
@@ -573,7 +559,7 @@ func TestClientToken(t *testing.T) {
 		t.Fatalf("repeating the token = %+v, %v; want the first interface", again, err)
 	}
 	in.Description = aws.String("different")
-	if _, err := c.CreateNetworkInterface(t.Context(), in); code(err) != "IdempotentParameterMismatch" {
+	if _, err := c.CreateNetworkInterface(t.Context(), in); sdkerr.AWSCode(err) != "IdempotentParameterMismatch" {
 		t.Fatalf("the token with other parameters = %v, want IdempotentParameterMismatch", err)
 	}
 	west := clientAt(serve(t, s), "us-west-2", withRetries(1))
@@ -591,7 +577,7 @@ func TestClientTokenReplaysAcrossALostResponse(t *testing.T) {
 	s := ec2.New(ec2.WithFaults(faults))
 	c := newClient(t, s)
 	in := &awsec2.CreateNetworkInterfaceInput{SubnetId: aws.String(subnet), ClientToken: aws.String("token-1")}
-	if _, err := c.CreateNetworkInterface(t.Context(), in); err == nil || code(err) != "" {
+	if _, err := c.CreateNetworkInterface(t.Context(), in); err == nil || sdkerr.AWSCode(err) != "" {
 		t.Fatalf("the first create = %v, want a transport error", err)
 	}
 	out, err := c.CreateNetworkInterface(t.Context(), in)
@@ -651,9 +637,9 @@ func TestFaults(t *testing.T) {
 			switch {
 			case tc.code == "" && err != nil:
 				t.Fatalf("allocate = %v, want success", err)
-			case tc.code == "-" && (err == nil || code(err) != ""):
+			case tc.code == "-" && (err == nil || sdkerr.AWSCode(err) != ""):
 				t.Fatalf("allocate = %v, want a transport error", err)
-			case tc.code != "" && tc.code != "-" && (code(err) != tc.code || status(err) != tc.status):
+			case tc.code != "" && tc.code != "-" && (sdkerr.AWSCode(err) != tc.code || sdkerr.AWSStatus(err) != tc.status):
 				t.Fatalf("allocate = %v, want %s with HTTP %d", err, tc.code, tc.status)
 			}
 			if got := len(s.Addresses()); (got == 1) != tc.stored {
@@ -679,7 +665,7 @@ func TestAFaultRuleCanTargetOneResource(t *testing.T) {
 	if _, err := c.ReleaseAddress(t.Context(), &awsec2.ReleaseAddressInput{AllocationId: aws.String(keep)}); err != nil {
 		t.Fatalf("releasing another address: %v", err)
 	}
-	if _, err := c.ReleaseAddress(t.Context(), &awsec2.ReleaseAddressInput{AllocationId: aws.String(target)}); code(err) != "Unavailable" {
+	if _, err := c.ReleaseAddress(t.Context(), &awsec2.ReleaseAddressInput{AllocationId: aws.String(target)}); sdkerr.AWSCode(err) != "Unavailable" {
 		t.Fatalf("releasing the targeted address = %v, want Unavailable", err)
 	}
 }
@@ -688,7 +674,7 @@ func TestDryRun(t *testing.T) {
 	s := ec2.New()
 	c := newClient(t, s)
 	_, err := c.AllocateAddress(t.Context(), &awsec2.AllocateAddressInput{DryRun: aws.Bool(true)})
-	if code(err) != "DryRunOperation" || status(err) != http.StatusPreconditionFailed {
+	if sdkerr.AWSCode(err) != "DryRunOperation" || sdkerr.AWSStatus(err) != http.StatusPreconditionFailed {
 		t.Fatalf("a dry run = %v, want DryRunOperation with HTTP 412", err)
 	}
 	if got := s.Addresses(); len(got) != 0 {
@@ -701,7 +687,7 @@ func TestRegionsAreSeparate(t *testing.T) {
 	url := serve(t, s)
 	east, west := clientAt(url, "us-east-1", withRetries(1)), clientAt(url, "us-west-2", withRetries(1))
 	id := aws.ToString(allocate(t, east).AllocationId)
-	if _, err := describeAddresses(t, west, &awsec2.DescribeAddressesInput{AllocationIds: []string{id}}); code(err) != "InvalidAllocationID.NotFound" {
+	if _, err := describeAddresses(t, west, &awsec2.DescribeAddressesInput{AllocationIds: []string{id}}); sdkerr.AWSCode(err) != "InvalidAllocationID.NotFound" {
 		t.Fatalf("describing it from another region = %v", err)
 	}
 	westIP := aws.ToString(allocate(t, west).PublicIp)
@@ -757,7 +743,7 @@ func TestPutHelpersSetUpState(t *testing.T) {
 	if err != nil || aws.ToString(got[0].InstanceId) != "i-1" || aws.ToString(got[0].AssociationId) != a.AssociationID {
 		t.Fatalf("describe = %+v, %v", got, err)
 	}
-	if _, err := c.DeleteNetworkInterface(t.Context(), &awsec2.DeleteNetworkInterfaceInput{NetworkInterfaceId: aws.String(ni.NetworkInterfaceID)}); code(err) != "InvalidNetworkInterface.InUse" {
+	if _, err := c.DeleteNetworkInterface(t.Context(), &awsec2.DeleteNetworkInterfaceInput{NetworkInterfaceId: aws.String(ni.NetworkInterfaceID)}); sdkerr.AWSCode(err) != "InvalidNetworkInterface.InUse" {
 		t.Fatalf("deleting an interface put in use = %v", err)
 	}
 	for _, bad := range []ec2.Address{

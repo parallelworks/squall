@@ -12,12 +12,12 @@ import (
 
 	gcompute "cloud.google.com/go/compute/apiv1"
 	"cloud.google.com/go/compute/apiv1/computepb"
-	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 
 	"github.com/parallelworks/squall/fault"
 	"github.com/parallelworks/squall/gcp/compute"
+	"github.com/parallelworks/squall/sdktest/internal/sdkerr"
 )
 
 const (
@@ -49,19 +49,6 @@ func insert(t *testing.T, c *gcompute.AddressesClient, a *computepb.Address) err
 func get(t *testing.T, c *gcompute.AddressesClient, name string) (*computepb.Address, error) {
 	t.Helper()
 	return c.Get(t.Context(), &computepb.GetAddressRequest{Project: project, Region: region, Address: name})
-}
-
-func apiCode(err error) int {
-	if e, ok := errors.AsType[*googleapi.Error](err); ok {
-		return e.Code
-	}
-	if e, ok := errors.AsType[interface {
-		error
-		HTTPCode() int
-	}](err); ok {
-		return e.HTTPCode()
-	}
-	return 0
 }
 
 func TestInsertThenGet(t *testing.T) {
@@ -107,7 +94,7 @@ func TestInsertErrors(t *testing.T) {
 		{"a label value too long", &computepb.Address{Name: new("ip-6"), Labels: map[string]string{"owner": strings.Repeat("a", 64)}}, http.StatusBadRequest},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := insert(t, c, tc.address); apiCode(err) != tc.code {
+			if err := insert(t, c, tc.address); sdkerr.GoogleCode(err) != tc.code {
 				t.Fatalf("insert = %v, want HTTP %d", err, tc.code)
 			}
 		})
@@ -119,11 +106,11 @@ func TestInsertErrors(t *testing.T) {
 
 func TestGetOrDeleteAMissingAddressIsNotFound(t *testing.T) {
 	c := newClient(t, compute.New())
-	if _, err := get(t, c, "missing"); apiCode(err) != http.StatusNotFound {
+	if _, err := get(t, c, "missing"); sdkerr.GoogleCode(err) != http.StatusNotFound {
 		t.Fatalf("get = %v", err)
 	}
 	_, err := c.Delete(t.Context(), &computepb.DeleteAddressRequest{Project: project, Region: region, Address: "missing"})
-	if apiCode(err) != http.StatusNotFound {
+	if sdkerr.GoogleCode(err) != http.StatusNotFound {
 		t.Fatalf("delete = %v", err)
 	}
 }
@@ -174,7 +161,7 @@ func TestSetLabelsChecksTheFingerprint(t *testing.T) {
 	if after.GetLabels()["session-id"] != "x" || after.GetLabelFingerprint() == before.GetLabelFingerprint() {
 		t.Fatalf("after setLabels = %v", after)
 	}
-	if err := setLabels(before.GetLabelFingerprint()); apiCode(err) != http.StatusPreconditionFailed {
+	if err := setLabels(before.GetLabelFingerprint()); sdkerr.GoogleCode(err) != http.StatusPreconditionFailed {
 		t.Fatalf("setLabels with a stale fingerprint = %v", err)
 	}
 
@@ -183,7 +170,7 @@ func TestSetLabelsChecksTheFingerprint(t *testing.T) {
 	if _, err := s.PutAddress(project, region, current); err != nil {
 		t.Fatal(err)
 	}
-	if err := setLabels(after.GetLabelFingerprint()); apiCode(err) != http.StatusPreconditionFailed {
+	if err := setLabels(after.GetLabelFingerprint()); sdkerr.GoogleCode(err) != http.StatusPreconditionFailed {
 		t.Fatalf("setLabels after PutAddress changed the labels = %v", err)
 	}
 }
@@ -233,14 +220,14 @@ func TestListFiltersAndPages(t *testing.T) {
 			t.Errorf("list %q = %v, %v; want %s", tc.filter, names, err, tc.want)
 		}
 	}
-	if _, err := list("creationTimestamp > 0", 0); apiCode(err) != http.StatusBadRequest {
+	if _, err := list("creationTimestamp > 0", 0); sdkerr.GoogleCode(err) != http.StatusBadRequest {
 		t.Errorf("an unsupported filter = %v, want HTTP 400", err)
 	}
-	if _, err := list("", 501); apiCode(err) != http.StatusBadRequest {
+	if _, err := list("", 501); sdkerr.GoogleCode(err) != http.StatusBadRequest {
 		t.Errorf("maxResults over 500 = %v, want HTTP 400", err)
 	}
 	it := c.List(t.Context(), &computepb.ListAddressesRequest{Project: project, Region: region, OrderBy: new("creationTimestamp desc")})
-	if _, err := it.Next(); apiCode(err) != http.StatusBadRequest {
+	if _, err := it.Next(); sdkerr.GoogleCode(err) != http.StatusBadRequest {
 		t.Errorf("an unsupported orderBy = %v, want HTTP 400", err)
 	}
 }
@@ -256,7 +243,7 @@ func TestPutAddressSetsUpState(t *testing.T) {
 	if err != nil || got.GetLabels()["session-id"] != "someone-else" || got.GetAddress() != held.Address {
 		t.Fatalf("get = %v, %v", got, err)
 	}
-	if err := insert(t, c, &computepb.Address{Name: new("held")}); apiCode(err) != http.StatusConflict {
+	if err := insert(t, c, &computepb.Address{Name: new("held")}); sdkerr.GoogleCode(err) != http.StatusConflict {
 		t.Fatalf("insert over it = %v", err)
 	}
 	for _, bad := range []compute.Address{
@@ -308,9 +295,9 @@ func TestFaults(t *testing.T) {
 			switch {
 			case tc.code == 0 && err != nil:
 				t.Fatalf("insert = %v, want success", err)
-			case tc.code == -1 && (err == nil || apiCode(err) != 0):
+			case tc.code == -1 && (err == nil || sdkerr.GoogleCode(err) != 0):
 				t.Fatalf("insert = %v, want a transport error", err)
-			case tc.code > 0 && apiCode(err) != tc.code:
+			case tc.code > 0 && sdkerr.GoogleCode(err) != tc.code:
 				t.Fatalf("insert = %v, want HTTP %d", err, tc.code)
 			}
 			if _, ok := s.LookupAddress(project, region, "ip-1"); ok != tc.stored {
@@ -349,7 +336,7 @@ func TestLostResponseReachesTheCaller(t *testing.T) {
 			if _, err := get(t, c, "ip-1"); err != nil {
 				t.Fatal(err)
 			}
-			if err := tc.call(t, c); err == nil || apiCode(err) != 0 {
+			if err := tc.call(t, c); err == nil || sdkerr.GoogleCode(err) != 0 {
 				t.Fatalf("call = %v, want a transport error", err)
 			}
 		})
@@ -360,7 +347,7 @@ func TestOperationFailedOnAReadFailsTheRead(t *testing.T) {
 	faults := fault.New().Add(fault.Rule{Method: "compute.regionOperations.get", Nth: 1, Fault: fault.FailOperation(http.StatusForbidden)})
 	s := compute.New(compute.WithFaults(faults))
 	c := newClient(t, s)
-	if err := insert(t, c, &computepb.Address{Name: new("ip-1")}); apiCode(err) != http.StatusForbidden {
+	if err := insert(t, c, &computepb.Address{Name: new("ip-1")}); sdkerr.GoogleCode(err) != http.StatusForbidden {
 		t.Fatalf("insert = %v, want the operation poll to fail with HTTP 403", err)
 	}
 	if _, ok := s.LookupAddress(project, region, "ip-1"); !ok {
@@ -398,7 +385,7 @@ func TestRequestIDReplaysTheFirstOperation(t *testing.T) {
 		t.Fatalf("addresses = %v, want none", got)
 	}
 	ins.RequestId = new("not-a-uuid")
-	if _, err := c.Insert(t.Context(), ins); apiCode(err) != http.StatusBadRequest {
+	if _, err := c.Insert(t.Context(), ins); sdkerr.GoogleCode(err) != http.StatusBadRequest {
 		t.Fatalf("an insert with an invalid request ID = %v, want HTTP 400", err)
 	}
 }
@@ -414,7 +401,7 @@ func reserve(t *testing.T, c *gcompute.AddressesClient, name, owner string) erro
 			return nil
 		}
 		last = err
-		if apiCode(err) == http.StatusConflict {
+		if sdkerr.GoogleCode(err) == http.StatusConflict {
 			got, err := get(t, c, name)
 			if err != nil {
 				last = err

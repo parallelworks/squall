@@ -9,6 +9,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 
 	"github.com/parallelworks/squall/aws/ec2"
+	"github.com/parallelworks/squall/sdktest/internal/sdkerr"
 )
 
 func withLaunchOptions(in *awsec2.RunInstancesInput) {
@@ -132,7 +133,7 @@ func TestCPUOptionsFollowTheInstanceType(t *testing.T) {
 			t.Fatalf("m7a.large CPU options = %+v, want 2 cores, 1 thread", o)
 		}
 	}
-	if _, err := launch(&types.CpuOptionsRequest{CoreCount: aws.Int32(1), ThreadsPerCore: aws.Int32(2)}); code(err) != "InvalidParameterValue" {
+	if _, err := launch(&types.CpuOptionsRequest{CoreCount: aws.Int32(1), ThreadsPerCore: aws.Int32(2)}); sdkerr.AWSCode(err) != "InvalidParameterValue" {
 		t.Fatalf("2 threads per core on m7a.large = %v, want InvalidParameterValue", err)
 	}
 }
@@ -190,7 +191,7 @@ func TestRunInstancesLaunchOptionErrors(t *testing.T) {
 			in := runInput(image)
 			withLaunchOptions(in)
 			tc.change(in)
-			if _, err := c.RunInstances(t.Context(), in); code(err) != tc.code {
+			if _, err := c.RunInstances(t.Context(), in); sdkerr.AWSCode(err) != tc.code {
 				t.Fatalf("= %v, want %s", err, tc.code)
 			}
 			if got := s.Instances(); len(got) != 0 {
@@ -221,7 +222,7 @@ func TestRunInstancesLaunchOptionsAreIdempotent(t *testing.T) {
 				t.Fatalf("the same launch again = %v, want %v", ids(again), ids(first))
 			}
 			tc.change(in)
-			if _, err := c.RunInstances(t.Context(), in); code(err) != "IdempotentParameterMismatch" {
+			if _, err := c.RunInstances(t.Context(), in); sdkerr.AWSCode(err) != "IdempotentParameterMismatch" {
 				t.Fatalf("the token with other %s = %v, want IdempotentParameterMismatch", tc.name, err)
 			}
 			if got := len(s.Instances()); got != 1 {
@@ -273,7 +274,7 @@ func TestLaunchOptionEdges(t *testing.T) {
 		_, err := c.RunInstances(t.Context(), in)
 		return err
 	}
-	if err := attach("efa"); code(err) != "InvalidParameterCombination" {
+	if err := attach("efa"); sdkerr.AWSCode(err) != "InvalidParameterCombination" {
 		t.Fatalf("efa on a plain interface = %v", err)
 	}
 	if err := attach("interface"); err != nil {
@@ -283,7 +284,7 @@ func TestLaunchOptionEdges(t *testing.T) {
 	in = runInput(image)
 	in.SubnetId = nil
 	in.NetworkInterfaces = []types.InstanceNetworkInterfaceSpecification{{DeviceIndex: aws.Int32(0), SubnetId: aws.String(subnet), InterfaceType: aws.String("efa-only")}}
-	if _, err := c.RunInstances(t.Context(), in); code(err) != "InvalidParameterValue" || !strings.Contains(err.Error(), "primary network interface") {
+	if _, err := c.RunInstances(t.Context(), in); sdkerr.AWSCode(err) != "InvalidParameterValue" || !strings.Contains(err.Error(), "primary network interface") {
 		t.Fatalf("efa-only primary interface = %v", err)
 	}
 }
