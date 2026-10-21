@@ -75,6 +75,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -132,7 +133,25 @@ func New(opts ...Option) *Server {
 
 // ServeHTTP answers a Cloud Storage JSON API call.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// ServeMux would redirect a path that is not clean, which the API never does.
+	if p := r.URL.EscapedPath(); p != cleanPath(p) {
+		notImplemented(w, r)
+		return
+	}
 	s.mux.ServeHTTP(w, r)
+}
+
+// cleanPath is p as ServeMux cleans it, keeping a trailing slash.
+func cleanPath(p string) string {
+	clean := path.Clean("/" + p)
+	if strings.HasSuffix(p, "/") && clean != "/" {
+		clean += "/"
+	}
+	return clean
+}
+
+func notImplemented(w http.ResponseWriter, r *http.Request) {
+	writeError(w, &apiError{Status: http.StatusNotFound, Reason: "notFound", Message: "squall: " + r.Method + " " + r.URL.Path + " is not implemented"})
 }
 
 // commonParams are the query parameters every method takes.
@@ -158,9 +177,9 @@ func (s *Server) registerRoutes() {
 		"generation", "ifGenerationMatch", "ifGenerationNotMatch")
 	s.route("POST /upload"+bucket+"/o", "storage.objects.insert", s.insertObject, uploadTarget,
 		"uploadType", "name", "projection", "predefinedAcl", "ifGenerationMatch", "ifGenerationNotMatch", "contentEncoding")
-	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, &apiError{Status: http.StatusNotFound, Reason: "notFound", Message: "squall: " + r.Method + " " + r.URL.Path + " is not implemented"})
-	})
+	// Without this, ServeMux would redirect an object path with no name to the one with an empty name.
+	s.mux.HandleFunc("DELETE "+bucket+"/o", notImplemented)
+	s.mux.HandleFunc("/", notImplemented)
 }
 
 // handler answers one method with a body to encode, or nil for an empty 204.
@@ -206,7 +225,7 @@ func insertTarget(r *http.Request) string {
 	var named struct {
 		Name string `json:"name"`
 	}
-	if json.Unmarshal(peekBody(r), &named) != nil || named.Name == "" {
+	if json.Unmarshal(peekBody(r, maxBody), &named) != nil || named.Name == "" {
 		return "b"
 	}
 	return "b/" + named.Name
@@ -229,7 +248,7 @@ func uploadTarget(r *http.Request) string {
 	if r.URL.Query().Get("uploadType") != "multipart" {
 		return prefix
 	}
-	meta, _, err := splitMultipart(r.Header.Get("Content-Type"), peekBody(r))
+	meta, _, err := splitMultipart(r.Header.Get("Content-Type"), peekBody(r, maxObject+maxBody))
 	var named struct {
 		Name string `json:"name"`
 	}
@@ -239,9 +258,9 @@ func uploadTarget(r *http.Request) string {
 	return prefix + "/" + named.Name
 }
 
-// peekBody reads up to an upload's worth of r's body and puts it back, to name a call's resource before it is handled.
-func peekBody(r *http.Request) []byte {
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxObject+maxBody))
+// peekBody reads up to limit bytes of r's body and puts them back, to name a call's resource before it is handled.
+func peekBody(r *http.Request, limit int64) []byte {
+	body, err := io.ReadAll(io.LimitReader(r.Body, limit))
 	r.Body = struct {
 		io.Reader
 		io.Closer
@@ -325,6 +344,9 @@ func unmarshalStrict(data []byte, v any) *apiError {
 			return invalid("Invalid JSON payload received: %v", err)
 		}
 		return invalid("Invalid value in the request body: %v", err)
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return invalid("Invalid JSON payload received: data after the top-level value")
 	}
 	return nil
 }

@@ -198,6 +198,21 @@ func (s *Server) lookup(name, permission string) (*bucket, *apiError) {
 	return nil, notFoundBucket()
 }
 
+// normalCORS returns cors as stored, nil for none, or an error unless it is an array of objects.
+func normalCORS(cors json.RawMessage) (json.RawMessage, *apiError) {
+	var rules []map[string]json.RawMessage
+	if len(cors) == 0 {
+		return nil, nil
+	}
+	if err := json.Unmarshal(cors, &rules); err != nil || slices.ContainsFunc(rules, func(r map[string]json.RawMessage) bool { return r == nil }) {
+		return nil, invalid("Invalid argument: cors must be a list of CORS configurations.")
+	}
+	if len(rules) == 0 {
+		return nil, nil
+	}
+	return slices.Clone(cors), nil
+}
+
 // bucketInput is what buckets.insert and buckets.patch take.
 type bucketInput struct {
 	Name                  string                 `json:"name"`
@@ -290,6 +305,11 @@ func (s *Server) store(b Bucket) (*bucket, *apiError) {
 	if !slices.Contains(storageClasses, b.StorageClass) {
 		return nil, invalid("Invalid argument: storage class '%s' is not valid.", b.StorageClass)
 	}
+	cors, err := normalCORS(b.CORS)
+	if err != nil {
+		return nil, err
+	}
+	b.CORS = cors
 	if c := b.CustomPlacementConfig; c != nil && len(c.DataLocations) != 2 {
 		return nil, invalid("Invalid argument: a custom dual-region takes exactly two data locations.")
 	}
@@ -351,6 +371,10 @@ func (s *Server) patchBucket(r *http.Request) (any, *apiError) {
 	if in.Name != "" || in.Location != "" || in.CustomPlacementConfig != nil || in.RPO != "" {
 		return nil, invalid("squall: a patch may change only labels, versioning, cors, storageClass and encryption")
 	}
+	cors, err := normalCORS(in.CORS)
+	if err != nil {
+		return nil, err
+	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(body, &fields); err != nil {
 		return nil, invalid("Invalid JSON payload received: %v", err)
@@ -396,10 +420,7 @@ func (s *Server) patchBucket(r *http.Request) (any, *apiError) {
 		b.Versioning = nil
 	}
 	if in.CORS != nil {
-		b.CORS = slices.Clone(in.CORS)
-		if string(in.CORS) == "null" || string(in.CORS) == "[]" {
-			b.CORS = nil
-		}
+		b.CORS = cors
 	}
 	if in.Encryption != nil {
 		b.Encryption = new(*in.Encryption)

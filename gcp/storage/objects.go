@@ -91,7 +91,8 @@ func noSuchObject(bucket, name string) *apiError {
 }
 
 func validObjectName(name string) bool {
-	return len(name) <= 1024 && utf8.ValidString(name) && !strings.ContainsAny(name, "\r\n") && name != "." && name != ".."
+	return len(name) <= 1024 && utf8.ValidString(name) && !strings.ContainsAny(name, "\r\n") && name != "." && name != ".." &&
+		!strings.HasPrefix(name, ".well-known/acme-challenge/")
 }
 
 // objectInput is the metadata an upload takes.
