@@ -27,10 +27,10 @@
 //     the bucket's region in the x-amz-bucket-region header, which the SDK
 //     does not follow.
 //   - [Server.PutForeignBucket] holds a name for another account: creating
-//     it fails with BucketAlreadyExists, HeadBucket with 403, and every other
-//     call on it with AccessDenied. ListBuckets lists only the account's own.
-//     Other access denials are a fault rule away, such as
-//     fault.Reject(403, "AccessDenied").
+//     it fails with BucketAlreadyExists, HeadBucket with 403 and the bucket's
+//     region, and every other call on it with AccessDenied. ListBuckets
+//     lists only the account's own. Other access denials are a fault rule
+//     away, such as fault.Reject(403, "AccessDenied").
 //   - CreateBucket takes a LocationConstraint that must name the request's
 //     region, and none for us-east-1, where naming us-east-1 fails with
 //     InvalidLocationConstraint. Any other mismatch fails with
@@ -40,15 +40,20 @@
 //     owner enforced: an ACL other than private fails, and object lock and
 //     directory buckets are not supported.
 //   - ListBuckets returns the account's buckets ordered by name, in every
-//     region, and filters by prefix and bucket-region. It reports each
-//     bucket's region only when max-buckets is set, and pages only then.
+//     region, and filters by prefix and bucket-region, which must be the
+//     request's region. As in S3, a request with any of its parameters pages,
+//     10,000 buckets at a time unless max-buckets says otherwise, and reports
+//     each bucket's region; one with none returns every bucket without regions.
 //   - Objects record their size and ETag, the hex MD5 of their data, not the
-//     data itself. Checksums and Content-MD5 are not verified, and bodies
-//     sent with aws-chunked encoding are decoded without checking their
-//     chunk signatures. Version IDs are 32 hex digits, and "null" for an
-//     object written while versioning is off or suspended. Multipart uploads,
-//     copies, storage classes, object tags, lifecycle and replication are not
-//     supported, and an incomplete multipart upload never blocks DeleteBucket.
+//     data itself, and keys are up to 1024 bytes. Objects are up to 16 MiB
+//     and other bodies up to 1 MiB. Checksums and Content-MD5 are not
+//     verified, and bodies sent with aws-chunked encoding are decoded without
+//     checking their chunk signatures. Version IDs are 32 hex digits, and
+//     "null" for an object written while versioning is off or suspended.
+//     Multipart uploads, copies, storage classes, object tags, lifecycle and
+//     replication are not supported. S3 documents in-progress multipart
+//     uploads as blocking DeleteBucket only for directory buckets, so for a
+//     general purpose bucket only versions and delete markers do.
 //   - DeleteBucket fails with BucketNotEmpty while any object version or
 //     delete marker remains. ListObjectVersions orders versions by key and
 //     then newest first, and its markers are positions, so a page may follow
@@ -83,11 +88,13 @@ package s3
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -188,7 +195,7 @@ var subresources = []string{
 // operations maps a method, scope and subresource to its operation; an empty one is not implemented.
 func (s *Server) operations() map[string]operation {
 	return map[string]operation{
-		"GET service":            {"ListBuckets", []string{"max-buckets", "continuation-token", "prefix", "bucket-region"}, s.listBuckets},
+		"GET service":            {"ListBuckets", listBucketsParams, s.listBuckets},
 		"PUT bucket":             {"CreateBucket", nil, s.createBucket},
 		"HEAD bucket":            {"HeadBucket", nil, s.headBucket},
 		"DELETE bucket":          {"DeleteBucket", nil, s.deleteBucket},
@@ -292,11 +299,11 @@ func (s *Server) parse(w http.ResponseWriter, r *http.Request) (operation, *call
 			return operation{}, nil, invalidArgument("squall: the %s header is not supported", h)
 		}
 	}
-	limit := int64(maxBody)
+	limit, tooLarge := int64(maxBody), "MaxMessageLengthExceeded"
 	if op.name == "PutObject" {
-		limit = maxObject
+		limit, tooLarge = maxObject, "EntityTooLarge"
 	}
-	c.body, err = readBody(w, r, limit)
+	c.body, err = readBody(w, r, limit, tooLarge)
 	if err != nil {
 		return operation{}, nil, err
 	}
@@ -330,9 +337,13 @@ func regionOf(r *http.Request) (string, *apiError) {
 	return scope[2], nil
 }
 
-// readBody reads r's body, decoding aws-chunked encoding, up to limit bytes.
-func readBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, *apiError) {
+// readBody reads r's body, decoding aws-chunked encoding, up to limit bytes; tooLarge is the code for a longer one.
+func readBody(w http.ResponseWriter, r *http.Request, limit int64, tooLarge string) ([]byte, *apiError) {
+	tooLong := &apiError{Status: http.StatusBadRequest, Code: tooLarge, Message: fmt.Sprintf("squall: bodies are limited to %d bytes", limit)}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit+limit/8+4096))
+	if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+		return nil, tooLong
+	}
 	if err != nil {
 		return nil, &apiError{Status: http.StatusBadRequest, Code: "IncompleteBody", Message: "The request body could not be read: " + err.Error()}
 	}
@@ -344,7 +355,7 @@ func readBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, *api
 		}
 	}
 	if int64(len(body)) > limit {
-		return nil, &apiError{Status: http.StatusBadRequest, Code: "EntityTooLarge", Message: fmt.Sprintf("squall: bodies are limited to %d bytes", limit)}
+		return nil, tooLong
 	}
 	return body, nil
 }
@@ -358,14 +369,14 @@ func decodeChunked(b []byte) ([]byte, error) {
 			return nil, io.ErrUnexpectedEOF
 		}
 		sizeHex, _, _ := bytes.Cut(line, []byte(";"))
-		var size int
-		if _, err := fmt.Sscanf(string(sizeHex), "%x", &size); err != nil || size < 0 {
+		size, err := strconv.ParseUint(string(sizeHex), 16, 32)
+		if err != nil {
 			return nil, fmt.Errorf("bad chunk size %q", sizeHex)
 		}
 		if size == 0 {
 			return out, nil
 		}
-		if len(rest) < size+2 || string(rest[size:size+2]) != "\r\n" {
+		if uint64(len(rest)) < size+2 || string(rest[size:size+2]) != "\r\n" {
 			return nil, io.ErrUnexpectedEOF
 		}
 		out = append(out, rest[:size]...)

@@ -15,10 +15,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
-	"github.com/aws/smithy-go"
 
 	"github.com/parallelworks/squall/aws/s3"
 	"github.com/parallelworks/squall/fault"
+	"github.com/parallelworks/squall/sdktest/internal/sdkerr"
 	"github.com/parallelworks/squall/sdktest/internal/sdkhttp"
 )
 
@@ -37,7 +37,7 @@ func clientAt(url, region string, opts ...func(*awss3.Options)) *awss3.Client {
 		Credentials:      credentials.NewStaticCredentialsProvider("AKID", "SECRET", ""),
 		HTTPClient:       sdkhttp.CopyBodies(awshttp.NewBuildableClient()),
 		RetryMaxAttempts: 1,
-		// The default config.LoadDefaultConfig gives, which s3.New alone does not.
+		// config.LoadDefaultConfig sets this, and s3.New alone does not.
 		RequestChecksumCalculation: aws.RequestChecksumCalculationWhenSupported,
 	}, opts...)
 }
@@ -45,20 +45,6 @@ func clientAt(url, region string, opts ...func(*awss3.Options)) *awss3.Client {
 func newClient(t *testing.T, s *s3.Server, region string) *awss3.Client {
 	t.Helper()
 	return clientAt(serve(t, s), region)
-}
-
-func code(err error) string {
-	if e, ok := errors.AsType[smithy.APIError](err); ok {
-		return e.ErrorCode()
-	}
-	return ""
-}
-
-func status(err error) int {
-	if e, ok := errors.AsType[*awshttp.ResponseError](err); ok {
-		return e.HTTPStatusCode()
-	}
-	return 0
 }
 
 func create(t *testing.T, c *awss3.Client, name string) {
@@ -107,13 +93,13 @@ func TestCreateTagAndRead(t *testing.T) {
 	if len(got) != 2 || got["Owner"] != "abc" || got["Name"] != "data" {
 		t.Fatalf("tags = %v", got)
 	}
-	if _, err := east.GetBucketTagging(t.Context(), &awss3.GetBucketTaggingInput{Bucket: aws.String("east-bucket")}); code(err) != "NoSuchTagSet" || status(err) != http.StatusNotFound {
+	if _, err := east.GetBucketTagging(t.Context(), &awss3.GetBucketTaggingInput{Bucket: aws.String("east-bucket")}); sdkerr.AWSCode(err) != "NoSuchTagSet" || sdkerr.AWSStatus(err) != http.StatusNotFound {
 		t.Fatalf("untagged get = %v", err)
 	}
 	if err := tag(t, west, "west-bucket"); err != nil {
 		t.Fatalf("empty tag set: %v", err)
 	}
-	if _, err := west.GetBucketTagging(t.Context(), &awss3.GetBucketTaggingInput{Bucket: aws.String("west-bucket")}); code(err) != "NoSuchTagSet" {
+	if _, err := west.GetBucketTagging(t.Context(), &awss3.GetBucketTaggingInput{Bucket: aws.String("west-bucket")}); sdkerr.AWSCode(err) != "NoSuchTagSet" {
 		t.Fatalf("get after an empty tag set = %v", err)
 	}
 	if b, ok := s.LookupBucket("west-bucket"); !ok || b.Region != "us-west-2" || b.Tags != nil || b.CreationDate.IsZero() {
@@ -156,7 +142,7 @@ func TestCreateBucketErrors(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := tc.client.CreateBucket(t.Context(), tc.in)
-			if status(err) != tc.status || code(err) != tc.code {
+			if sdkerr.AWSStatus(err) != tc.status || sdkerr.AWSCode(err) != tc.code {
 				t.Fatalf("create = %v, want %d %s", err, tc.status, tc.code)
 			}
 		})
@@ -191,7 +177,7 @@ func TestBucketsElsewhereAndOtherAccounts(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := tc.client.HeadBucket(t.Context(), &awss3.HeadBucketInput{Bucket: aws.String(tc.bucket)})
-			if code(err) != tc.head {
+			if sdkerr.AWSCode(err) != tc.head {
 				t.Fatalf("head = %v, want %s", err, tc.head)
 			}
 			bucket := aws.String(tc.bucket)
@@ -209,13 +195,18 @@ func TestBucketsElsewhereAndOtherAccounts(t *testing.T) {
 					return err
 				},
 			} {
-				if err := call(); code(err) != tc.other {
+				if err := call(); sdkerr.AWSCode(err) != tc.other {
 					t.Errorf("%s = %v, want %s", name, err, tc.other)
 				}
 			}
 		})
 	}
-	_, err := west.GetBucketTagging(t.Context(), &awss3.GetBucketTaggingInput{Bucket: aws.String("mine")})
+	_, err := west.HeadBucket(t.Context(), &awss3.HeadBucketInput{Bucket: aws.String("theirs")})
+	if re, ok := errors.AsType[*awshttp.ResponseError](err); !ok || re.HTTPStatusCode() != http.StatusForbidden ||
+		re.Response.Header.Get("x-amz-bucket-region") != "us-west-2" {
+		t.Fatalf("denied head = %v", err)
+	}
+	_, err = west.GetBucketTagging(t.Context(), &awss3.GetBucketTaggingInput{Bucket: aws.String("mine")})
 	if re, ok := errors.AsType[*awshttp.ResponseError](err); !ok || re.HTTPStatusCode() != http.StatusMovedPermanently ||
 		re.Response.Header.Get("x-amz-bucket-region") != "us-east-1" {
 		t.Fatalf("redirect = %v", err)
@@ -265,10 +256,20 @@ func TestListBuckets(t *testing.T) {
 		!slices.Equal(regions, []string{"us-east-1", "us-east-1", "us-west-2", "us-east-1"}) {
 		t.Fatalf("paged = %v %v in %d pages", got, regions, pages)
 	}
-	if got, _, _ := names(&awss3.ListBucketsInput{Prefix: aws.String("app-"), BucketRegion: aws.String("us-east-1")}); !slices.Equal(got, []string{"app-a", "app-b"}) {
+	if got, regions, _ := names(&awss3.ListBucketsInput{Prefix: aws.String("app-")}); !slices.Equal(got, []string{"app-a", "app-b", "app-west"}) ||
+		!slices.Equal(regions, []string{"us-east-1", "us-east-1", "us-west-2"}) {
+		t.Fatalf("prefixed = %v %v", got, regions)
+	}
+	if got, _, _ := names(&awss3.ListBucketsInput{Prefix: aws.String("app-"), BucketRegion: aws.String("us-west-2")}); !slices.Equal(got, []string{"app-west"}) {
 		t.Fatalf("filtered = %v", got)
 	}
-	if _, err := west.ListBuckets(t.Context(), &awss3.ListBucketsInput{MaxBuckets: aws.Int32(0)}); code(err) != "InvalidArgument" {
+	if _, err := west.ListBuckets(t.Context(), &awss3.ListBucketsInput{BucketRegion: aws.String("us-east-1")}); sdkerr.AWSCode(err) != "InvalidArgument" {
+		t.Fatalf("another region's buckets = %v", err)
+	}
+	if out, err := east.ListBuckets(t.Context(), &awss3.ListBucketsInput{BucketRegion: aws.String("us-east-1")}); err != nil || len(out.Buckets) != 3 {
+		t.Fatalf("us-east-1 buckets = %+v, %v", out, err)
+	}
+	if _, err := west.ListBuckets(t.Context(), &awss3.ListBucketsInput{MaxBuckets: aws.Int32(0)}); sdkerr.AWSCode(err) != "InvalidArgument" {
 		t.Fatalf("max-buckets 0 = %v", err)
 	}
 }
@@ -290,7 +291,7 @@ func TestTagRules(t *testing.T) {
 		"a disallowed rune": {"k", "a,b"},
 		"too many tags":     many,
 	} {
-		if err := tag(t, c, "tagged", kv...); code(err) != "InvalidTag" {
+		if err := tag(t, c, "tagged", kv...); sdkerr.AWSCode(err) != "InvalidTag" {
 			t.Errorf("%s = %v, want InvalidTag", name, err)
 		}
 	}
@@ -372,7 +373,7 @@ func TestEmptyAVersionedBucketThenDeleteIt(t *testing.T) {
 		versions[1].Size != int64(len("a third body")) || versions[1].IsLatest || versions[3].VersionID != aws.ToString(first.VersionId) {
 		t.Fatalf("versions = %+v", versions)
 	}
-	if _, err := c.DeleteBucket(t.Context(), &awss3.DeleteBucketInput{Bucket: aws.String("versioned")}); code(err) != "BucketNotEmpty" || status(err) != http.StatusConflict {
+	if _, err := c.DeleteBucket(t.Context(), &awss3.DeleteBucketInput{Bucket: aws.String("versioned")}); sdkerr.AWSCode(err) != "BucketNotEmpty" || sdkerr.AWSStatus(err) != http.StatusConflict {
 		t.Fatalf("delete a bucket with versions = %v", err)
 	}
 	if n := empty(t, c, "versioned", 1); n != 4 {
@@ -381,7 +382,7 @@ func TestEmptyAVersionedBucketThenDeleteIt(t *testing.T) {
 	if _, err := c.DeleteBucket(t.Context(), &awss3.DeleteBucketInput{Bucket: aws.String("versioned")}); err != nil {
 		t.Fatalf("delete the empty bucket: %v", err)
 	}
-	if _, err := c.DeleteBucket(t.Context(), &awss3.DeleteBucketInput{Bucket: aws.String("versioned")}); code(err) != "NoSuchBucket" || status(err) != http.StatusNotFound {
+	if _, err := c.DeleteBucket(t.Context(), &awss3.DeleteBucketInput{Bucket: aws.String("versioned")}); sdkerr.AWSCode(err) != "NoSuchBucket" || sdkerr.AWSStatus(err) != http.StatusNotFound {
 		t.Fatalf("delete again = %v", err)
 	}
 }
@@ -442,6 +443,28 @@ func TestSuspendedVersioningReplacesTheNullVersion(t *testing.T) {
 	}
 }
 
+func TestAPageAfterADeletedNullVersion(t *testing.T) {
+	s := s3.New()
+	if _, err := s.PutBucket(s3.Bucket{Name: "mixed", Region: "us-east-1", Versioning: "Enabled"}); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if _, err := s.PutObject("mixed", "k", []byte("versioned")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.PutBucket(s3.Bucket{Name: "mixed", Region: "us-east-1", Versioning: "Suspended"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PutObject("mixed", "k", []byte("null")); err != nil {
+		t.Fatal(err)
+	}
+	c := newClient(t, s, "us-east-1")
+	if n := empty(t, c, "mixed", 1); n != 3 {
+		t.Fatalf("emptied %d versions page by page, want 3", n)
+	}
+}
+
 func TestListObjectVersionsPagesAndRejects(t *testing.T) {
 	s := s3.New()
 	if _, err := s.PutBucket(s3.Bucket{Name: "pages", Region: "us-east-1", Versioning: "Enabled"}); err != nil {
@@ -470,14 +493,17 @@ func TestListObjectVersionsPagesAndRejects(t *testing.T) {
 	if err != nil || len(out.Versions) != 2 {
 		t.Fatalf("prefix = %+v, %v", out, err)
 	}
-	if _, err := c.ListObjectVersions(t.Context(), &awss3.ListObjectVersionsInput{Bucket: aws.String("pages"), Delimiter: aws.String("/")}); code(err) != "InvalidArgument" {
+	if _, err := c.ListObjectVersions(t.Context(), &awss3.ListObjectVersionsInput{Bucket: aws.String("pages"), Delimiter: aws.String("/")}); sdkerr.AWSCode(err) != "InvalidArgument" {
 		t.Fatalf("delimiter = %v", err)
 	}
-	if _, err := c.ListObjectVersions(t.Context(), &awss3.ListObjectVersionsInput{Bucket: aws.String("pages"), VersionIdMarker: aws.String("null")}); code(err) != "InvalidArgument" {
+	if _, err := c.ListObjectVersions(t.Context(), &awss3.ListObjectVersionsInput{Bucket: aws.String("pages"), VersionIdMarker: aws.String("null")}); sdkerr.AWSCode(err) != "InvalidArgument" {
 		t.Fatalf("version marker without key marker = %v", err)
 	}
-	if _, err := c.DeleteObject(t.Context(), &awss3.DeleteObjectInput{Bucket: aws.String("pages"), Key: aws.String("a"), VersionId: aws.String("bogus")}); code(err) != "InvalidArgument" {
+	if _, err := c.DeleteObject(t.Context(), &awss3.DeleteObjectInput{Bucket: aws.String("pages"), Key: aws.String("a"), VersionId: aws.String("bogus")}); sdkerr.AWSCode(err) != "InvalidArgument" {
 		t.Fatalf("delete a malformed version = %v", err)
+	}
+	if _, err := c.PutObject(t.Context(), &awss3.PutObjectInput{Bucket: aws.String("pages"), Key: aws.String(strings.Repeat("k", 1025)), Body: strings.NewReader("x")}); sdkerr.AWSCode(err) != "KeyTooLongError" {
+		t.Fatalf("a long key = %v", err)
 	}
 }
 
@@ -489,7 +515,7 @@ func TestPolicyCORSAndUnimplemented(t *testing.T) {
 	if _, err := c.PutBucketPolicy(t.Context(), &awss3.PutBucketPolicyInput{Bucket: aws.String("web"), Policy: aws.String(policy)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.PutBucketPolicy(t.Context(), &awss3.PutBucketPolicyInput{Bucket: aws.String("web"), Policy: aws.String("deny all")}); code(err) != "MalformedPolicy" {
+	if _, err := c.PutBucketPolicy(t.Context(), &awss3.PutBucketPolicyInput{Bucket: aws.String("web"), Policy: aws.String("deny all")}); sdkerr.AWSCode(err) != "MalformedPolicy" {
 		t.Fatalf("bad policy = %v", err)
 	}
 	rule := types.CORSRule{AllowedMethods: []string{"GET", "PUT"}, AllowedOrigins: []string{"*"}, MaxAgeSeconds: aws.Int32(3600)}
@@ -497,16 +523,16 @@ func TestPolicyCORSAndUnimplemented(t *testing.T) {
 		t.Fatal(err)
 	}
 	rule.AllowedMethods = []string{"PATCH"}
-	if _, err := c.PutBucketCors(t.Context(), &awss3.PutBucketCorsInput{Bucket: aws.String("web"), CORSConfiguration: &types.CORSConfiguration{CORSRules: []types.CORSRule{rule}}}); code(err) != "InvalidRequest" {
+	if _, err := c.PutBucketCors(t.Context(), &awss3.PutBucketCorsInput{Bucket: aws.String("web"), CORSConfiguration: &types.CORSConfiguration{CORSRules: []types.CORSRule{rule}}}); sdkerr.AWSCode(err) != "InvalidRequest" {
 		t.Fatalf("bad CORS = %v", err)
 	}
 	if b, _ := s.LookupBucket("web"); b.Policy != policy || !strings.Contains(b.CORS, "<AllowedMethod>PUT</AllowedMethod>") {
 		t.Fatalf("bucket = %+v", b)
 	}
-	if _, err := c.GetObject(t.Context(), &awss3.GetObjectInput{Bucket: aws.String("web"), Key: aws.String("k")}); code(err) != "NotImplemented" || status(err) != http.StatusNotFound {
+	if _, err := c.GetObject(t.Context(), &awss3.GetObjectInput{Bucket: aws.String("web"), Key: aws.String("k")}); sdkerr.AWSCode(err) != "NotImplemented" || sdkerr.AWSStatus(err) != http.StatusNotFound {
 		t.Fatalf("get object = %v", err)
 	}
-	if _, err := c.GetBucketLocation(t.Context(), &awss3.GetBucketLocationInput{Bucket: aws.String("web")}); code(err) != "NotImplemented" {
+	if _, err := c.GetBucketLocation(t.Context(), &awss3.GetBucketLocationInput{Bucket: aws.String("web")}); sdkerr.AWSCode(err) != "NotImplemented" {
 		t.Fatalf("get location = %v", err)
 	}
 }
@@ -528,25 +554,25 @@ func TestFaults(t *testing.T) {
 	if _, ok := s.LookupBucket("lost"); !ok {
 		t.Fatal("a lost create did not take effect")
 	}
-	if _, err := c.CreateBucket(t.Context(), in); code(err) != "BucketAlreadyOwnedByYou" {
+	if _, err := c.CreateBucket(t.Context(), in); sdkerr.AWSCode(err) != "BucketAlreadyOwnedByYou" {
 		t.Fatalf("retried create = %v", err)
 	}
-	if _, err := c.HeadBucket(t.Context(), &awss3.HeadBucketInput{Bucket: aws.String("nothing")}); err == nil || code(err) == "NotFound" {
+	if _, err := c.HeadBucket(t.Context(), &awss3.HeadBucketInput{Bucket: aws.String("nothing")}); err == nil || sdkerr.AWSCode(err) == "NotFound" {
 		t.Fatalf("a lost head = %v, want a transport error", err)
 	}
 
 	create(t, c, "locked")
-	if _, err := c.GetBucketTagging(t.Context(), &awss3.GetBucketTaggingInput{Bucket: aws.String("locked")}); code(err) != "AccessDenied" || status(err) != http.StatusForbidden {
+	if _, err := c.GetBucketTagging(t.Context(), &awss3.GetBucketTaggingInput{Bucket: aws.String("locked")}); sdkerr.AWSCode(err) != "AccessDenied" || sdkerr.AWSStatus(err) != http.StatusForbidden {
 		t.Fatalf("denied tagging = %v", err)
 	}
 	if _, err := s.PutObject("locked", "k", []byte("x")); err != nil {
 		t.Fatal(err)
 	}
 	_, err := c.DeleteObjects(t.Context(), &awss3.DeleteObjectsInput{Bucket: aws.String("locked"), Delete: &types.Delete{Objects: []types.ObjectIdentifier{{Key: aws.String("k")}}}})
-	if code(err) != "InternalError" || len(s.ObjectVersions("locked")) != 0 {
+	if sdkerr.AWSCode(err) != "InternalError" || len(s.ObjectVersions("locked")) != 0 {
 		t.Fatalf("delete objects failing after = %v, left %v", err, s.ObjectVersions("locked"))
 	}
-	if _, err := c.ListBuckets(t.Context(), &awss3.ListBucketsInput{}); code(err) != "SlowDown" || status(err) != http.StatusServiceUnavailable {
+	if _, err := c.ListBuckets(t.Context(), &awss3.ListBucketsInput{}); sdkerr.AWSCode(err) != "SlowDown" || sdkerr.AWSStatus(err) != http.StatusServiceUnavailable {
 		t.Fatalf("throttled list = %v", err)
 	}
 	if got := faults.Injected(); len(got) != 5 || got[0].Call.Resource != "lost" || got[3].Call.Resource != "locked" {
@@ -576,7 +602,7 @@ func sweep(t *testing.T, c *awss3.Client) error {
 					return err
 				}
 			}
-			if _, err := c.DeleteBucket(t.Context(), &awss3.DeleteBucketInput{Bucket: b.Name}); err != nil && code(err) != "NoSuchBucket" {
+			if _, err := c.DeleteBucket(t.Context(), &awss3.DeleteBucketInput{Bucket: b.Name}); err != nil && sdkerr.AWSCode(err) != "NoSuchBucket" {
 				return err
 			}
 		}

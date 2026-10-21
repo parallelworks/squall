@@ -15,7 +15,7 @@ type apiError struct {
 	Message string
 	// Bucket names the bucket the error is about, when there is one.
 	Bucket string
-	// Region, for a redirect, is the region the bucket is in.
+	// Region is the region the bucket is in, sent in x-amz-bucket-region for a redirect or a denied HeadBucket.
 	Region string
 }
 
@@ -89,7 +89,7 @@ func writeError(w http.ResponseWriter, r *http.Request, requestID string, e *api
 		return
 	}
 	body := errorXML{Code: e.Code, Message: e.Message, BucketName: e.Bucket, RequestID: requestID, HostID: "squall/" + requestID}
-	if e.Region != "" {
+	if e.Status == http.StatusMovedPermanently {
 		body.BucketName, body.Bucket, body.Endpoint = "", e.Bucket, "s3."+e.Region+".amazonaws.com"
 	}
 	writeXML(w, e.Status, body)

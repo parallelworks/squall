@@ -44,6 +44,8 @@ type bucket struct {
 	Bucket
 	// objects holds each key's versions, newest first.
 	objects map[string][]*version
+	// nullSeqs holds each key's last "null" version's sequence number, kept after a delete so a marker naming it keeps its place.
+	nullSeqs map[string]uint64
 }
 
 func (b *bucket) clone() Bucket {
@@ -64,7 +66,11 @@ func (s *Server) lookup(c *call) (*bucket, *apiError) {
 		if region != c.region {
 			return nil, redirect(c.bucket, region)
 		}
-		return nil, accessDenied(c.bucket)
+		denied := accessDenied(c.bucket)
+		if c.r.Method == http.MethodHead {
+			denied.Region = region
+		}
+		return nil, denied
 	}
 	return nil, noSuchBucket(c.bucket)
 }
@@ -221,9 +227,13 @@ type bucketXML struct {
 	BucketRegion string `xml:"BucketRegion,omitempty"`
 }
 
+// listBucketsParams are the ListBuckets parameters that make it page and report regions.
+var listBucketsParams = []string{"max-buckets", "continuation-token", "prefix", "bucket-region"}
+
 func (s *Server) listBuckets(c *call) (*reply, *apiError) {
-	limit, paged := 0, c.query.Has("max-buckets")
-	if paged {
+	paged := slices.ContainsFunc(listBucketsParams, c.query.Has)
+	limit := 10_000
+	if c.query.Has("max-buckets") {
 		n, err := strconv.Atoi(c.query.Get("max-buckets"))
 		if err != nil || n < 1 || n > 10_000 {
 			return nil, invalidArgument("Argument max-buckets must be an integer between 1 and 10000")
@@ -239,6 +249,9 @@ func (s *Server) listBuckets(c *call) (*reply, *apiError) {
 		after = string(b)
 	}
 	prefix, region := c.query.Get("prefix"), c.query.Get("bucket-region")
+	if region != "" && region != c.region {
+		return nil, invalidArgument("squall: bucket-region %s differs from the request's region %s, which S3 does not support", region, c.region)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := listBucketsXML{Owner: ownerXML{ID: ownerID}, Prefix: prefix}
@@ -486,7 +499,7 @@ func (s *Server) PutBucket(b Bucket) (Bucket, error) {
 	b.Tags = maps.Clone(b.Tags)
 	stored := &bucket{Bucket: b, objects: map[string][]*version{}}
 	if old, ok := s.buckets[b.Name]; ok {
-		stored.objects = old.objects
+		stored.objects, stored.nullSeqs = old.objects, old.nullSeqs
 	}
 	s.buckets[b.Name] = stored
 	return stored.clone(), nil

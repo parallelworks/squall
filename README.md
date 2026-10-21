@@ -172,14 +172,17 @@ For Amazon S3:
   creating it fails with `BucketAlreadyExists` and calls on it with
   `AccessDenied` (403 for `HeadBucket`). Creating an owned bucket again
   succeeds in us-east-1 and fails with `BucketAlreadyOwnedByYou` elsewhere.
-- `ListBuckets` reports regions and pages only when `max-buckets` is set.
-  `ListObjectVersions` orders by key and then newest first, and its markers
+- `ListBuckets` with any parameter pages (10,000 buckets by default) and
+  reports each bucket's region, as S3 does; with none it lists every bucket
+  without regions. `ListObjectVersions` orders by key and then newest first, and its markers
   are positions, so the next page still follows one whose versions were just
   deleted. `DeleteBucket` fails with `BucketNotEmpty` while any version or
   delete marker remains.
 - Objects keep their size and ETag, not their data. Checksums are not
   verified, and multipart uploads, copies, object tags and lifecycle are not
-  supported. Policies and CORS rules are recorded, not enforced.
+  supported. Policies and CORS rules are recorded, not enforced. S3 documents
+  in-progress multipart uploads as blocking `DeleteBucket` only for directory
+  buckets.
 - A fault rule's `Resource` is the bucket name, or `bucket/key` for an object
   call. A lost `HeadBucket` breaks off inside its status line, since a sent
   header would read as an answer.
@@ -194,7 +197,8 @@ For Cloud Storage:
   that took effect does.
 - Bucket names and labels follow the API's rules; locations are upper-cased
   but not checked. Fields the server does not model, such as lifecycle rules
-  or retention, are rejected with 400.
+  or retention, are rejected with 400. A patch with a field set to null
+  clears it, and a label set to null is deleted.
 - Objects keep their size, MD5 and CRC32C, which an upload's checksums must
   match. With versioning on, overwrites and deletes keep the old generation as
   noncurrent, and a bucket with any generation left cannot be deleted. Page

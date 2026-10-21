@@ -18,7 +18,12 @@ import (
 const (
 	nullVersion = "null"
 	maxKeys     = 1000
+	maxKeyBytes = 1024
 )
+
+func keyTooLong() *apiError {
+	return &apiError{Status: http.StatusBadRequest, Code: "KeyTooLongError", Message: "Your key is too long"}
+}
 
 // ObjectVersion is one version of an object, or a delete marker.
 type ObjectVersion struct {
@@ -76,6 +81,10 @@ func (b *bucket) write(key string, v *version) {
 	versions := b.objects[key]
 	if v.id == nullVersion {
 		versions = slices.DeleteFunc(versions, func(old *version) bool { return old.id == nullVersion })
+		if b.nullSeqs == nil {
+			b.nullSeqs = map[string]uint64{}
+		}
+		b.nullSeqs[key] = v.seq
 	}
 	b.objects[key] = append([]*version{v}, versions...)
 }
@@ -119,6 +128,9 @@ func (s *Server) remove(b *bucket, key, id string) deleted {
 }
 
 func (s *Server) putObject(c *call) (*reply, *apiError) {
+	if len(c.key) > maxKeyBytes {
+		return nil, keyTooLong()
+	}
 	if c.r.Header.Get("x-amz-copy-source") != "" {
 		return nil, &apiError{Status: http.StatusNotFound, Code: "NotImplemented", Message: "squall: CopyObject is not implemented"}
 	}
@@ -282,12 +294,7 @@ func (s *Server) listObjectVersions(c *call) (*reply, *apiError) {
 		return nil, err
 	}
 	if idMarker == nullVersion {
-		markerSeq = 0
-		for _, v := range b.objects[keyMarker] {
-			if v.id == nullVersion {
-				markerSeq = v.seq
-			}
-		}
+		markerSeq = b.nullSeqs[keyMarker]
 	}
 	out := listVersionsXML{Name: c.bucket, Prefix: prefix, KeyMarker: keyMarker, VersionIDMarker: idMarker, MaxKeys: limit}
 	var last *versionXML
@@ -348,6 +355,9 @@ func (s *Server) ObjectVersions(bucketName string) []ObjectVersion {
 func (s *Server) PutObject(bucketName, key string, data []byte) (ObjectVersion, error) {
 	if key == "" {
 		return ObjectVersion{}, errors.New("squall: an object needs a key")
+	}
+	if len(key) > maxKeyBytes {
+		return ObjectVersion{}, keyTooLong()
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

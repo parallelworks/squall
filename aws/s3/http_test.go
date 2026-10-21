@@ -113,3 +113,38 @@ func TestPresignedCredentialsNameTheRegion(t *testing.T) {
 		t.Fatalf("bucket = %+v, %v", b, ok)
 	}
 }
+
+func TestHostileBodies(t *testing.T) {
+	s := s3.New()
+	if _, err := s.PutBucket(s3.Bucket{Name: "hostile", Region: "us-east-1"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, target, body string
+		chunked            bool
+		code               string
+	}{
+		{"a chunk size near the integer limit", "/hostile/k", "7fffffffffffffff\r\nab", true, "IncompleteBody"},
+		{"a chunk size with a 0x prefix", "/hostile/k", "0x5\r\nhello\r\n0\r\n\r\n", true, "IncompleteBody"},
+		{"a chunk longer than the body", "/hostile/k", "10\r\nhello\r\n0\r\n\r\n", true, "IncompleteBody"},
+		{"a tag set over 1 MiB", "/hostile?tagging", strings.Repeat(" ", 2<<20), false, "MaxMessageLengthExceeded"},
+		{"an object over 16 MiB", "/hostile/k", strings.Repeat("x", 17<<20), false, "EntityTooLarge"},
+		{"a key over 1024 bytes", "/hostile/" + strings.Repeat("k", 1025), "x", false, "KeyTooLongError"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodPut, tc.target, strings.NewReader(tc.body))
+			req.Header.Set("Authorization", authorization)
+			if tc.chunked {
+				req.Header.Set("Content-Encoding", "aws-chunked")
+			}
+			rec := httptest.NewRecorder()
+			s.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "<Code>"+tc.code+"</Code>") {
+				t.Fatalf("= %d %s, want 400 %s", rec.Code, rec.Body, tc.code)
+			}
+		})
+	}
+	if got := s.ObjectVersions("hostile"); len(got) != 0 {
+		t.Fatalf("versions = %+v", got)
+	}
+}
