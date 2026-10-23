@@ -13,6 +13,26 @@ import (
 	"github.com/parallelworks/squall/gcp/storage"
 )
 
+// The client asks for projection=full on every get and list; Cloud Storage leaves out the ACLs rather than refusing.
+func TestPolicyLetsAReaderWithoutIamPolicyGetAndList(t *testing.T) {
+	policy := access.Allow("storage.buckets.create", "storage.objects.create", "storage.buckets.get", "storage.objects.list")
+	c := newClient(t, storage.New(storage.WithPolicy(policy)))
+	if err := c.Bucket("data").Create(t.Context(), project, nil); err != nil {
+		t.Fatal(err)
+	}
+	write(t, c, "data", "a.txt", "one")
+
+	if _, err := c.Bucket("data").Attrs(t.Context()); err != nil {
+		t.Errorf("get bucket: %v", err)
+	}
+	if _, err := c.Bucket("data").Objects(t.Context(), nil).Next(); err != nil {
+		t.Errorf("list objects: %v", err)
+	}
+	if denials := policy.Denials(); len(denials) != 0 {
+		t.Errorf("Denials() = %+v, want none", denials)
+	}
+}
+
 func TestPolicyNeedsDeleteToOverwriteAnObject(t *testing.T) {
 	policy := access.Allow("storage.buckets.create", "storage.objects.create", "storage.objects.list")
 	c := newClient(t, storage.New(storage.WithPolicy(policy)))

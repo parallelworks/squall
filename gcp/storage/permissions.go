@@ -37,17 +37,11 @@ func (s *Server) needs(method, resource string, r *http.Request) []string {
 			perms = append(perms, more...)
 		}
 	}
-	full := q.Get("projection") == "full"
 	switch method {
 	case "storage.buckets.insert":
 		add(q.Get("enableObjectRetention") == "true", "storage.buckets.enableObjectRetention")
-	case "storage.buckets.list", "storage.buckets.get":
-		add(full, "storage.buckets.getIamPolicy")
 	case "storage.buckets.patch":
 		add(q.Get("predefinedAcl") != "" || q.Get("predefinedDefaultObjectAcl") != "", "storage.buckets.setIamPolicy")
-		add(full, "storage.buckets.getIamPolicy")
-	case "storage.objects.list":
-		add(full, "storage.objects.getIamPolicy")
 	case "storage.objects.insert":
 		add(s.exists(resource), "storage.objects.delete")
 	}
