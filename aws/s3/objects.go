@@ -247,7 +247,7 @@ func (s *Server) deleteObjects(c *call) (*reply, *apiError) {
 				continue
 			}
 		}
-		if s.policy.Check(access.Call{Method: "s3.DeleteObjects", Resource: c.bucket + "/" + o.Key, Needs: []string{deleteAction(o.VersionID)}}) != nil {
+		if s.policy != nil && s.policy.Check(access.Call{Method: "s3.DeleteObjects", Resource: c.bucket + "/" + o.Key, Needs: []string{deleteAction(o.VersionID)}}) != nil {
 			out.Errors = append(out.Errors, deleteErrorXML{o.Key, o.VersionID, "AccessDenied", "Access Denied"})
 			continue
 		}

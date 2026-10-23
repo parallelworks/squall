@@ -392,11 +392,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, newError(http.StatusNotFound, "NotFound", "squall: %s /%s is not served", r.Method, path))
 		return
 	}
-	if err := s.authorize(rt, r, "/"+path); err != nil {
+	resource := "/" + path
+	if err := s.authorize(rt, r, resource); err != nil {
 		writeError(w, err)
 		return
 	}
-	f, _ := s.faults.Decide(fault.Call{Method: rt.action, Resource: "/" + path})
+	f, _ := s.faults.Decide(fault.Call{Method: rt.action, Resource: resource})
 	reject := f.Mode == fault.ModeReject || f.Mode == fault.ModeFailOperation && !rt.lro
 	stub.Serve(w, r, f, reject, "application/json; charset=utf-8", func() { writeError(w, faultError(f)) }, func() (func(), bool) {
 		c := &call{r: r, vals: vals}

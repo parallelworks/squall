@@ -325,9 +325,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resource := a.target(c)
-	if missing := s.policy.Check(access.Call{Method: "ec2." + name, Resource: resource, Needs: needs(name, c.p)}); missing != nil {
-		writeError(w, requestID, unauthorized(missing))
-		return
+	if s.policy != nil {
+		if missing := s.policy.Check(access.Call{Method: "ec2." + name, Resource: resource, Needs: needs(name, c.p)}); missing != nil {
+			writeError(w, requestID, unauthorized(missing))
+			return
+		}
 	}
 	f, _ := s.faults.Decide(fault.Call{Method: "ec2." + name, Resource: resource})
 	reject := f.Mode == fault.ModeReject || f.Mode == fault.ModeFailOperation

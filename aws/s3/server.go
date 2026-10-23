@@ -286,13 +286,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, requestID, err)
 		return
 	}
-	if perms := needs(op.name, c); perms != nil {
-		if missing := s.policy.Check(access.Call{Method: "s3." + op.name, Resource: c.resource(), Needs: perms}); missing != nil {
-			writeError(w, r, requestID, notAuthorized(missing[0], c.resource()))
-			return
+	resource := c.resource()
+	if s.policy != nil {
+		if perms := needs(op.name, c); perms != nil {
+			if missing := s.policy.Check(access.Call{Method: "s3." + op.name, Resource: resource, Needs: perms}); missing != nil {
+				writeError(w, r, requestID, notAuthorized(missing[0], resource))
+				return
+			}
 		}
 	}
-	f, _ := s.faults.Decide(fault.Call{Method: "s3." + op.name, Resource: c.resource()})
+	f, _ := s.faults.Decide(fault.Call{Method: "s3." + op.name, Resource: resource})
 	reject := f.Mode == fault.ModeReject || f.Mode == fault.ModeFailOperation
 	stub.Serve(w, r, f, reject, "application/xml", func() { writeError(w, r, requestID, faultError(f)) }, func() (func(), bool) {
 		rep, err := op.handle(c)
