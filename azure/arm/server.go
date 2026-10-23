@@ -121,6 +121,17 @@
 // 429 and 5xx answers, and keeps polling a resource group deletion whose
 // Location answers one, so fail that operation with a status such as 409.
 //
+// [WithPolicy] grants the caller a set of RBAC actions and refuses a call
+// that needs one it lacks with 403 AuthorizationFailed, before any fault. A
+// write that references another resource also needs the action ARM checks on
+// it, such as Microsoft.Network/virtualNetworks/subnets/join/action for a
+// network interface's subnet or Microsoft.Network/networkInterfaces/join/action
+// for a VM's interface, and fails without it with LinkedAuthorizationFailed,
+// naming each action and resource it lacks. Polling a Microsoft.Compute
+// operation result needs Microsoft.Compute/locations/operations/read, as
+// Microsoft.Compute defines no operationResults action. Actions are not
+// checked against the scope they act on: a grant covers every subscription.
+//
 // A lost response aborts the handler with [http.ErrAbortHandler] after
 // sending the response header, so the [http.Server] serving it closes the
 // connection. Calling ServeHTTP directly propagates that panic. A HEAD's
@@ -141,6 +152,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/parallelworks/squall/access"
 	"github.com/parallelworks/squall/fault"
 	"github.com/parallelworks/squall/internal/stub"
 )
@@ -160,6 +172,7 @@ const (
 // is safe for concurrent use.
 type Server struct {
 	faults      *fault.Injector
+	policy      *access.Policy
 	now         func() time.Time
 	settleAfter int
 	routes      []route
@@ -377,6 +390,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rt, vals := s.match(r, strings.Split(path, "/"))
 	if rt == nil {
 		writeError(w, newError(http.StatusNotFound, "NotFound", "squall: %s /%s is not served", r.Method, path))
+		return
+	}
+	if err := s.authorize(rt, r, "/"+path); err != nil {
+		writeError(w, err)
 		return
 	}
 	f, _ := s.faults.Decide(fault.Call{Method: rt.action, Resource: "/" + path})
