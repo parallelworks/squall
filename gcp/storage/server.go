@@ -20,7 +20,8 @@
 //     global, as in Cloud Storage. [Server.PutForeignBucket] holds a name for
 //     someone the caller cannot reach: inserting it fails with 409 conflict
 //     and every other call on it with 403 forbidden. buckets.list lists only
-//     the project's own. Other denials are a fault rule away, such as
+//     the project's own. [WithPolicy] denies calls by permission, and
+//     other denials are a fault rule away, such as
 //     fault.Reject(403, "forbidden") for "storage.buckets.list".
 //   - Inserting a bucket the caller already has fails with 409 conflict, as a
 //     client's retry of a create that took effect does. Bucket names follow
@@ -32,8 +33,8 @@
 //   - Bucket fields other than name, location, storageClass, labels,
 //     versioning, cors, customPlacementConfig, encryption and rpo are
 //     rejected with 400, as are ACLs other than private and projectPrivate.
-//     cors, encryption and rpo are recorded, not enforced. There is no IAM,
-//     soft delete, retention, lifecycle, autoclass or hierarchical namespace.
+//     cors, encryption and rpo are recorded, not enforced. There are no IAM
+//     policies on buckets or objects, and no soft delete, retention, lifecycle, autoclass or hierarchical namespace.
 //     buckets.patch has patch semantics: it merges labels, deleting one set
 //     to null, and clears labels, versioning, cors or encryption set to null.
 //   - Objects record their size, MD5 and CRC32C, not their data; a crc32c or
@@ -61,6 +62,14 @@
 // "projects/my-project/b". The JSON API has no long-running operations, so
 // [fault.ModeFailOperation] fails a call as [fault.ModeReject] does.
 //
+// [WithPolicy] grants the caller a set of IAM permissions and refuses a call
+// that needs one it lacks with 403 forbidden, before any fault. A call needs
+// its method's permission, and those its parameters add, as each method's
+// reference lists them: projection=full needs getIamPolicy, a predefined ACL
+// on a patch storage.buckets.setIamPolicy, and an upload that replaces a live
+// object storage.objects.delete. Permissions are not checked against the
+// bucket they act on: a grant covers every bucket.
+//
 // A lost response aborts the handler with [http.ErrAbortHandler] after
 // sending the response header, so the [http.Server] serving it closes the
 // connection. Calling ServeHTTP directly propagates that panic.
@@ -82,6 +91,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/parallelworks/squall/access"
 	"github.com/parallelworks/squall/fault"
 	"github.com/parallelworks/squall/internal/stub"
 )
@@ -100,6 +110,7 @@ const (
 type Server struct {
 	mux    *http.ServeMux
 	faults *fault.Injector
+	policy *access.Policy
 	now    func() time.Time
 
 	mu             sync.Mutex
@@ -201,6 +212,12 @@ func (s *Server) route(pattern, method string, h handler, target func(*http.Requ
 		resource := strings.TrimPrefix(r.URL.Path, "/storage/v1/")
 		if target != nil {
 			resource = target(r)
+		}
+		if s.policy != nil {
+			if missing := s.policy.Check(access.Call{Method: method, Resource: resource, Needs: s.needs(method, resource, r)}); missing != nil {
+				writeError(w, permissionDenied(missing, resource))
+				return
+			}
 		}
 		f, _ := s.faults.Decide(fault.Call{Method: method, Resource: resource})
 		reject := f.Mode == fault.ModeReject || f.Mode == fault.ModeFailOperation

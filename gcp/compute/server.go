@@ -88,6 +88,19 @@
 //     first instance it names in perInstanceProperties, or the zone's
 //     instances when it names none.
 //
+// [WithPolicy] grants the caller a set of IAM permissions and refuses a call
+// that needs one it lacks with 403 forbidden, "Required '<permission>'
+// permission for '<resource>'", before any fault. A call needs its method's
+// permission and those the fields of its request add, as each method's
+// reference lists them: an instance insert that creates a boot disk from an
+// image needs compute.disks.create and compute.images.useReadOnly, one with
+// metadata compute.instances.setMetadata, and one with a service account
+// compute.instances.setServiceAccount and iam.serviceAccounts.actAs. Where
+// the reference names either of two permissions, as for an address insert
+// that may be external or internal, either suffices. Polling an operation
+// needs its scope's operations get permission. Permissions are not checked
+// against the resource they act on: a grant covers every project.
+//
 // A lost response aborts the handler with [http.ErrAbortHandler] after
 // sending the response header, so the [http.Server] serving it closes the
 // connection. Calling ServeHTTP directly propagates that panic.
@@ -106,6 +119,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/parallelworks/squall/access"
 	"github.com/parallelworks/squall/fault"
 	"github.com/parallelworks/squall/internal/stub"
 )
@@ -124,6 +138,7 @@ const betaSelfLinkBase = "https://www.googleapis.com/compute/beta/"
 type Server struct {
 	mux    *http.ServeMux
 	faults *fault.Injector
+	policy *access.Policy
 	now    func() time.Time
 
 	settleAfter int
@@ -323,6 +338,12 @@ func (s *Server) route(pattern, method, verb string, h handler, target func(*htt
 		resource := strings.TrimSuffix(resourcePath(r), verb)
 		if target != nil {
 			resource = target(r, resource)
+		}
+		if s.policy != nil {
+			if missing := s.policy.Check(access.Call{Method: method, Resource: resource, Needs: needs(method, r)}); missing != nil {
+				writeError(w, permissionDenied(missing, resource))
+				return
+			}
 		}
 		f, _ := s.faults.Decide(fault.Call{Method: method, Resource: resource})
 		reject := f.Mode == fault.ModeReject || f.Mode == fault.ModeFailOperation && !startsOperation

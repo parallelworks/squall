@@ -29,8 +29,9 @@
 //   - [Server.PutForeignBucket] holds a name for another account: creating
 //     it fails with BucketAlreadyExists, HeadBucket with 403 and the bucket's
 //     region, and every other call on it with AccessDenied. ListBuckets
-//     lists only the account's own. Other access denials are a fault rule
-//     away, such as fault.Reject(403, "AccessDenied").
+//     lists only the account's own. [WithPolicy] denies calls by IAM
+//     action, and other access denials are a fault rule away, such as
+//     fault.Reject(403, "AccessDenied").
 //   - CreateBucket takes a LocationConstraint that must name the request's
 //     region, and none for us-east-1, where naming us-east-1 fails with
 //     InvalidLocationConstraint. Any other mismatch fails with
@@ -70,6 +71,17 @@
 //     InvalidArgument rather than ignored, as are the
 //     x-amz-expected-bucket-owner and x-amz-mfa headers.
 //
+// [WithPolicy] grants the caller a set of IAM actions and refuses a call that
+// needs one it lacks with 403 AccessDenied, before any fault. Each operation
+// needs the action the S3 user guide lists for it, such as s3:ListBucket for
+// HeadBucket; deleting a version needs s3:DeleteObjectVersion instead of
+// s3:DeleteObject, an ACL header on PutObject s3:PutObjectAcl, and an
+// object ownership header on CreateBucket s3:PutBucketOwnershipControls.
+// DeleteObjects is checked key by key, as S3 checks it: a key the policy may
+// not delete is an AccessDenied error in the result, and the rest are
+// deleted. Actions are not checked against the resources they act on or
+// against condition keys: a grant covers every bucket.
+//
 // Fault method names are "s3." and the operation, such as "s3.CreateBucket".
 // A call's resource is the bucket's name, "bucket/key" for a call on one
 // object, and empty for ListBuckets. S3 has no long-running operations, so
@@ -100,6 +112,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/parallelworks/squall/access"
 	"github.com/parallelworks/squall/fault"
 	"github.com/parallelworks/squall/internal/stub"
 )
@@ -118,6 +131,7 @@ const (
 // Server is a stand-in for the Amazon S3 API. Create one with [New]. It is safe for concurrent use.
 type Server struct {
 	faults   *fault.Injector
+	policy   *access.Policy
 	now      func() time.Time
 	requests atomic.Uint64
 
@@ -272,7 +286,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, requestID, err)
 		return
 	}
-	f, _ := s.faults.Decide(fault.Call{Method: "s3." + op.name, Resource: c.resource()})
+	resource := c.resource()
+	if s.policy != nil {
+		if perms := needs(op.name, c); perms != nil {
+			if missing := s.policy.Check(access.Call{Method: "s3." + op.name, Resource: resource, Needs: perms}); missing != nil {
+				writeError(w, r, requestID, notAuthorized(missing[0], resource))
+				return
+			}
+		}
+	}
+	f, _ := s.faults.Decide(fault.Call{Method: "s3." + op.name, Resource: resource})
 	reject := f.Mode == fault.ModeReject || f.Mode == fault.ModeFailOperation
 	stub.Serve(w, r, f, reject, "application/xml", func() { writeError(w, r, requestID, faultError(f)) }, func() (func(), bool) {
 		rep, err := op.handle(c)

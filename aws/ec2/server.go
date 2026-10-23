@@ -122,6 +122,12 @@
 //     images, placement groups (by group ID), network interfaces and Elastic
 //     IP addresses, and change nothing unless every resource exists.
 //
+// [WithPolicy] grants the caller a set of IAM actions and refuses a call that
+// needs one it lacks with 403 UnauthorizedOperation, before any fault. A call
+// needs ec2: and its action, and ec2:CreateTags when it has a
+// TagSpecification. Actions are not checked against the resources they act
+// on or against condition keys: a grant covers every resource.
+//
 // Fault method names are "ec2." and the action, such as "ec2.AllocateAddress".
 // A call's resource is the region and the ID it acts on, such as
 // "us-east-1/eipalloc-00000000000000001", or the first of them for a call
@@ -150,6 +156,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/parallelworks/squall/access"
 	"github.com/parallelworks/squall/fault"
 	"github.com/parallelworks/squall/internal/stub"
 )
@@ -166,6 +173,7 @@ const (
 // safe for concurrent use.
 type Server struct {
 	faults       *fault.Injector
+	policy       *access.Policy
 	addressLimit int
 	settleAfter  int
 	actions      map[string]action
@@ -316,7 +324,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, requestID, err)
 		return
 	}
-	f, _ := s.faults.Decide(fault.Call{Method: "ec2." + name, Resource: a.target(c)})
+	resource := a.target(c)
+	if s.policy != nil {
+		if missing := s.policy.Check(access.Call{Method: "ec2." + name, Resource: resource, Needs: needs(name, c.p)}); missing != nil {
+			writeError(w, requestID, unauthorized(missing))
+			return
+		}
+	}
+	f, _ := s.faults.Decide(fault.Call{Method: "ec2." + name, Resource: resource})
 	reject := f.Mode == fault.ModeReject || f.Mode == fault.ModeFailOperation
 	stub.Serve(w, r, f, reject, "text/xml;charset=UTF-8", func() { writeError(w, requestID, faultError(f)) }, func() (func(), bool) {
 		body, err := a.handle(c)
