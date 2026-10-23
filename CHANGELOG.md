@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/parallelworks/squall/compare/v0.9.0...v0.9.1) (2026-10-23)
+
+
+### Bug fixes
+
+* **storage:** a get or list without getIamPolicy is refused, though Cloud Storage only leaves out the ACLs ([#29](https://github.com/parallelworks/squall/issues/29)) ([87b949d](https://github.com/parallelworks/squall/commit/87b949ddb41919fea571bfdb7d91bd33035c3637))
+
 ## [0.9.0](https://github.com/parallelworks/squall/compare/v0.8.0...v0.9.0) (2026-10-23)
 
 
