@@ -65,10 +65,12 @@
 // [WithPolicy] grants the caller a set of IAM permissions and refuses a call
 // that needs one it lacks with 403 forbidden, before any fault. A call needs
 // its method's permission, and those its parameters add, as each method's
-// reference lists them: projection=full needs getIamPolicy, a predefined ACL
-// on a patch storage.buckets.setIamPolicy, and an upload that replaces a live
-// object storage.objects.delete. Permissions are not checked against the
-// bucket they act on: a grant covers every bucket.
+// reference lists them: a predefined ACL on a patch needs
+// storage.buckets.setIamPolicy, and an upload that replaces a live object
+// storage.objects.delete. projection=full needs nothing more: Cloud Storage
+// leaves out the ACLs a caller may not read rather than refusing the call,
+// and the official clients ask for it on every get and list. Permissions are
+// not checked against the bucket they act on: a grant covers every bucket.
 //
 // A lost response aborts the handler with [http.ErrAbortHandler] after
 // sending the response header, so the [http.Server] serving it closes the
