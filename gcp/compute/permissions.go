@@ -143,7 +143,7 @@ func needs(method string, r *http.Request) []string {
 	}
 	switch method {
 	case "compute.instances.insert":
-		perms = append(perms, f.permissionFields.needs()...)
+		perms = append(perms, f.needs()...)
 		add(f.DeletionProtection, "compute.instances.setDeletionProtection")
 	case "compute.instances.bulkInsert":
 		add(f.SourceInstanceTemplate != "", "compute.instanceTemplates.useReadOnly")
@@ -222,9 +222,10 @@ func diskUse(mode string) string {
 }
 
 func permissionDenied(missing []string, resource string) *apiError {
+	perm, _, _ := strings.Cut(missing[0], "|")
 	return &apiError{
 		Status:  http.StatusForbidden,
 		Reason:  "forbidden",
-		Message: fmt.Sprintf("Required '%s' permission for '%s'", strings.Split(missing[0], "|")[0], resource),
+		Message: fmt.Sprintf("Required '%s' permission for '%s'", perm, resource),
 	}
 }

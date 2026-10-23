@@ -67,7 +67,7 @@ func (s *Server) exists(resource string) bool {
 }
 
 func permissionDenied(missing []string, resource string) *apiError {
-	perm := strings.Split(missing[0], "|")[0]
+	perm, _, _ := strings.Cut(missing[0], "|")
 	return &apiError{
 		Status:  http.StatusForbidden,
 		Reason:  "forbidden",

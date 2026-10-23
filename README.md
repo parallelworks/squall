@@ -21,6 +21,7 @@ failure replays from its seed.
 | Package | What it does |
 | --- | --- |
 | [`fault`](https://pkg.go.dev/github.com/parallelworks/squall/fault) | Decides which calls fail and how: rejected, applied with the response lost, applied with an error, an operation that ends in an error, or slow. Scripted rules and a seeded random rate. |
+| [`access`](https://pkg.go.dev/github.com/parallelworks/squall/access) | Grants a set of permissions (Google Cloud IAM permissions, AWS IAM actions or Azure RBAC actions) and refuses calls that need one it lacks, with the error the cloud answers, including those a request's fields add and Azure's linked checks. Reports which permissions were needed but missing and which were granted but never used. |
 | [`aws/ec2`](https://pkg.go.dev/github.com/parallelworks/squall/aws/ec2) | Amazon EC2: instances (run with client tokens, describe with filters and pages, start, stop, terminate, change type), images (describe, register from snapshots, deregister), instance types, EBS volumes (create, describe, attach, detach, delete), EBS snapshots (create, describe with filters and pages, delete), placement groups, tags, Elastic IP addresses (allocate, describe, release, associate with an interface or instance, disassociate) and network interfaces (create with client tokens, describe, delete). |
 | [`aws/s3`](https://pkg.go.dev/github.com/parallelworks/squall/aws/s3) | Amazon S3: general purpose buckets (create, head, list with pages and filters, delete), their tags, versioning, policy and CORS rules, and objects (put, delete one or many, list versions and delete markers). |
 | [`azure/arm`](https://pkg.go.dev/github.com/parallelworks/squall/azure/arm) | Azure Resource Manager: resource groups (get, create or update, list with tag filters, delete with everything in them that nothing outside uses), virtual machines (create or update, get, list, instance view, deallocate, start, delete), Uniform scale sets (create or update, update, get, list, delete, delete instances) and their VMs, network security groups, network interfaces and public IP addresses, the IP configurations of scale set VMs, private DNS zones, virtual network links and A record sets, and long-running operations to poll. |
@@ -60,6 +61,21 @@ for seed := range uint64(100) {
 		fault.Unavailable(), fault.LoseResponse(), fault.FailAfter(500))
 	// ... run the code under test against compute.New(compute.WithFaults(faults))
 	// and on failure report the seed and faults.Injected().
+}
+```
+
+To check that a list of required permissions is exact, grant only it and see
+what the code under test needed:
+
+```go
+policy := access.Allow(requiredPermissions...)
+s := compute.New(compute.WithPolicy(policy))
+// ... run the code under test against s
+for _, d := range policy.Denials() {
+	t.Errorf("%s on %s needs %v", d.Method, d.Resource, d.Missing)
+}
+if unused := policy.Unused(); len(unused) > 0 {
+	t.Logf("granted but never used: %v", unused)
 }
 ```
 

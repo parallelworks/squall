@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/parallelworks/squall/access"
 )
 
 const (
@@ -244,6 +246,10 @@ func (s *Server) deleteObjects(c *call) (*reply, *apiError) {
 				out.Errors = append(out.Errors, deleteErrorXML{o.Key, o.VersionID, "NoSuchVersion", "The specified version does not exist."})
 				continue
 			}
+		}
+		if s.policy.Check(access.Call{Method: "s3.DeleteObjects", Resource: c.bucket + "/" + o.Key, Needs: []string{deleteAction(o.VersionID)}}) != nil {
+			out.Errors = append(out.Errors, deleteErrorXML{o.Key, o.VersionID, "AccessDenied", "Access Denied"})
+			continue
 		}
 		d := s.remove(b, o.Key, o.VersionID)
 		if !in.Quiet {
