@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.9.0](https://github.com/parallelworks/squall/compare/v0.8.0...v0.9.0) (2026-10-23)
+
+
+### Features
+
+* **access:** permission policies that refuse calls the caller lacks permission for ([#28](https://github.com/parallelworks/squall/issues/28)) ([0ecd8c7](https://github.com/parallelworks/squall/commit/0ecd8c752165b3cefa19518469ab976725fb3f84))
+
+
+### Bug fixes
+
+* **deps:** build with Go 1.27.3, which distrusts eMudhra's compromised intermediate CAs ([#26](https://github.com/parallelworks/squall/issues/26)) ([ae19548](https://github.com/parallelworks/squall/commit/ae19548aa3e123c140c690276fc6ff0d4bd2edf1))
+
 ## [0.8.0](https://github.com/parallelworks/squall/compare/v0.7.0...v0.8.0) (2026-10-21)
 
 
