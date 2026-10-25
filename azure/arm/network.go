@@ -86,9 +86,11 @@ type putSpec struct {
 	// new, and returns how to apply it. Nil records p as it is.
 	prepare func(res *resource, p *parsed) (func(), *apiError)
 	render  func(res *resource) map[string]any
-	// emptyAccepted answers a change in progress with 202, an empty object
-	// and a Location URL as well, as private DNS does.
-	emptyAccepted bool
+	// acceptedBody, when set, answers a change in progress with 202, this
+	// body and a Location URL as well, as private DNS and Storage do.
+	acceptedBody func() []byte
+	// createdStatus answers a create that finishes at once, if not 201.
+	createdStatus int
 }
 
 // fail applies err to the call: an async error becomes the error the call's
@@ -138,9 +140,9 @@ func (s *Server) put(spec putSpec) handler {
 		if existing != nil && existing.loc != p.location {
 			return nil, wrongLocation(existing.name, existing.loc, p.location, c.val("rg"))
 		}
-		res, status := existing, http.StatusOK
+		res, status, state := existing, http.StatusOK, stateUpdating
 		if res == nil {
-			res, status = s.newResource(c, spec.kind, id, p), http.StatusCreated
+			res, status, state = s.newResource(c, spec.kind, id, p), cmp.Or(spec.createdStatus, http.StatusCreated), stateCreating
 		}
 		commit := func() { s.update(res, p) }
 		if spec.prepare != nil {
@@ -153,19 +155,21 @@ func (s *Server) put(spec putSpec) handler {
 		}
 		render := func() []byte { return encode(spec.render(res)) }
 		answer := func(op *operation, render func() []byte) *reply {
-			if spec.emptyAccepted && op.status != opSucceeded {
-				return accepted(c, op, status, http.StatusAccepted, true, emptyObject)
+			if spec.acceptedBody != nil && op.status != opSucceeded {
+				return accepted(c, op, status, http.StatusAccepted, true, spec.acceptedBody)
 			}
 			return accepted(c, op, status, status, false, render)
 		}
 		paths := spec.paths(c, p.location)
 		if c.opFault != nil {
 			op := s.begin(c, paths, 0, nil)
-			return answer(op, func() []byte { return withState(res, putState(status), render) }), nil
+			return answer(op, func() []byte { return withState(res, state, render) }), nil
 		}
 		commit()
 		s.resources[key(id)] = res
-		return answer(s.change(c, res, paths, 0, putState(status), nil), render), nil
+		op := s.change(c, res, paths, 0, state, nil)
+		op.result = render
+		return answer(op, render), nil
 	}
 }
 

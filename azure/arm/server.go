@@ -26,7 +26,11 @@
 //   - Microsoft.Compute scale sets in the Uniform orchestration mode: create
 //     or update, update, get, list in a group, delete and delete instances,
 //     and their VMs (list, get);
-//   - Microsoft.Compute resource SKUs: list, which lists none.
+//   - Microsoft.Compute resource SKUs: list, which lists none;
+//   - Microsoft.Storage: storage accounts (create, get, list in a group or
+//     subscription, list keys and delete), name availability checks, the
+//     blob service's properties (set and get) and blob containers (create,
+//     get, list and delete).
 //
 // Other calls answer 404. Every call needs an api-version, which may be any
 // value, and a bearer token, which is not checked. Where it differs from
@@ -106,6 +110,18 @@
 //     deletes nothing. Scale set VMs are always running.
 //   - Resource SKUs list none: a caller that checks availability sees no
 //     restrictions.
+//   - A storage account create that finishes at once answers 200, as Azure
+//     Storage does, and one in progress answers 202 with an empty body and
+//     only a Location URL, under Microsoft.Storage/operations, which answers
+//     200 with the account once it is done. Account names are unique across
+//     the server, as they are across Azure: taking one another group holds
+//     fails with 409 StorageAccountInAnotherResourceGroup in the same
+//     subscription and StorageAccountAlreadyTaken in another, and a name that
+//     is not 3 to 24 lower-case letters and digits fails with
+//     AccountNameInvalid. Setting blob service properties keeps the ones the
+//     call leaves out, inferred from the Blob service's own Set Blob Service
+//     Properties. Account keys are derived from the account and never
+//     change. Blob data is not served.
 //
 // Fault method names are the operation's Azure RBAC action, such as
 // "Microsoft.Compute/virtualMachines/write",
@@ -129,7 +145,8 @@
 // for a VM's interface, and fails without it with LinkedAuthorizationFailed,
 // naming each action and resource it lacks. Polling a Microsoft.Compute
 // operation result needs Microsoft.Compute/locations/operations/read, as
-// Microsoft.Compute defines no operationResults action. Actions are not
+// Microsoft.Compute defines no operationResults action, and polling a
+// Microsoft.Storage operation needs Microsoft.Storage/operations/read. Actions are not
 // checked against the scope they act on: a grant covers every subscription.
 //
 // A lost response aborts the handler with [http.ErrAbortHandler] after
@@ -336,6 +353,7 @@ func (s *Server) registerRoutes() {
 	s.add("GET", ipConfig+"/publicIPAddresses/{pip}", vmssKind.action("virtualMachines/networkInterfaces/ipConfigurations/publicIPAddresses/read"), false, s.getInstancePublicIP)
 
 	s.add("GET", sub+"/providers/Microsoft.Compute/skus", "Microsoft.Compute/skus/read", false, s.listSKUs)
+	s.registerStorageRoutes()
 }
 
 func (s *Server) add(method, pattern, action string, lro bool, h handler) {

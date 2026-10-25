@@ -47,12 +47,12 @@ func recordID(c *call) string { return zoneID(c) + "/A/" + c.val("name") }
 func dnsPaths(c *call, _ string) opPaths { return dnsOps(c) }
 
 func (s *Server) putZone(c *call) (*reply, *apiError) {
-	return s.put(putSpec{kind: zoneKind, id: zoneID, paths: dnsPaths, render: s.renderZone, emptyAccepted: true})(c)
+	return s.put(putSpec{kind: zoneKind, id: zoneID, paths: dnsPaths, render: s.renderZone, acceptedBody: emptyObject})(c)
 }
 
 func (s *Server) putLink(c *call) (*reply, *apiError) {
 	return s.put(putSpec{
-		kind: linkKind, id: linkID, parent: zoneID, paths: dnsPaths, render: s.renderLink, emptyAccepted: true,
+		kind: linkKind, id: linkID, parent: zoneID, paths: dnsPaths, render: s.renderLink, acceptedBody: emptyObject,
 		precondition: func(r *http.Request, existing *resource) *apiError {
 			err := checkPrecondition(r, existing)
 			if err != nil && existing != nil && r.Header.Get("If-None-Match") == "*" {

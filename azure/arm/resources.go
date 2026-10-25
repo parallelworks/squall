@@ -61,6 +61,7 @@ type resource struct {
 	pip     *pipState
 	vm      *vmState
 	scale   *scaleSet
+	account *accountState
 }
 
 // inGroup reports whether r is in the group with key gk.
@@ -351,6 +352,8 @@ func (s *Server) remove(res *resource) {
 		for _, inst := range res.scale.instances {
 			s.releaseInstance(inst)
 		}
+	case res.account != nil:
+		s.removeAccountChildren(res)
 	}
 }
 
