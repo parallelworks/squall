@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/parallelworks/squall/compare/v0.9.1...v0.10.0) (2026-10-25)
+
+
+### Features
+
+* **arm:** Azure Storage accounts, blob service properties and blob containers ([#31](https://github.com/parallelworks/squall/issues/31)) ([5b750c0](https://github.com/parallelworks/squall/commit/5b750c0d9038104727e485ae406a1afe6082b58c))
+
 ## [0.9.1](https://github.com/parallelworks/squall/compare/v0.9.0...v0.9.1) (2026-10-23)
 
 
