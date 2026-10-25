@@ -14,9 +14,10 @@
 //   - resource groups: get, check existence, create or update, list (with
 //     tag filters) and delete, which deletes everything in the group that
 //     nothing outside it uses;
-//   - Microsoft.Network: network security groups, network interfaces and
-//     public IP addresses (create or update, get, delete), and the IP
-//     configurations and public IP addresses of scale set VMs (get);
+//   - Microsoft.Network: network security groups, network interfaces, public
+//     IP addresses and private endpoints (create or update, update tags, get,
+//     delete), and the IP configurations and public IP addresses of scale set
+//     VMs (get);
 //   - Microsoft.Network private DNS: zones and virtual network links in the
 //     global location (create or update, get; another location fails with
 //     MissingRegistrationForLocation), and A record sets (create or update,
@@ -29,8 +30,8 @@
 //   - Microsoft.Compute resource SKUs: list, which lists none;
 //   - Microsoft.Storage: storage accounts (create, get, list in a group or
 //     subscription, list keys and delete), name availability checks, the
-//     blob service's properties (set and get) and blob containers (create,
-//     get, list and delete).
+//     blob and file services' properties (set and get), and blob containers
+//     and file shares (create, get, list and delete).
 //
 // Other calls answer 404. Every call needs an api-version, which may be any
 // value, and a bearer token, which is not checked. Where it differs from
@@ -120,8 +121,16 @@
 //     is not 3 to 24 lower-case letters and digits fails with
 //     AccountNameInvalid. Setting blob service properties keeps the ones the
 //     call leaves out, inferred from the Blob service's own Set Blob Service
-//     Properties. Account keys are derived from the account and never
-//     change. Blob data is not served.
+//     Properties; setting file service properties replaces them all, also
+//     inferred. Account keys are derived from the account and never change.
+//     Blob and file data are not served.
+//   - A private endpoint takes one private link service connection, whose
+//     target is recorded, not checked. A new one gets a network interface
+//     with an address in its subnet, named customNetworkInterfaceName or
+//     {endpoint}.nic.{guid}, without the endpoint's tags, as Azure makes it;
+//     deleting the endpoint deletes it. The interface can be deleted on its
+//     own, which Azure refuses. An automatic connection
+//     (privateLinkServiceConnections) is Approved and a manual one Pending.
 //
 // Fault method names are the operation's Azure RBAC action, such as
 // "Microsoft.Compute/virtualMachines/write",
@@ -143,7 +152,13 @@
 // it, such as Microsoft.Network/virtualNetworks/subnets/join/action for a
 // network interface's subnet or Microsoft.Network/networkInterfaces/join/action
 // for a VM's interface, and fails without it with LinkedAuthorizationFailed,
-// naming each action and resource it lacks. Polling a Microsoft.Compute
+// naming each action and resource it lacks. A private endpoint with an
+// automatic connection needs the target's privateEndpointConnectionsApproval
+// action, such as
+// Microsoft.Storage/storageAccounts/privateEndpointConnectionsApproval/action,
+// which Azure documents as needed for automatic approval; that it refuses
+// the create without it, rather than leaving the connection pending, is
+// inferred from the LinkedAuthorizationFailed it reports for other services. Polling a Microsoft.Compute
 // operation result needs Microsoft.Compute/locations/operations/read, as
 // Microsoft.Compute defines no operationResults action, and polling a
 // Microsoft.Storage operation needs Microsoft.Storage/operations/read. Actions are not
@@ -314,9 +329,10 @@ func (s *Server) registerRoutes() {
 	s.add("GET", network+"/privateDnsOperationStatuses/{op}", "Microsoft.Network/privateDnsOperationStatuses/read", false, s.operationStatus)
 	s.add("GET", network+"/privateDnsOperationResults/{op}", "Microsoft.Network/privateDnsOperationResults/read", false, s.operationResult)
 
-	for _, k := range []*kind{nsgKind, nicKind, pipKind} {
+	for _, k := range []*kind{nsgKind, nicKind, pipKind, peKind} {
 		item := network + "/" + k.plural + "/{name}"
 		s.add("PUT", item, k.action("write"), true, s.putNetwork(k))
+		s.add("PATCH", item, k.action("write"), false, s.patchTags(k))
 		s.add("GET", item, k.action("read"), false, s.getResource(k))
 		s.add("DELETE", item, k.action("delete"), true, s.deleteNetwork(k))
 	}

@@ -62,6 +62,7 @@ type resource struct {
 	vm      *vmState
 	scale   *scaleSet
 	account *accountState
+	pe      *peState
 }
 
 // inGroup reports whether r is in the group with key gk.
@@ -354,6 +355,10 @@ func (s *Server) remove(res *resource) {
 		}
 	case res.account != nil:
 		s.removeAccountChildren(res)
+	case res.pe != nil:
+		if nic := s.resources[key(res.pe.nic)]; nic != nil {
+			s.remove(nic)
+		}
 	}
 }
 

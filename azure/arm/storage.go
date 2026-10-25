@@ -32,6 +32,25 @@ var (
 			"deleteRetentionPolicy", "isVersioningEnabled", "lastAccessTimeTrackingPolicy", "restorePolicy",
 		},
 	}
+	fileServiceKind = &kind{
+		typ: "Microsoft.Storage/storageAccounts/fileServices", plural: "fileServices", typeName: "FileServiceProperties",
+		topReadOnly: []string{"sku"},
+		props:       []string{"cors", "protocolSettings", "shareDeleteRetentionPolicy"},
+	}
+	shareKind = &kind{
+		typ: "Microsoft.Storage/storageAccounts/fileServices/shares", plural: "shares", typeName: "FileShare",
+		props: []string{
+			"accessTier", "enabledProtocols", "fileSharePaidBursting", "metadata", "provisionedBandwidthMibps",
+			"provisionedIops", "rootSquash", "shareQuota", "signedIdentifiers",
+		},
+		readOnly: []string{
+			"accessTierChangeTime", "accessTierStatus", "deleted", "deletedTime", "includedBurstIops", "lastModifiedTime",
+			"leaseDuration", "leaseState", "leaseStatus", "maxBurstCreditsForIops", "nextAllowedProvisionedBandwidthDowngradeTime",
+			"nextAllowedProvisionedIopsDowngradeTime", "nextAllowedQuotaDowngradeTime", "remainingRetentionDays",
+			"shareUsageBytes", "snapshotTime", "version",
+		},
+		etag: quotedETag,
+	}
 	containerKind = &kind{
 		typ: "Microsoft.Storage/storageAccounts/blobServices/containers", plural: "containers", typeName: "BlobContainer",
 		props: []string{
@@ -48,24 +67,19 @@ var (
 
 // accountState is what a storage account holds beyond its body.
 type accountState struct {
-	// blob is the account's blob service properties.
-	blob map[string]any
+	// services are the properties of the account's services, by their path.
+	services map[string]map[string]any
 }
 
 // accountName is the form Azure requires of a storage account name.
 var accountName = regexp.MustCompile(`^[a-z0-9]{3,24}$`)
 
 const (
-	storage     = rg + "/providers/Microsoft.Storage"
-	account     = storage + "/storageAccounts/{account}"
-	blobService = account + "/blobServices/default"
+	storage = rg + "/providers/Microsoft.Storage"
+	account = storage + "/storageAccounts/{account}"
 )
 
 func accountID(c *call) string { return resourceID(c, accountKind.typ, c.val("account")) }
-
-func blobServiceID(c *call) string { return accountID(c) + "/blobServices/default" }
-
-func containerID(c *call) string { return blobServiceID(c) + "/containers/" + c.val("name") }
 
 // storageOps are the paths of a Microsoft.Storage operation, which is polled
 // by its Location only and answers 200 with the resource once it succeeds.
@@ -82,12 +96,18 @@ func (s *Server) registerStorageRoutes() {
 	s.add("GET", account, accountKind.action("read"), false, s.getAccount)
 	s.add("DELETE", account, accountKind.action("delete"), false, s.deleteAccount)
 	s.add("POST", account+"/listKeys", accountKind.action("listKeys/action"), false, s.listKeys)
-	s.add("PUT", blobService, blobServiceKind.action("write"), false, s.putBlobService)
-	s.add("GET", blobService, blobServiceKind.action("read"), false, s.getBlobService)
-	s.add("GET", blobService+"/containers", containerKind.action("read"), false, s.listContainers)
-	s.add("PUT", blobService+"/containers/{name}", containerKind.action("write"), false, s.putContainer)
-	s.add("GET", blobService+"/containers/{name}", containerKind.action("read"), false, s.getContainer)
-	s.add("DELETE", blobService+"/containers/{name}", containerKind.action("delete"), false, s.deleteContainer)
+	for _, svc := range []*service{blobService, fileService} {
+		path := account + "/" + svc.path + "/default"
+		s.add("PUT", path, svc.kind.action("write"), false, s.putService(svc))
+		s.add("GET", path, svc.kind.action("read"), false, s.getService(svc))
+	}
+	for _, ch := range []*child{containers, shares} {
+		path := account + "/" + ch.service.path + "/default/" + ch.kind.plural
+		s.add("GET", path, ch.kind.action("read"), false, s.listChildren(ch))
+		s.add("PUT", path+"/{name}", ch.kind.action("write"), false, s.putChild(ch))
+		s.add("GET", path+"/{name}", ch.kind.action("read"), false, s.getChild(ch))
+		s.add("DELETE", path+"/{name}", ch.kind.action("delete"), false, s.deleteChild(ch))
+	}
 }
 
 func (s *Server) putAccount(c *call) (*reply, *apiError) {
@@ -109,7 +129,7 @@ func (s *Server) putAccount(c *call) (*reply, *apiError) {
 			}
 			return func() {
 				if res.account == nil {
-					res.account = &accountState{blob: map[string]any{}}
+					res.account = &accountState{services: map[string]map[string]any{}}
 				}
 				s.update(res, p)
 			}, nil
@@ -279,123 +299,204 @@ func renderSKU(sku map[string]any) map[string]any {
 	return out
 }
 
-func (s *Server) putBlobService(c *call) (*reply, *apiError) {
-	p, err := parseBody(c, blobServiceKind)
-	if err != nil {
-		return nil, err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	res, err := s.writableAccount(c, blobServiceKind)
-	if err != nil {
-		return nil, err
-	}
-	maps.Copy(res.account.blob, p.props)
-	return ok200(blobServiceBody(c, res)), nil
+// service is a storage account service, such as Blob, whose properties the
+// account keeps.
+type service struct {
+	kind *kind
+	// path is the service's segment of its ID, such as blobServices.
+	path string
+	// replace is whether setting the properties replaces them all, rather
+	// than keeping the ones the call leaves out.
+	replace bool
 }
 
-func (s *Server) getBlobService(c *call) (*reply, *apiError) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	res, err := s.account(c)
-	if err != nil {
-		return nil, err
+var (
+	blobService = &service{kind: blobServiceKind, path: "blobServices"}
+	fileService = &service{kind: fileServiceKind, path: "fileServices", replace: true}
+)
+
+func (svc *service) id(c *call) string { return accountID(c) + "/" + svc.path + "/default" }
+
+func (s *Server) putService(svc *service) handler {
+	return func(c *call) (*reply, *apiError) {
+		p, err := parseBody(c, svc.kind)
+		if err != nil {
+			return nil, err
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		res, err := s.writableAccount(c, svc.kind)
+		if err != nil {
+			return nil, err
+		}
+		if svc.replace || res.account.services[svc.path] == nil {
+			res.account.services[svc.path] = map[string]any{}
+		}
+		maps.Copy(res.account.services[svc.path], p.props)
+		return ok200(svc.body(c, res)), nil
 	}
-	return ok200(blobServiceBody(c, res)), nil
 }
 
-func blobServiceBody(c *call, res *resource) map[string]any {
-	props := maps.Clone(res.account.blob)
+func (s *Server) getService(svc *service) handler {
+	return func(c *call) (*reply, *apiError) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		res, err := s.account(c)
+		if err != nil {
+			return nil, err
+		}
+		return ok200(svc.body(c, res)), nil
+	}
+}
+
+func (svc *service) body(c *call, res *resource) map[string]any {
+	props := maps.Clone(res.account.services[svc.path])
+	if props == nil {
+		props = map[string]any{}
+	}
 	if _, ok := props["cors"]; !ok {
 		props["cors"] = map[string]any{"corsRules": []any{}}
 	}
-	m := map[string]any{"id": blobServiceID(c), "name": "default", "type": blobServiceKind.typ, "properties": props}
+	m := map[string]any{"id": svc.id(c), "name": "default", "type": svc.kind.typ, "properties": props}
 	if sku, _ := res.top["sku"].(map[string]any); sku != nil {
 		m["sku"] = renderSKU(sku)
 	}
 	return m
 }
 
-func containerNotFound() *apiError {
-	return newError(http.StatusNotFound, "ContainerNotFound", "The specified container does not exist.")
+// child is a resource of a storage account service, such as a blob container.
+type child struct {
+	kind    *kind
+	service *service
+	// exists and notFound are the errors the service answers for a create of
+	// one that exists and a read of one that does not.
+	exists, notFound func() *apiError
+	render           func(*resource) map[string]any
 }
 
-func (s *Server) putContainer(c *call) (*reply, *apiError) {
-	p, err := parseBody(c, containerKind)
-	if err != nil {
-		return nil, err
+var (
+	containers = &child{
+		kind: containerKind, service: blobService, render: renderContainer,
+		exists: func() *apiError {
+			return newError(http.StatusConflict, "ContainerAlreadyExists", "The specified container already exists.")
+		},
+		notFound: func() *apiError {
+			return newError(http.StatusNotFound, "ContainerNotFound", "The specified container does not exist.")
+		},
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, err := s.writableAccount(c, containerKind); err != nil {
-		return nil, err
+	shares = &child{
+		kind: shareKind, service: fileService, render: renderShare,
+		exists: func() *apiError {
+			return newError(http.StatusConflict, "ShareAlreadyExists", "The specified share already exists.")
+		},
+		notFound: func() *apiError {
+			return newError(http.StatusNotFound, "ShareNotFound", "The specified share does not exist.")
+		},
 	}
-	id := containerID(c)
-	if s.resources[key(id)] != nil {
-		return nil, newError(http.StatusConflict, "ContainerAlreadyExists", "The specified container already exists.")
-	}
-	res := s.newResource(c, containerKind, id, p)
-	s.resources[key(id)] = res
-	return &reply{status: http.StatusCreated, body: encode(renderContainer(res))}, nil
-}
+)
 
-func (s *Server) getContainer(c *call) (*reply, *apiError) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, err := s.account(c); err != nil {
-		return nil, err
-	}
-	res := s.resources[key(containerID(c))]
-	if res == nil {
-		return nil, containerNotFound()
-	}
-	return ok200(renderContainer(res)), nil
-}
+func (ch *child) prefix(c *call) string { return ch.service.id(c) + "/" + ch.kind.plural + "/" }
 
-func (s *Server) listContainers(c *call) (*reply, *apiError) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, err := s.account(c); err != nil {
-		return nil, err
-	}
-	prefix := key(blobServiceID(c)) + "/containers/"
-	var items []*resource
-	for k, res := range s.resources {
-		if res.kind == containerKind && strings.HasPrefix(k, prefix) {
-			items = append(items, res)
+func (ch *child) id(c *call) string { return ch.prefix(c) + c.val("name") }
+
+func (s *Server) putChild(ch *child) handler {
+	return func(c *call) (*reply, *apiError) {
+		p, err := parseBody(c, ch.kind)
+		if err != nil {
+			return nil, err
 		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if _, err := s.writableAccount(c, ch.kind); err != nil {
+			return nil, err
+		}
+		id := ch.id(c)
+		if s.resources[key(id)] != nil {
+			return nil, ch.exists()
+		}
+		res := s.newResource(c, ch.kind, id, p)
+		s.resources[key(id)] = res
+		return &reply{status: http.StatusCreated, body: encode(ch.render(res))}, nil
 	}
-	slices.SortFunc(items, func(a, b *resource) int { return cmp.Compare(key(a.name), key(b.name)) })
-	return ok(listBody(items, func(res *resource) any { return renderContainer(res) })), nil
 }
 
-func (s *Server) deleteContainer(c *call) (*reply, *apiError) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, err := s.writableAccount(c, containerKind); err != nil {
-		return nil, err
+func (s *Server) getChild(ch *child) handler {
+	return func(c *call) (*reply, *apiError) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if _, err := s.account(c); err != nil {
+			return nil, err
+		}
+		res := s.resources[key(ch.id(c))]
+		if res == nil {
+			return nil, ch.notFound()
+		}
+		return ok200(ch.render(res)), nil
 	}
-	res := s.resources[key(containerID(c))]
-	if res == nil {
-		return &reply{status: http.StatusNoContent}, nil
-	}
-	s.remove(res)
-	return &reply{status: http.StatusOK}, nil
 }
 
-func renderContainer(res *resource) map[string]any {
+func (s *Server) listChildren(ch *child) handler {
+	return func(c *call) (*reply, *apiError) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if _, err := s.account(c); err != nil {
+			return nil, err
+		}
+		prefix := key(ch.prefix(c))
+		var items []*resource
+		for k, res := range s.resources {
+			if res.kind == ch.kind && strings.HasPrefix(k, prefix) {
+				items = append(items, res)
+			}
+		}
+		slices.SortFunc(items, func(a, b *resource) int { return cmp.Compare(key(a.name), key(b.name)) })
+		return ok(listBody(items, func(res *resource) any { return ch.render(res) })), nil
+	}
+}
+
+func (s *Server) deleteChild(ch *child) handler {
+	return func(c *call) (*reply, *apiError) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if _, err := s.writableAccount(c, ch.kind); err != nil {
+			return nil, err
+		}
+		res := s.resources[key(ch.id(c))]
+		if res == nil {
+			return &reply{status: http.StatusNoContent}, nil
+		}
+		s.remove(res)
+		return &reply{status: http.StatusOK}, nil
+	}
+}
+
+// renderLeased renders a container or share with the lease and deletion state of one in use.
+func renderLeased(res *resource) (map[string]any, map[string]any) {
 	m, props := envelope(res)
 	delete(props, "provisioningState")
-	if _, ok := props["publicAccess"]; !ok {
-		props["publicAccess"] = "None"
-	}
 	props["deleted"] = false
-	props["hasImmutabilityPolicy"] = false
-	props["hasLegalHold"] = false
 	props["lastModifiedTime"] = timestamp(res.created)
 	props["leaseState"] = "Available"
 	props["leaseStatus"] = "Unlocked"
 	props["remainingRetentionDays"] = 0
+	return m, props
+}
+
+func renderContainer(res *resource) map[string]any {
+	m, props := renderLeased(res)
+	if _, ok := props["publicAccess"]; !ok {
+		props["publicAccess"] = "None"
+	}
+	props["hasImmutabilityPolicy"] = false
+	props["hasLegalHold"] = false
+	return m
+}
+
+func renderShare(res *resource) map[string]any {
+	m, props := renderLeased(res)
+	if _, ok := props["enabledProtocols"]; !ok {
+		props["enabledProtocols"] = "SMB"
+	}
 	return m
 }
 

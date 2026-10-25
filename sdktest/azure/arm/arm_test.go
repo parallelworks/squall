@@ -56,6 +56,9 @@ type clients struct {
 	accounts   *armstorage.AccountsClient
 	blob       *armstorage.BlobServicesClient
 	containers *armstorage.BlobContainersClient
+	files      *armstorage.FileServicesClient
+	shares     *armstorage.FileSharesClient
+	endpoints  *armnetwork.PrivateEndpointsClient
 	requests   *[]string
 }
 
@@ -116,6 +119,7 @@ func setupWith(t *testing.T, retry policy.RetryOptions, opts ...arm.Option) *cli
 		nics: network.NewInterfacesClient(), pips: network.NewPublicIPAddressesClient(), nsgs: network.NewSecurityGroupsClient(),
 		zones: dns.NewPrivateZonesClient(), links: dns.NewVirtualNetworkLinksClient(), records: dns.NewRecordSetsClient(),
 		accounts: store.NewAccountsClient(), blob: store.NewBlobServicesClient(), containers: store.NewBlobContainersClient(),
+		files: store.NewFileServicesClient(), shares: store.NewFileSharesClient(), endpoints: network.NewPrivateEndpointsClient(),
 		requests: requests,
 	}
 }
