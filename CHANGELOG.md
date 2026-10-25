@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.0](https://github.com/parallelworks/squall/compare/v0.10.0...v0.11.0) (2026-10-25)
+
+
+### Features
+
+* **arm:** Azure Files shares and private endpoints ([#33](https://github.com/parallelworks/squall/issues/33)) ([f6119b6](https://github.com/parallelworks/squall/commit/f6119b62c825abc66b8680d38baf3812c98c7c60))
+
 ## [0.10.0](https://github.com/parallelworks/squall/compare/v0.9.1...v0.10.0) (2026-10-25)
 
 
