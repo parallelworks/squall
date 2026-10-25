@@ -19,6 +19,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v9"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/privatedns/armprivatedns"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources/v3"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/storage/armstorage"
 
 	"github.com/parallelworks/squall/azure/arm"
 	"github.com/parallelworks/squall/fault"
@@ -40,19 +41,22 @@ func (credential) GetToken(context.Context, policy.TokenRequestOptions) (azcore.
 }
 
 type clients struct {
-	server   *arm.Server
-	groups   *armresources.ResourceGroupsClient
-	vms      *armcompute.VirtualMachinesClient
-	sets     *armcompute.VirtualMachineScaleSetsClient
-	setVMs   *armcompute.VirtualMachineScaleSetVMsClient
-	skus     *armcompute.ResourceSKUsClient
-	nics     *armnetwork.InterfacesClient
-	pips     *armnetwork.PublicIPAddressesClient
-	nsgs     *armnetwork.SecurityGroupsClient
-	zones    *armprivatedns.PrivateZonesClient
-	links    *armprivatedns.VirtualNetworkLinksClient
-	records  *armprivatedns.RecordSetsClient
-	requests *[]string
+	server     *arm.Server
+	groups     *armresources.ResourceGroupsClient
+	vms        *armcompute.VirtualMachinesClient
+	sets       *armcompute.VirtualMachineScaleSetsClient
+	setVMs     *armcompute.VirtualMachineScaleSetVMsClient
+	skus       *armcompute.ResourceSKUsClient
+	nics       *armnetwork.InterfacesClient
+	pips       *armnetwork.PublicIPAddressesClient
+	nsgs       *armnetwork.SecurityGroupsClient
+	zones      *armprivatedns.PrivateZonesClient
+	links      *armprivatedns.VirtualNetworkLinksClient
+	records    *armprivatedns.RecordSetsClient
+	accounts   *armstorage.AccountsClient
+	blob       *armstorage.BlobServicesClient
+	containers *armstorage.BlobContainersClient
+	requests   *[]string
 }
 
 // setup serves a new server and returns clients for it that do not retry,
@@ -101,12 +105,17 @@ func setupWith(t *testing.T, retry policy.RetryOptions, opts ...arm.Option) *cli
 	if err != nil {
 		t.Fatal(err)
 	}
+	store, err := armstorage.NewClientFactory(subscription, credential{}, options)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return &clients{
 		server: s, groups: resources.NewResourceGroupsClient(),
 		vms: compute.NewVirtualMachinesClient(), sets: compute.NewVirtualMachineScaleSetsClient(),
 		setVMs: compute.NewVirtualMachineScaleSetVMsClient(), skus: compute.NewResourceSKUsClient(),
 		nics: network.NewInterfacesClient(), pips: network.NewPublicIPAddressesClient(), nsgs: network.NewSecurityGroupsClient(),
 		zones: dns.NewPrivateZonesClient(), links: dns.NewVirtualNetworkLinksClient(), records: dns.NewRecordSetsClient(),
+		accounts: store.NewAccountsClient(), blob: store.NewBlobServicesClient(), containers: store.NewBlobContainersClient(),
 		requests: requests,
 	}
 }

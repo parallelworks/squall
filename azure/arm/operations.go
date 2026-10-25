@@ -22,8 +22,10 @@ type operation struct {
 	statusPath string
 	// resultPath answers the Location pattern.
 	resultPath string
-	// resultStatus answers a poll of resultPath once the operation succeeds.
+	// resultStatus answers a poll of resultPath once the operation succeeds,
+	// with result's body when it is 200 and result is set.
 	resultStatus int
+	result       func() []byte
 	// pollStatus answers a poll of statusPath while the operation runs.
 	pollStatus int
 	status     string
@@ -45,11 +47,13 @@ type opStatusBody struct {
 	Error     *errorDetail `json:"error,omitzero"`
 }
 
-// opPaths are the polling paths of an operation, before its ID, and the
-// status a poll of its status path answers while it runs, if not 200.
+// opPaths are the polling paths of an operation, before its ID, the status
+// a poll of its status path answers while it runs, if not 200, and the status
+// a poll of its result path answers once it succeeds, if not 204.
 type opPaths struct {
 	status, result string
 	pollStatus     int
+	resultStatus   int
 }
 
 func providerOps(c *call, namespace, location string) opPaths {
@@ -67,7 +71,7 @@ func networkOps(c *call, location string) opPaths {
 
 func dnsOps(c *call) opPaths {
 	prefix := "/subscriptions/" + c.val("sub") + "/resourceGroups/" + c.val("rg") + "/providers/Microsoft.Network/"
-	return opPaths{prefix + "privateDnsOperationStatuses/", prefix + "privateDnsOperationResults/", http.StatusAccepted}
+	return opPaths{status: prefix + "privateDnsOperationStatuses/", result: prefix + "privateDnsOperationResults/", pollStatus: http.StatusAccepted}
 }
 
 func groupOps(c *call) opPaths {
@@ -81,7 +85,7 @@ func groupOps(c *call) opPaths {
 func (s *Server) begin(c *call, paths opPaths, resultStatus int, complete func() *apiError) *operation {
 	id := s.newUUID()
 	op := &operation{
-		id: id, resultPath: paths.result + id, resultStatus: cmp.Or(resultStatus, http.StatusNoContent),
+		id: id, resultPath: paths.result + id, resultStatus: cmp.Or(resultStatus, paths.resultStatus, http.StatusNoContent),
 		pollStatus: cmp.Or(paths.pollStatus, http.StatusOK), start: s.now(),
 	}
 	if paths.status != "" {
@@ -261,5 +265,9 @@ func (s *Server) operationResult(c *call) (*reply, *apiError) {
 	case opFailed, opCanceled:
 		return nil, op.err
 	}
-	return &reply{status: op.resultStatus}, nil
+	rep := &reply{status: op.resultStatus}
+	if op.resultStatus == http.StatusOK && op.result != nil {
+		rep.body = op.result()
+	}
+	return rep, nil
 }
