@@ -42,6 +42,10 @@ var linkedActions = map[string][]link{
 		linkAt("Microsoft.Network/publicIPAddresses/join/action", "properties.ipConfigurations.[].properties.publicIPAddress.id"),
 		linkAt("Microsoft.Network/networkSecurityGroups/join/action", "properties.networkSecurityGroup.id"),
 	},
+	"Microsoft.Network/privateEndpoints/write": {
+		linkAt("Microsoft.Network/virtualNetworks/subnets/join/action", "properties.subnet.id"),
+		linkAt(approvalAction, "properties.privateLinkServiceConnections.[].properties.privateLinkServiceId"),
+	},
 	"Microsoft.Network/privateDnsZones/virtualNetworkLinks/write": {
 		linkAt("Microsoft.Network/virtualNetworks/join/action", "properties.virtualNetwork.id"),
 	},
@@ -96,8 +100,11 @@ func needs(rt *route, r *http.Request) (string, []scoped) {
 	for _, l := range links {
 		for _, id := range idsAt(doc, l.path) {
 			a := l.action
-			if a == imageRead {
+			switch a {
+			case imageRead:
 				a = imageAction(id)
+			case approvalAction:
+				a = connectionApproval(id)
 			}
 			if !slices.Contains(linked, scoped{a, id}) {
 				linked = append(linked, scoped{a, id})

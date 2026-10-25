@@ -186,6 +186,8 @@ func (s *Server) putNetwork(k *kind) handler {
 		spec.prepare = s.prepareNIC
 	case pipKind:
 		spec.prepare = s.preparePIP
+	case peKind:
+		spec.prepare = s.preparePE
 	}
 	return s.put(spec)
 }
@@ -516,6 +518,8 @@ func (s *Server) renderNetwork(res *resource) map[string]any {
 		if user := s.pipUser(res.id); user != "" {
 			props["ipConfiguration"] = ref(user)
 		}
+	case peKind:
+		renderPE(res, props)
 	}
 	return m
 }
