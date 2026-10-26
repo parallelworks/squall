@@ -83,9 +83,13 @@ jobs:
           go-version-file: ${{ matrix.go == 'minimum' && 'go.mod' || '' }}
           check-latest: ${{ matrix.go == 'stable' }}
       - name: Test
+        env:
+          # Compiling msgraph-sdk-go's models with -race peaks near 5 GB, so on
+          # the 7 GB macOS runners parallel builds swap until the job times out.
+          SDKTEST_PARALLEL: ${{ runner.os == 'macOS' && '1' || '4' }}
         run: |
           go test -race -shuffle=on -cover -timeout 10m ./...
-          (cd sdktest && go test -race -shuffle=on -coverpkg=github.com/parallelworks/squall/... -timeout 10m ./...)
+          (cd sdktest && go test -race -shuffle=on -p "$SDKTEST_PARALLEL" -coverpkg=github.com/parallelworks/squall/... -timeout 10m ./...)
 
   fuzz:
     runs-on: ubuntu-latest
