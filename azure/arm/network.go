@@ -163,6 +163,7 @@ func (s *Server) put(spec putSpec) handler {
 		paths := spec.paths(c, p.location)
 		if c.opFault != nil {
 			op := s.begin(c, paths, 0, nil)
+			op.target, op.state = res.id, state
 			return answer(op, func() []byte { return withState(res, state, render) }), nil
 		}
 		commit()
@@ -427,6 +428,8 @@ func (s *Server) checkUnused(res *resource) *apiError {
 		if res.nic.vm != "" {
 			return nicInUse(res.id, res.nic.vm)
 		}
+	case netappAccountKind, poolKind:
+		return s.netappInUse(res)
 	}
 	return nil
 }

@@ -31,7 +31,9 @@
 //   - Microsoft.Storage: storage accounts (create, get, list in a group or
 //     subscription, list keys and delete), name availability checks, the
 //     blob and file services' properties (set and get), and blob containers
-//     and file shares (create, get, list and delete).
+//     and file shares (create, get, list and delete);
+//   - Microsoft.NetApp: accounts, capacity pools and volumes (create or
+//     update, get, list in their group, account or pool, and delete).
 //
 // Other calls answer 404. Every call needs an api-version, which may be any
 // value, and a bearer token, which is not checked. Where it differs from
@@ -131,6 +133,19 @@
 //     deleting the endpoint deletes it. The interface can be deleted on its
 //     own, which Azure refuses. An automatic connection
 //     (privateLinkServiceConnections) is Approved and a manual one Pending.
+//   - A NetApp change in progress answers with an Azure-AsyncOperation URL
+//     under Microsoft.NetApp/locations/{location}/operationResults, whose
+//     status reads as the state the resource shows, such as Creating or
+//     Deleting, until it succeeds; a delete also answers a Location URL, the
+//     same path with operationResultResponseType=Location, which answers 200
+//     with no body once it is done. NetApp names a pool account/pool and a
+//     volume account/pool/volume. A new pool shows a poolId, and a new volume
+//     a fileSystemId and a mount target with an address in its subnetId, once
+//     created. A pool needs serviceLevel and size, and a volume
+//     creationToken, subnetId and usageThreshold; their values are not
+//     checked. Deleting an account or pool that holds pools or volumes fails
+//     with 409 CannotDeleteResource, as Azure refuses it; the code is
+//     inferred. An update's status, Updating, is inferred too.
 //
 // Fault method names are the operation's Azure RBAC action, such as
 // "Microsoft.Compute/virtualMachines/write",
@@ -161,7 +176,9 @@
 // inferred from the LinkedAuthorizationFailed it reports for other services. Polling a Microsoft.Compute
 // operation result needs Microsoft.Compute/locations/operations/read, as
 // Microsoft.Compute defines no operationResults action, and polling a
-// Microsoft.Storage operation needs Microsoft.Storage/operations/read. Actions are not
+// Microsoft.Storage operation needs Microsoft.Storage/operations/read, and
+// polling a Microsoft.NetApp one needs
+// Microsoft.NetApp/locations/operationresults/read. Actions are not
 // checked against the scope they act on: a grant covers every subscription.
 //
 // A lost response aborts the handler with [http.ErrAbortHandler] after
@@ -370,6 +387,7 @@ func (s *Server) registerRoutes() {
 
 	s.add("GET", sub+"/providers/Microsoft.Compute/skus", "Microsoft.Compute/skus/read", false, s.listSKUs)
 	s.registerStorageRoutes()
+	s.registerNetAppRoutes()
 }
 
 func (s *Server) add(method, pattern, action string, lro bool, h handler) {

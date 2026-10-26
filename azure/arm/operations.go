@@ -33,6 +33,9 @@ type operation struct {
 	start, end time.Time
 	// wait is how many more reads see the operation in progress.
 	wait int
+	// target is the ID of the resource the operation changes, and state the
+	// provisioning state it shows while the operation runs.
+	target, state string
 	// complete applies the call's effect, returning the error the operation
 	// ends in if it fails; it is nil once the operation is done.
 	complete func() *apiError
