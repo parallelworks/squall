@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0](https://github.com/parallelworks/squall/compare/v0.16.0...v0.17.0) (2026-10-26)
+
+
+### Features
+
+* **azure:** public load balancers with backend pools and outbound rules ([#46](https://github.com/parallelworks/squall/issues/46)) ([6f439aa](https://github.com/parallelworks/squall/commit/6f439aa8a568f78ecae94b56282370528a37f80a))
+
 ## [0.16.0](https://github.com/parallelworks/squall/compare/v0.15.0...v0.16.0) (2026-10-26)
 
 
