@@ -24,7 +24,7 @@ failure replays from its seed.
 | [`access`](https://pkg.go.dev/github.com/parallelworks/squall/access) | Grants a set of permissions (Google Cloud IAM permissions, AWS IAM actions or Azure RBAC actions) and refuses calls that need one it lacks, with the error the cloud answers, including those a request's fields add and Azure's linked checks. Reports which permissions were needed but missing and which were granted but never used. |
 | [`aws/ec2`](https://pkg.go.dev/github.com/parallelworks/squall/aws/ec2) | Amazon EC2: instances (run with client tokens, describe with filters and pages, start, stop, terminate, change type), images (describe, register from snapshots, deregister), instance types, EBS volumes (create, describe, attach, detach, delete), EBS snapshots (create, describe with filters and pages, delete), placement groups, tags, Elastic IP addresses (allocate, describe, release, associate with an interface or instance, disassociate) and network interfaces (create with client tokens, describe, delete). |
 | [`aws/s3`](https://pkg.go.dev/github.com/parallelworks/squall/aws/s3) | Amazon S3: general purpose buckets (create, head, list with pages and filters, delete), their tags, versioning, policy and CORS rules, and objects (put, delete one or many, list versions and delete markers). |
-| [`azure/arm`](https://pkg.go.dev/github.com/parallelworks/squall/azure/arm) | Azure Resource Manager: resource groups (get, create or update, list with tag filters, delete with everything in them that nothing outside uses), virtual machines (create or update, get, list, instance view, deallocate, start, delete), Uniform scale sets (create or update, update, get, list, delete, delete instances) and their VMs, virtual networks and their subnets, NAT gateways, network security groups, network interfaces and public IP addresses, the IP configurations of scale set VMs, private DNS zones, virtual network links and A record sets, and long-running operations to poll. |
+| [`azure/arm`](https://pkg.go.dev/github.com/parallelworks/squall/azure/arm) | Azure Resource Manager: resource groups (get, create or update, list with tag filters, delete with everything in them that nothing outside uses), virtual machines (create or update, get, list, instance view, deallocate, start, delete), Uniform scale sets (create or update, update, get, list, delete, delete instances) and their VMs, virtual networks and their subnets, NAT gateways, public load balancers with backend pools and outbound rules, network security groups, network interfaces and public IP addresses, the IP configurations of scale set VMs, private DNS zones, virtual network links and A record sets, and long-running operations to poll. |
 | [`azure/graph`](https://pkg.go.dev/github.com/parallelworks/squall/azure/graph) | Microsoft Graph: a directory's domains (list) and users (create with Microsoft Entra's name and password rules, get by ID or user principal name, delete), with application permissions checked as Graph documents them. |
 | [`gcp/compute`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/compute) | Compute Engine: instances (bulkInsert, insert, get, list, aggregatedList, delete, stop, start, setLabels, setMachineType, addAccessConfig, attachDisk, detachDisk), disks (get, list, aggregatedList, insert, delete), snapshots (insert, get, list, delete), zones, regional addresses (get, list, insert, delete, setLabels), resource policies, instance templates, routes, and zone, region and global operations (get, wait). |
 | [`gcp/storage`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/storage) | Cloud Storage: buckets (insert, get, list, patch labels, versioning and CORS, delete) and objects (multipart and media uploads, list with versions, delete by generation). |
@@ -265,6 +265,16 @@ For Azure Resource Manager:
   created; `WithPrivateRange` and `WithPublicRange` change the ranges. Once a
   range is used up, a change that needs an address fails with `SubnetIsFull` or
   `PublicIPCountLimitReached`. OS disks get names and IDs but are not served.
+- A public load balancer's outbound rule gives SNAT ports in multiples of 8
+  (`SpecifiedAllocatedOutboundPortsForOutboundRuleIsNotAMultipleOfEight`), and
+  the write that would ask more of its frontends than 64,000 ports per public
+  IP address, shared among the primary IP configurations in its backend pool
+  (each scale set VM counts), fails with
+  `SpecifiedAllocatedOutboundPortsForOutboundRuleExceedsTotalNumberOfAvailablePorts`:
+  the load balancer's, or the scale set or interface write that grows the
+  pool. A load balancer whose pool a scale set uses cannot be deleted
+  (`LoadBalancerInUseByVirtualMachineScaleSet`). Load balancing rules, probes
+  and inbound NAT rules are not modeled.
 - Scale set VMs are numbered from 0 without reuse; raising `sku.capacity`
   creates them with their interfaces and addresses, and lowering it deletes the
   newest. A PUT to an existing scale set that leaves out `sku` keeps the

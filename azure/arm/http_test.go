@@ -252,3 +252,99 @@ func TestSubnetAndNATGatewayShapes(t *testing.T) {
 		t.Fatalf("delete NAT gateway = %d %v", rec.Code, rec.Header())
 	}
 }
+
+// A load balancer answers as Azure's does: 201 then 200 with an
+// Azure-AsyncOperation URL, its frontend IP configurations, backend pools and
+// outbound rules rendered as children that reference one another, and the
+// public IP address of its frontend naming the frontend as its
+// ipConfiguration; its deletion answers 202 with both polling URLs.
+func TestLoadBalancerShapes(t *testing.T) {
+	s := arm.New(arm.WithSettleAfter(-1))
+	newGroup(t, s)
+	const (
+		network = groupPath + "/providers/Microsoft.Network"
+		pip     = network + "/publicIPAddresses/lb-ip"
+		lb      = network + "/loadBalancers/lb"
+	)
+	do(t, s, http.MethodPut, pip, `{"location":"westus"}`)
+	s.Settle()
+	body := `{"location":"westus","sku":{"name":"Standard"},"properties":{
+		"frontendIPConfigurations":[{"name":"fe","properties":{"publicIPAddress":{"id":"` + pip + `"}}}],
+		"backendAddressPools":[{"name":"pool"}],
+		"outboundRules":[{"name":"out","properties":{"protocol":"All","allocatedOutboundPorts":1024,
+			"backendAddressPool":{"id":"` + lb + `/backendAddressPools/pool"},"frontendIPConfigurations":[{"id":"` + lb + `/frontendIPConfigurations/fe"}]}}]}}`
+	for i, want := range []int{http.StatusCreated, http.StatusOK} {
+		rec, got := do(t, s, http.MethodPut, lb, body)
+		props, _ := got["properties"].(map[string]any)
+		if rec.Code != want || !strings.Contains(rec.Header().Get("Azure-AsyncOperation"), "/providers/Microsoft.Network/locations/westus/operations/") ||
+			fmt.Sprint(got["sku"]) != "map[name:Standard tier:Regional]" || fmt.Sprint(props["probes"]) != "[]" {
+			t.Fatalf("put load balancer %d = %d %v %v", i, rec.Code, rec.Header(), got)
+		}
+		s.Settle()
+	}
+	_, got := do(t, s, http.MethodGet, lb, "")
+	props := got["properties"].(map[string]any)
+	fe := props["frontendIPConfigurations"].([]any)[0].(map[string]any)
+	pool := props["backendAddressPools"].([]any)[0].(map[string]any)
+	rule := props["outboundRules"].([]any)[0].(map[string]any)
+	ruleProps := rule["properties"].(map[string]any)
+	if fe["id"] != lb+"/frontendIPConfigurations/fe" || fe["type"] != "Microsoft.Network/loadBalancers/frontendIPConfigurations" || fe["etag"] != got["etag"] ||
+		fmt.Sprint(fe["properties"].(map[string]any)["outboundRules"]) != "[map[id:"+lb+"/outboundRules/out]]" ||
+		pool["type"] != "Microsoft.Network/loadBalancers/backendAddressPools" ||
+		fmt.Sprint(pool["properties"].(map[string]any)["outboundRules"]) != "[map[id:"+lb+"/outboundRules/out]]" ||
+		rule["type"] != "Microsoft.Network/loadBalancers/outboundRules" || ruleProps["idleTimeoutInMinutes"] != float64(4) ||
+		ruleProps["enableTcpReset"] != false || ruleProps["provisioningState"] != "Succeeded" {
+		t.Fatalf("load balancer = %v", got)
+	}
+	_, got = do(t, s, http.MethodGet, pip, "")
+	if ip := got["properties"].(map[string]any)["ipConfiguration"]; fmt.Sprint(ip) != "map[id:"+lb+"/frontendIPConfigurations/fe]" {
+		t.Fatalf("public IP ipConfiguration = %v", ip)
+	}
+	if rec, got := do(t, s, http.MethodDelete, pip, ""); rec.Code != http.StatusBadRequest || errorCode(got) != "PublicIPAddressCannotBeDeleted" {
+		t.Fatalf("delete public IP in use = %d %v", rec.Code, got)
+	}
+	rec, _ := do(t, s, http.MethodDelete, lb, "")
+	if rec.Code != http.StatusAccepted || rec.Header().Get("Azure-AsyncOperation") == "" ||
+		!strings.Contains(rec.Header().Get("Location"), "/providers/Microsoft.Network/locations/westus/operationResults/") {
+		t.Fatalf("delete load balancer = %d %v", rec.Code, rec.Header())
+	}
+}
+
+// An outbound rule's references must name children of its own load
+// balancer, and its ports must come in multiples of 8 and no more than 64,000.
+func TestOutboundRulesAreChecked(t *testing.T) {
+	s := arm.New()
+	newGroup(t, s)
+	const (
+		network = groupPath + "/providers/Microsoft.Network"
+		pip     = network + "/publicIPAddresses/lb-ip"
+		lb      = network + "/loadBalancers/lb"
+	)
+	do(t, s, http.MethodPut, pip, `{"location":"eastus"}`)
+	put := func(pool string, ports int) map[string]any {
+		_, got := do(t, s, http.MethodPut, lb, fmt.Sprintf(`{"location":"eastus","properties":{
+			"frontendIPConfigurations":[{"name":"fe","properties":{"publicIPAddress":{"id":"%s"}}}],
+			"backendAddressPools":[{"name":"pool"}],
+			"outboundRules":[{"name":"out","properties":{"protocol":"Tcp","allocatedOutboundPorts":%d,
+				"backendAddressPool":{"id":"%s"},"frontendIPConfigurations":[{"id":"%s/frontendIPConfigurations/fe"}]}}]}}`, pip, ports, pool, lb))
+		return got
+	}
+	for _, tc := range []struct {
+		pool  string
+		ports int
+		want  string
+	}{
+		{lb + "/backendAddressPools/none", 1024, "InvalidResourceReference"},
+		{lb + "/backendAddressPools/pool", 1004, "SpecifiedAllocatedOutboundPortsForOutboundRuleIsNotAMultipleOfEight"},
+		{lb + "/backendAddressPools/pool", 64_008, "SpecifiedAllocatedOutboundPortsForOutboundRuleExceedsTotalNumberOfAllowedPortsPerRule"},
+	} {
+		if got := put(tc.pool, tc.ports); errorCode(got) != tc.want {
+			t.Errorf("rule with pool %s and %d ports = %v, want %s", tc.pool, tc.ports, got, tc.want)
+		}
+	}
+	got := put(lb+"/backendAddressPools/pool", 0)
+	rule := got["properties"].(map[string]any)["outboundRules"].([]any)[0].(map[string]any)
+	if ports := rule["properties"].(map[string]any)["allocatedOutboundPorts"]; ports != float64(1024) {
+		t.Fatalf("default allocation for an empty pool = %v, want 1024", got)
+	}
+}
