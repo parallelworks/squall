@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.0](https://github.com/parallelworks/squall/compare/v0.12.0...v0.13.0) (2026-10-26)
+
+
+### Features
+
+* **arm:** Azure Managed Lustre file systems ([#37](https://github.com/parallelworks/squall/issues/37)) ([d906553](https://github.com/parallelworks/squall/commit/d9065531e84b3de607d2fd85065a7d2bcc7b0bb7))
+
 ## [0.12.0](https://github.com/parallelworks/squall/compare/v0.11.0...v0.12.0) (2026-10-26)
 
 
