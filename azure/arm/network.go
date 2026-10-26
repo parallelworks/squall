@@ -203,11 +203,19 @@ func (s *Server) put(spec putSpec) handler {
 func (s *Server) putNetwork(k *kind) handler {
 	spec := putSpec{
 		kind:   k,
-		id:     func(c *call) string { return resourceID(c, k.typ, c.val("name")) },
+		id:     func(c *call) string { return networkID(c, k) },
 		paths:  networkOps,
 		render: s.renderNetwork,
 	}
 	switch k {
+	case vnetKind:
+		spec.prepare = s.prepareVNet
+	case subnetKind:
+		spec.parent = vnetID
+		spec.paths = func(c *call, _ string) opPaths { return networkOps(c, s.resources[key(vnetID(c))].loc) }
+		spec.prepare = s.prepareSubnet
+	case natKind:
+		spec.prepare = s.prepareNAT
 	case nicKind:
 		spec.prepare = s.prepareNIC
 	case pipKind:
@@ -268,7 +276,7 @@ func (s *Server) prepareNIC(res *resource, p *parsed) (func(), *apiError) {
 	}
 	var subnets []string
 	for _, ic := range configs {
-		if !ic.static || s.private.contains(ic.address) {
+		if !ic.static || s.subnetPool(ic.subnet).contains(ic.address) {
 			subnets = append(subnets, ic.subnet)
 		}
 	}
@@ -404,9 +412,16 @@ func (s *Server) getResource(k *kind) handler {
 		if err := s.readableGroup(c); err != nil {
 			return nil, err
 		}
-		res := s.read(resourceID(c, k.typ, c.val("name")))
+		typ, name := k.typ, c.val("name")
+		if k == subnetKind {
+			if vnet := s.read(vnetID(c)); vnet == nil || vnet.kind != vnetKind {
+				return nil, resourceNotFound(vnetKind.typ, c.val("vnet"), c.val("rg"))
+			}
+			typ, name = vnetKind.typ, c.val("vnet")+"/subnets/"+name
+		}
+		res := s.read(networkID(c, k))
 		if res == nil || res.kind != k {
-			return nil, resourceNotFound(k.typ, c.val("name"), c.val("rg"))
+			return nil, resourceNotFound(typ, name, c.val("rg"))
 		}
 		return ok200(s.renderNetwork(res)), nil
 	}
@@ -419,7 +434,7 @@ func (s *Server) deleteNetwork(k *kind) handler {
 		if err := s.writableGroup(c); err != nil {
 			return nil, err
 		}
-		res, err := s.claim(resourceID(c, k.typ, c.val("name")), "")
+		res, err := s.claim(networkID(c, k), "")
 		if err != nil {
 			return nil, err
 		}
@@ -429,7 +444,11 @@ func (s *Server) deleteNetwork(k *kind) handler {
 		if err := s.checkUnused(res); err != nil {
 			return nil, err
 		}
-		op := s.change(c, res, networkOps(c, res.loc), http.StatusNoContent, stateDeleting, func() { s.remove(res) })
+		location := res.loc
+		if k == subnetKind {
+			location = s.resources[key(parentVNet(res.id))].loc
+		}
+		op := s.change(c, res, networkOps(c, location), http.StatusNoContent, stateDeleting, func() { s.remove(res) })
 		return accepted(c, op, http.StatusOK, http.StatusAccepted, true, noBody), nil
 	}
 }
@@ -438,7 +457,7 @@ func (s *Server) deleteNetwork(k *kind) handler {
 func (s *Server) checkUnused(res *resource) *apiError {
 	switch res.kind {
 	case nsgKind:
-		if users := s.nsgUsers(res.id); len(users) > 0 {
+		if users := slices.Concat(s.nsgUsers(res.id), s.subnetsUsing(res.id, subnetNSG)); len(users) > 0 {
 			return newError(http.StatusBadRequest, "InUseNetworkSecurityGroupCannotBeDeleted",
 				"Network security group %s cannot be deleted because it is in use by the following resources: %s. In order to delete the Network security group, remove the association with the resource(s). To learn how to do this, see aka.ms/deletensg.",
 				res.id, strings.Join(users, ", "))
@@ -452,6 +471,22 @@ func (s *Server) checkUnused(res *resource) *apiError {
 	case nicKind:
 		if res.nic.vm != "" {
 			return nicInUse(res.id, res.nic.vm)
+		}
+	case subnetKind:
+		if user := s.subnetUser(res.id); user != "" {
+			return subnetInUse(res.name, user)
+		}
+	case vnetKind:
+		for _, sn := range s.subnetsOf(res) {
+			if user := s.subnetUser(sn.id); user != "" {
+				return subnetInUse(sn.name, user)
+			}
+		}
+	case natKind:
+		if users := s.subnetsUsing(res.id, subnetNAT); len(users) > 0 {
+			return newError(http.StatusBadRequest, "InUseNatGatewayCannotBeDeleted",
+				"Nat Gateway %s cannot be deleted because it is in use by the following resources: %s. In order to delete the Nat Gateway, remove the association with the resource(s).",
+				res.id, strings.Join(users, ", "))
 		}
 	case netappAccountKind, poolKind:
 		return s.netappInUse(res)
@@ -489,8 +524,8 @@ func (s *Server) nsgUsers(id string) []string {
 	return users
 }
 
-// pipUser returns the IP configuration that uses the public IP address id,
-// or "". The caller holds s.mu.
+// pipUser returns the IP configuration or NAT gateway that uses the public
+// IP address id, or "". The caller holds s.mu.
 func (s *Server) pipUser(id string) string {
 	for _, res := range s.resources {
 		if res.nic == nil {
@@ -502,10 +537,13 @@ func (s *Server) pipUser(id string) string {
 			}
 		}
 	}
-	return ""
+	return s.pipNAT(id)
 }
 
 func (s *Server) renderNetwork(res *resource) map[string]any {
+	if res.kind == subnetKind {
+		return renderSubnet(res)
+	}
 	m, props := envelope(res)
 	props["resourceGuid"] = res.guid
 	switch res.kind {
@@ -533,6 +571,13 @@ func (s *Server) renderNetwork(res *resource) map[string]any {
 		if nics != nil {
 			props["networkInterfaces"] = nics
 		}
+		var subnets []any
+		for _, u := range s.subnetsUsing(res.id, subnetNSG) {
+			subnets = append(subnets, ref(u))
+		}
+		if subnets != nil {
+			props["subnets"] = subnets
+		}
 	case nicKind:
 		if res.nic != nil {
 			s.renderNIC(res, props)
@@ -543,11 +588,17 @@ func (s *Server) renderNetwork(res *resource) map[string]any {
 			address = res.pip.address
 		}
 		renderPublicIP(res.loc, address, props)
-		if user := s.pipUser(res.id); user != "" {
+		if nat := s.pipNAT(res.id); nat != "" {
+			props["natGateway"] = ref(nat)
+		} else if user := s.pipUser(res.id); user != "" {
 			props["ipConfiguration"] = ref(user)
 		}
 	case peKind:
 		renderPE(res, props)
+	case vnetKind:
+		s.renderVNet(res, props)
+	case natKind:
+		s.renderNAT(res, props)
 	}
 	return m
 }

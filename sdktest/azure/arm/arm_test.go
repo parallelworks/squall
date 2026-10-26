@@ -58,6 +58,9 @@ type clients struct {
 	nics        *armnetwork.InterfacesClient
 	pips        *armnetwork.PublicIPAddressesClient
 	nsgs        *armnetwork.SecurityGroupsClient
+	vnets       *armnetwork.VirtualNetworksClient
+	subnets     *armnetwork.SubnetsClient
+	nats        *armnetwork.NatGatewaysClient
 	zones       *armprivatedns.PrivateZonesClient
 	links       *armprivatedns.VirtualNetworkLinksClient
 	records     *armprivatedns.RecordSetsClient
@@ -172,6 +175,7 @@ func setupWith(t *testing.T, retry policy.RetryOptions, opts ...arm.Option) *cli
 		vms: compute.NewVirtualMachinesClient(), sets: compute.NewVirtualMachineScaleSetsClient(),
 		setVMs: compute.NewVirtualMachineScaleSetVMsClient(), skus: compute.NewResourceSKUsClient(),
 		nics: network.NewInterfacesClient(), pips: network.NewPublicIPAddressesClient(), nsgs: network.NewSecurityGroupsClient(),
+		vnets: network.NewVirtualNetworksClient(), subnets: network.NewSubnetsClient(), nats: network.NewNatGatewaysClient(),
 		zones: dns.NewPrivateZonesClient(), links: dns.NewVirtualNetworkLinksClient(), records: dns.NewRecordSetsClient(),
 		accounts: store.NewAccountsClient(), blob: store.NewBlobServicesClient(), containers: store.NewBlobContainersClient(),
 		files: store.NewFileServicesClient(), shares: store.NewFileSharesClient(), endpoints: network.NewPrivateEndpointsClient(),

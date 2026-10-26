@@ -57,8 +57,8 @@ func (p *pool) take(used func(netip.Addr) bool) (netip.Addr, bool) {
 }
 
 // WithPrivateRange sets the range private addresses come from, in every
-// subnet, as a subnet with that prefix would give them: without its first
-// four addresses and its last. The default is 10.0.0.0/8. It panics on a
+// subnet the server does not hold, as a subnet with that prefix would give
+// them: without its first four addresses and its last. The default is 10.0.0.0/8. It panics on a
 // prefix that is not IPv4 or leaves no address.
 func WithPrivateRange(p netip.Prefix) Option {
 	return func(s *Server) { s.private = newPool(p, 4, 1) }
@@ -85,7 +85,7 @@ func (s *Server) checkFree(subnets []string, public int, except string) *apiErro
 		if need[key(sn)] > s.privateFree(sn, except) {
 			return newError(http.StatusBadRequest, "SubnetIsFull",
 				"Subnet %s with address prefix %s does not have enough capacity for %d IP addresses.",
-				sn[strings.LastIndex(sn, "/")+1:], s.private.prefix, need[key(sn)])
+				sn[strings.LastIndex(sn, "/")+1:], s.subnetPool(sn).prefix, need[key(sn)])
 		}
 	}
 	if public > 0 && public > s.publicFree() {
@@ -95,13 +95,14 @@ func (s *Server) checkFree(subnets []string, public int, except string) *apiErro
 	return nil
 }
 
-// privateFree counts the free addresses of the private range in subnet,
-// counting those held by except and what it holds as free. The caller holds s.mu.
+// privateFree counts the free addresses of subnet's range, counting those
+// held by except and what it holds as free. The caller holds s.mu.
 func (s *Server) privateFree(subnet, except string) int {
-	free := s.private.size
+	p := s.subnetPool(subnet)
+	free := p.size
 	prefix := key(except) + "/"
 	for a, holder := range s.privateIPs[key(subnet)] {
-		if s.private.contains(a) && (except == "" || !strings.HasPrefix(key(holder), prefix)) {
+		if p.contains(a) && (except == "" || !strings.HasPrefix(key(holder), prefix)) {
 			free--
 		}
 	}
@@ -123,7 +124,7 @@ func (s *Server) publicFree() int {
 // which [Server.checkFree] has made sure there is. The caller holds s.mu.
 func (s *Server) allocPrivate(subnet, holder string) netip.Addr {
 	used := s.privateIPs[key(subnet)]
-	a, ok := s.private.take(func(a netip.Addr) bool { return used[a] != "" })
+	a, ok := s.subnetPool(subnet).take(func(a netip.Addr) bool { return used[a] != "" })
 	if !ok {
 		panic("squall: allocating a private address in a full subnet")
 	}
