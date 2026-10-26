@@ -68,8 +68,9 @@ func netappName(id string) string {
 	return strings.Join(names, "/")
 }
 
-// netappLocation is the query a NetApp operation's Location URL adds to its path.
-const netappLocation = "operationResultResponseType=Location"
+// resultLocation is the query the Location URL of a NetApp or Cognitive
+// Services operation adds to its path.
+const resultLocation = "operationResultResponseType=Location"
 
 // netappOps are the paths of a Microsoft.NetApp operation, whose
 // Azure-AsyncOperation and Location URLs share one path.
@@ -95,7 +96,7 @@ var netappLevels = []*netappLevel{
 
 func (s *Server) registerNetAppRoutes() {
 	s.add("GET", sub+"/providers/Microsoft.NetApp/locations/{loc}/operationResults/{op}", "Microsoft.NetApp/locations/operationresults/read", false,
-		s.onePathOperation(netappLocation, s.netappOperation))
+		s.onePathOperation(resultLocation, s.netappOperation))
 	for _, l := range netappLevels {
 		s.add("GET", l.path[:strings.LastIndex(l.path, "/")], l.kind.action("read"), false, s.listNetApp(l))
 		s.add("PUT", l.path, l.kind.action("write"), true, s.putNetApp(l))
@@ -184,7 +185,7 @@ func (s *Server) deleteNetApp(l *netappLevel) handler {
 			return nil, err
 		}
 		op := s.change(c, res, netappOps(c, res.loc), 0, stateDeleting, func() { s.remove(res) })
-		return acceptedOnePath(c, op, netappLocation), nil
+		return acceptedOnePath(c, op, resultLocation), nil
 	}
 }
 

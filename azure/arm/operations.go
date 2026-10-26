@@ -227,6 +227,12 @@ func (s *Server) lookupOperation(c *call, result bool) (*operation, *apiError) {
 
 // operationStatus answers a poll of an Azure-AsyncOperation URL.
 func (s *Server) operationStatus(c *call) (*reply, *apiError) {
+	return s.pollOperation(c, func(*operation) string { return opInProgress })
+}
+
+// pollOperation answers a poll of an Azure-AsyncOperation URL, whose status
+// reads as running says while the operation runs.
+func (s *Server) pollOperation(c *call, running func(*operation) string) (*reply, *apiError) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	op, err := s.lookupOperation(c, false)
@@ -235,7 +241,9 @@ func (s *Server) operationStatus(c *call) (*reply, *apiError) {
 	}
 	s.observe(op)
 	body := opStatusBody{ID: op.statusPath, Name: op.id, Status: op.status, StartTime: timestamp(op.start)}
-	if op.status != opInProgress {
+	if op.status == opInProgress {
+		body.Status = running(op)
+	} else {
 		body.EndTime = timestamp(op.end)
 	}
 	if op.err != nil {
@@ -276,9 +284,9 @@ func (s *Server) operationResult(c *call) (*reply, *apiError) {
 }
 
 // onePathOperation answers the polls of an operation whose Azure-AsyncOperation
-// and Location URLs share a path, the Location URL adding query, as NetApp's
-// and StorageCache's do: with status, and with [Server.operationResult] when
-// the query is there.
+// and Location URLs share a path, the Location URL adding query, as NetApp's,
+// StorageCache's and Cognitive Services' do: with status, and with
+// [Server.operationResult] when the query is there.
 func (s *Server) onePathOperation(query string, status handler) handler {
 	name, value, _ := strings.Cut(query, "=")
 	return func(c *call) (*reply, *apiError) {

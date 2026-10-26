@@ -91,6 +91,19 @@ type putSpec struct {
 	acceptedBody func() []byte
 	// createdStatus answers a create that finishes at once, if not 201.
 	createdStatus int
+	// bodyPolled answers a change in progress with no polling header, so the
+	// SDK polls the resource itself until its provisioningState ends, as
+	// Cognitive Services deployments and Search services are; paths is unused.
+	bodyPolled bool
+}
+
+// polled adds to rep, which answers with the body-polled resource res, the
+// retry-after-ms polling URLs carry while res changes.
+func polled(res *resource, rep *reply) *reply {
+	if res.state != stateSucceeded {
+		rep.header = http.Header{"Retry-After-Ms": {retryAfterMS}}
+	}
+	return rep
 }
 
 // fail applies err to the call: an async error becomes the error the call's
@@ -155,12 +168,18 @@ func (s *Server) put(spec putSpec) handler {
 		}
 		render := func() []byte { return encode(spec.render(res)) }
 		answer := func(op *operation, render func() []byte) *reply {
+			if spec.bodyPolled {
+				return polled(res, &reply{status: status, body: render()})
+			}
 			if spec.acceptedBody != nil && op.status != opSucceeded {
 				return accepted(c, op, status, http.StatusAccepted, true, spec.acceptedBody)
 			}
 			return accepted(c, op, status, status, false, render)
 		}
-		paths := spec.paths(c, p.location)
+		var paths opPaths
+		if spec.paths != nil {
+			paths = spec.paths(c, p.location)
+		}
 		if c.opFault != nil {
 			op := s.begin(c, paths, 0, nil)
 			op.target, op.state = res.id, state

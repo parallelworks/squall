@@ -15,11 +15,13 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/cloud"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/cognitiveservices/armcognitiveservices"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v8"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/netapp/armnetapp/v6"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v9"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/privatedns/armprivatedns"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources/v3"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/search/armsearch"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/storage/armstorage"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/storagecache/armstoragecache/v3"
 
@@ -43,30 +45,36 @@ func (credential) GetToken(context.Context, policy.TokenRequestOptions) (azcore.
 }
 
 type clients struct {
-	server     *arm.Server
-	groups     *armresources.ResourceGroupsClient
-	vms        *armcompute.VirtualMachinesClient
-	sets       *armcompute.VirtualMachineScaleSetsClient
-	setVMs     *armcompute.VirtualMachineScaleSetVMsClient
-	skus       *armcompute.ResourceSKUsClient
-	nics       *armnetwork.InterfacesClient
-	pips       *armnetwork.PublicIPAddressesClient
-	nsgs       *armnetwork.SecurityGroupsClient
-	zones      *armprivatedns.PrivateZonesClient
-	links      *armprivatedns.VirtualNetworkLinksClient
-	records    *armprivatedns.RecordSetsClient
-	accounts   *armstorage.AccountsClient
-	blob       *armstorage.BlobServicesClient
-	containers *armstorage.BlobContainersClient
-	files      *armstorage.FileServicesClient
-	shares     *armstorage.FileSharesClient
-	endpoints  *armnetwork.PrivateEndpointsClient
-	netapps    *armnetapp.AccountsClient
-	pools      *armnetapp.PoolsClient
-	volumes    *armnetapp.VolumesClient
-	lustre     *armstoragecache.AmlFilesystemsClient
-	cache      *armstoragecache.ManagementClient
-	requests   *[]string
+	server      *arm.Server
+	groups      *armresources.ResourceGroupsClient
+	vms         *armcompute.VirtualMachinesClient
+	sets        *armcompute.VirtualMachineScaleSetsClient
+	setVMs      *armcompute.VirtualMachineScaleSetVMsClient
+	skus        *armcompute.ResourceSKUsClient
+	nics        *armnetwork.InterfacesClient
+	pips        *armnetwork.PublicIPAddressesClient
+	nsgs        *armnetwork.SecurityGroupsClient
+	zones       *armprivatedns.PrivateZonesClient
+	links       *armprivatedns.VirtualNetworkLinksClient
+	records     *armprivatedns.RecordSetsClient
+	accounts    *armstorage.AccountsClient
+	blob        *armstorage.BlobServicesClient
+	containers  *armstorage.BlobContainersClient
+	files       *armstorage.FileServicesClient
+	shares      *armstorage.FileSharesClient
+	endpoints   *armnetwork.PrivateEndpointsClient
+	netapps     *armnetapp.AccountsClient
+	pools       *armnetapp.PoolsClient
+	volumes     *armnetapp.VolumesClient
+	lustre      *armstoragecache.AmlFilesystemsClient
+	cache       *armstoragecache.ManagementClient
+	cognitive   *armcognitiveservices.AccountsClient
+	deployments *armcognitiveservices.DeploymentsClient
+	deleted     *armcognitiveservices.DeletedAccountsClient
+	capacities  *armcognitiveservices.ModelCapacitiesClient
+	search      *armsearch.ServicesClient
+	searchKeys  *armsearch.AdminKeysClient
+	requests    *[]string
 }
 
 // setup serves a new server and returns clients for it that do not retry,
@@ -127,6 +135,14 @@ func setupWith(t *testing.T, retry policy.RetryOptions, opts ...arm.Option) *cli
 	if err != nil {
 		t.Fatal(err)
 	}
+	cog, err := armcognitiveservices.NewClientFactory(subscription, credential{}, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	search, err := armsearch.NewClientFactory(subscription, credential{}, options)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return &clients{
 		server: s, groups: resources.NewResourceGroupsClient(),
 		vms: compute.NewVirtualMachinesClient(), sets: compute.NewVirtualMachineScaleSetsClient(),
@@ -137,6 +153,8 @@ func setupWith(t *testing.T, retry policy.RetryOptions, opts ...arm.Option) *cli
 		files: store.NewFileServicesClient(), shares: store.NewFileSharesClient(), endpoints: network.NewPrivateEndpointsClient(),
 		netapps: netapp.NewAccountsClient(), pools: netapp.NewPoolsClient(), volumes: netapp.NewVolumesClient(),
 		lustre: cache.NewAmlFilesystemsClient(), cache: cache.NewManagementClient(),
+		cognitive: cog.NewAccountsClient(), deployments: cog.NewDeploymentsClient(), deleted: cog.NewDeletedAccountsClient(),
+		capacities: cog.NewModelCapacitiesClient(), search: search.NewServicesClient(), searchKeys: search.NewAdminKeysClient(),
 		requests: requests,
 	}
 }

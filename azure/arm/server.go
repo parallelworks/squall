@@ -35,7 +35,13 @@
 //   - Microsoft.NetApp: accounts, capacity pools and volumes (create or
 //     update, get, list in their group, account or pool, and delete);
 //   - Microsoft.StorageCache: Azure Managed Lustre file systems (create or
-//     update, get, list in a group and delete), and subnet checks.
+//     update, get, list in a group and delete), and subnet checks;
+//   - Microsoft.CognitiveServices: accounts (create or update, get, list keys
+//     and delete), their deployments (create or update, get, list and
+//     delete), deleted accounts (get and purge) and model capacities (list,
+//     as [WithModelCapacities] sets them);
+//   - Microsoft.Search: search services (create or update, get and delete)
+//     and their admin keys (list).
 //
 // Other calls answer 404. Every call needs an api-version, which may be any
 // value, and a bearer token, which is not checked. Where it differs from
@@ -160,6 +166,35 @@
 //     AMLFS-Durable-Premium-250. An update answers 200 and shows Updating,
 //     where Azure answers 201 and shows Creating. A subnet check answers 200
 //     for any subnet.
+//   - A Cognitive Services account change in progress answers with an
+//     Azure-AsyncOperation URL under
+//     Microsoft.CognitiveServices/locations/{location}/operationResults, whose
+//     status reads as the state the account shows, such as Creating, until it
+//     succeeds. An account with a customSubDomainName has the endpoint
+//     https://{subdomain}.cognitiveservices.azure.com/ and one without it the
+//     region's. Deleting an account answers 200 at once and keeps it, without
+//     its deployments, as a deleted account, as does deleting its group. Its
+//     subdomain stays taken until a purge: an account that asks for a
+//     subdomain another account holds, deleted or not, fails with 409
+//     CustomDomainInUse. Azure also refuses an account named as a deleted one
+//     in the same group; the server does not. A purge in progress answers
+//     202 with an Azure-AsyncOperation URL there and a Location URL, the same
+//     path with operationResultResponseType=Location, which answers 200 with
+//     no body once it is done; that its status reads Deleting while it runs
+//     is inferred. Account keys are derived from the account and never
+//     change. A deployment needs sku.name and properties.model's name and
+//     format.
+//   - Cognitive Services deployments and search services have no operation
+//     to poll: a create or update answers 201 or 200 with no polling header,
+//     and the SDK reads the resource until its provisioningState ends, so
+//     [fault.ModeFailOperation] fails their writes as [fault.ModeReject]
+//     does. A deployment being created shows Accepted. A search service shows
+//     provisioningState and status provisioning, then succeeded and running,
+//     in lower case as Search writes them, and the endpoint
+//     https://{name}.search.windows.net. Deleting a deployment or a search
+//     service answers 200 at once. Search service names are not unique across
+//     the server, where Azure makes them unique across Azure. Admin keys are
+//     derived from the service and never change.
 //
 // Fault method names are the operation's Azure RBAC action, such as
 // "Microsoft.Compute/virtualMachines/write",
@@ -192,8 +227,10 @@
 // Microsoft.Compute defines no operationResults action, and polling a
 // Microsoft.Storage operation needs Microsoft.Storage/operations/read, and
 // polling a Microsoft.NetApp one needs
-// Microsoft.NetApp/locations/operationresults/read and a Microsoft.StorageCache
-// one Microsoft.StorageCache/locations/ascOperations/read. Actions are not
+// Microsoft.NetApp/locations/operationresults/read, a Microsoft.StorageCache
+// one Microsoft.StorageCache/locations/ascOperations/read and a
+// Microsoft.CognitiveServices one
+// Microsoft.CognitiveServices/locations/operationresults/read. Actions are not
 // checked against the scope they act on: a grant covers every subscription.
 //
 // A lost response aborts the handler with [http.ErrAbortHandler] after
@@ -253,6 +290,8 @@ type Server struct {
 	publicIPs  map[netip.Addr]string
 	private    *pool
 	public     *pool
+	deleted    map[string]*softDeleted
+	capacities []ModelCapacity
 }
 
 // Option configures a [Server].
@@ -287,6 +326,7 @@ func New(opts ...Option) *Server {
 		pending:    map[*operation]struct{}{},
 		privateIPs: map[string]map[netip.Addr]string{},
 		publicIPs:  map[netip.Addr]string{},
+		deleted:    map[string]*softDeleted{},
 		// Neither range is routable on the internet, so a test cannot reach a real host by mistake.
 		private: newPool(netip.MustParsePrefix("10.0.0.0/8"), 4, 1),
 		public:  newPool(netip.MustParsePrefix("100.64.0.0/10"), 1, 0),
@@ -404,6 +444,8 @@ func (s *Server) registerRoutes() {
 	s.registerStorageRoutes()
 	s.registerNetAppRoutes()
 	s.registerStorageCacheRoutes()
+	s.registerCognitiveRoutes()
+	s.registerSearchRoutes()
 }
 
 func (s *Server) add(method, pattern, action string, lro bool, h handler) {
