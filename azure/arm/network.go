@@ -95,6 +95,9 @@ type putSpec struct {
 	// SDK polls the resource itself until its provisioningState ends, as
 	// Cognitive Services deployments and Search services are; paths is unused.
 	bodyPolled bool
+	// sync finishes the change before answering, whatever [WithSettleAfter]
+	// says, as Application Insights components do; paths is unused.
+	sync bool
 }
 
 // polled adds to rep, which answers with the body-polled resource res, the
@@ -187,6 +190,9 @@ func (s *Server) put(spec putSpec) handler {
 		}
 		commit()
 		s.resources[key(id)] = res
+		if spec.sync {
+			return &reply{status: status, body: render()}, nil
+		}
 		op := s.change(c, res, paths, 0, state, nil)
 		op.result = render
 		return answer(op, render), nil

@@ -15,8 +15,12 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/cloud"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/applicationinsights/armapplicationinsights"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/authorization/armauthorization/v2"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/cognitiveservices/armcognitiveservices"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v8"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/keyvault/armkeyvault"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/machinelearning/armmachinelearning/v4"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/netapp/armnetapp/v6"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v9"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/privatedns/armprivatedns"
@@ -74,6 +78,10 @@ type clients struct {
 	capacities  *armcognitiveservices.ModelCapacitiesClient
 	search      *armsearch.ServicesClient
 	searchKeys  *armsearch.AdminKeysClient
+	vaults      *armkeyvault.VaultsClient
+	components  *armapplicationinsights.ComponentsClient
+	workspaces  *armmachinelearning.WorkspacesClient
+	roles       *armauthorization.RoleAssignmentsClient
 	requests    *[]string
 }
 
@@ -143,6 +151,22 @@ func setupWith(t *testing.T, retry policy.RetryOptions, opts ...arm.Option) *cli
 	if err != nil {
 		t.Fatal(err)
 	}
+	keyvault, err := armkeyvault.NewClientFactory(subscription, credential{}, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	insights, err := armapplicationinsights.NewClientFactory(subscription, credential{}, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ml, err := armmachinelearning.NewClientFactory(subscription, credential{}, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorization, err := armauthorization.NewClientFactory(subscription, credential{}, options)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return &clients{
 		server: s, groups: resources.NewResourceGroupsClient(),
 		vms: compute.NewVirtualMachinesClient(), sets: compute.NewVirtualMachineScaleSetsClient(),
@@ -155,7 +179,8 @@ func setupWith(t *testing.T, retry policy.RetryOptions, opts ...arm.Option) *cli
 		lustre: cache.NewAmlFilesystemsClient(), cache: cache.NewManagementClient(),
 		cognitive: cog.NewAccountsClient(), deployments: cog.NewDeploymentsClient(), deleted: cog.NewDeletedAccountsClient(),
 		capacities: cog.NewModelCapacitiesClient(), search: search.NewServicesClient(), searchKeys: search.NewAdminKeysClient(),
-		requests: requests,
+		vaults: keyvault.NewVaultsClient(), components: insights.NewComponentsClient(), workspaces: ml.NewWorkspacesClient(),
+		roles: authorization.NewRoleAssignmentsClient(), requests: requests,
 	}
 }
 
