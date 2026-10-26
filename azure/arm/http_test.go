@@ -196,3 +196,59 @@ func TestWorkspaceChangesInProgressAnswer202(t *testing.T) {
 		t.Fatalf("Location poll once done = %d %v", rec.Code, body)
 	}
 }
+
+// A subnet answers as Azure's do: 201 then 200 with an Azure-AsyncOperation
+// URL under its virtual network's location, no location of its own, and a
+// place in the virtual network's subnets; a NAT gateway lists the subnets
+// that use it, and its deletion answers 202 with both polling URLs.
+func TestSubnetAndNATGatewayShapes(t *testing.T) {
+	s := arm.New(arm.WithSettleAfter(-1))
+	newGroup(t, s)
+	const (
+		network = groupPath + "/providers/Microsoft.Network"
+		vnet    = network + "/virtualNetworks/vnet"
+		subnet  = vnet + "/subnets/default"
+		nat     = network + "/natGateways/nat"
+	)
+	rec, body := do(t, s, http.MethodPut, vnet, `{"location":"westus","properties":{"addressSpace":{"addressPrefixes":["10.0.0.0/16"]}}}`)
+	props, _ := body["properties"].(map[string]any)
+	if rec.Code != http.StatusCreated || !strings.Contains(rec.Header().Get("Azure-AsyncOperation"), "/providers/Microsoft.Network/locations/westus/operations/") ||
+		fmt.Sprint(props["subnets"]) != "[]" || fmt.Sprint(props["virtualNetworkPeerings"]) != "[]" || props["enableDdosProtection"] != false ||
+		props["privateEndpointVNetPolicies"] != "Disabled" {
+		t.Fatalf("create vnet = %d %v %v", rec.Code, rec.Header(), body)
+	}
+	rec, body = do(t, s, http.MethodPut, nat, `{"location":"westus","sku":{"name":"Standard"}}`)
+	if rec.Code != http.StatusCreated || fmt.Sprint(body["sku"]) != "map[name:Standard tier:Regional]" {
+		t.Fatalf("create NAT gateway = %d %v", rec.Code, body)
+	}
+	for i, want := range []int{http.StatusCreated, http.StatusOK} {
+		s.Settle()
+		rec, body = do(t, s, http.MethodPut, subnet, `{"properties":{"addressPrefix":"10.0.0.0/24","natGateway":{"id":"`+nat+`"}}}`)
+		props, _ = body["properties"].(map[string]any)
+		if rec.Code != want || !strings.Contains(rec.Header().Get("Azure-AsyncOperation"), "/locations/westus/operations/") ||
+			body["type"] != "Microsoft.Network/virtualNetworks/subnets" || body["location"] != nil || fmt.Sprint(props["natGateway"]) != "map[id:"+nat+"]" ||
+			fmt.Sprint(props["delegations"]) != "[]" || props["privateLinkServiceNetworkPolicies"] != "Enabled" {
+			t.Fatalf("put subnet %d = %d %v %v", i, rec.Code, rec.Header(), body)
+		}
+	}
+	s.Settle()
+	_, body = do(t, s, http.MethodGet, vnet, "")
+	subnets, _ := body["properties"].(map[string]any)["subnets"].([]any)
+	if len(subnets) != 1 || subnets[0].(map[string]any)["id"] != subnet {
+		t.Fatalf("vnet subnets = %v", body)
+	}
+	_, body = do(t, s, http.MethodGet, nat, "")
+	if users := body["properties"].(map[string]any)["subnets"]; fmt.Sprint(users) != "[map[id:"+subnet+"]]" {
+		t.Fatalf("NAT gateway subnets = %v", body)
+	}
+	if rec, body := do(t, s, http.MethodDelete, nat, ""); rec.Code != http.StatusBadRequest || errorCode(body) != "InUseNatGatewayCannotBeDeleted" {
+		t.Fatalf("delete NAT gateway in use = %d %v", rec.Code, body)
+	}
+	do(t, s, http.MethodPut, subnet, `{"properties":{"addressPrefix":"10.0.0.0/24"}}`)
+	s.Settle()
+	rec, _ = do(t, s, http.MethodDelete, nat, "")
+	if rec.Code != http.StatusAccepted || rec.Header().Get("Azure-AsyncOperation") == "" ||
+		!strings.Contains(rec.Header().Get("Location"), "/providers/Microsoft.Network/locations/westus/operationResults/") {
+		t.Fatalf("delete NAT gateway = %d %v", rec.Code, rec.Header())
+	}
+}

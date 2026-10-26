@@ -42,6 +42,18 @@ var linkedActions = map[string][]link{
 		linkAt("Microsoft.Network/publicIPAddresses/join/action", "properties.ipConfigurations.[].properties.publicIPAddress.id"),
 		linkAt("Microsoft.Network/networkSecurityGroups/join/action", "properties.networkSecurityGroup.id"),
 	},
+	"Microsoft.Network/virtualNetworks/write": {
+		linkAt("Microsoft.Network/natGateways/join/action", "properties.subnets.[].properties.natGateway.id"),
+		linkAt("Microsoft.Network/networkSecurityGroups/join/action", "properties.subnets.[].properties.networkSecurityGroup.id"),
+	},
+	"Microsoft.Network/virtualNetworks/subnets/write": {
+		linkAt("Microsoft.Network/natGateways/join/action", "properties.natGateway.id"),
+		linkAt("Microsoft.Network/networkSecurityGroups/join/action", "properties.networkSecurityGroup.id"),
+	},
+	"Microsoft.Network/natGateways/write": {
+		linkAt("Microsoft.Network/publicIPAddresses/join/action", "properties.publicIpAddresses.[].id"),
+		linkAt("Microsoft.Network/publicIPPrefixes/join/action", "properties.publicIpPrefixes.[].id"),
+	},
 	"Microsoft.Network/privateEndpoints/write": {
 		linkAt("Microsoft.Network/virtualNetworks/subnets/join/action", "properties.subnet.id"),
 		linkAt(approvalAction, "properties.privateLinkServiceConnections.[].properties.privateLinkServiceId"),

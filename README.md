@@ -24,7 +24,7 @@ failure replays from its seed.
 | [`access`](https://pkg.go.dev/github.com/parallelworks/squall/access) | Grants a set of permissions (Google Cloud IAM permissions, AWS IAM actions or Azure RBAC actions) and refuses calls that need one it lacks, with the error the cloud answers, including those a request's fields add and Azure's linked checks. Reports which permissions were needed but missing and which were granted but never used. |
 | [`aws/ec2`](https://pkg.go.dev/github.com/parallelworks/squall/aws/ec2) | Amazon EC2: instances (run with client tokens, describe with filters and pages, start, stop, terminate, change type), images (describe, register from snapshots, deregister), instance types, EBS volumes (create, describe, attach, detach, delete), EBS snapshots (create, describe with filters and pages, delete), placement groups, tags, Elastic IP addresses (allocate, describe, release, associate with an interface or instance, disassociate) and network interfaces (create with client tokens, describe, delete). |
 | [`aws/s3`](https://pkg.go.dev/github.com/parallelworks/squall/aws/s3) | Amazon S3: general purpose buckets (create, head, list with pages and filters, delete), their tags, versioning, policy and CORS rules, and objects (put, delete one or many, list versions and delete markers). |
-| [`azure/arm`](https://pkg.go.dev/github.com/parallelworks/squall/azure/arm) | Azure Resource Manager: resource groups (get, create or update, list with tag filters, delete with everything in them that nothing outside uses), virtual machines (create or update, get, list, instance view, deallocate, start, delete), Uniform scale sets (create or update, update, get, list, delete, delete instances) and their VMs, network security groups, network interfaces and public IP addresses, the IP configurations of scale set VMs, private DNS zones, virtual network links and A record sets, and long-running operations to poll. |
+| [`azure/arm`](https://pkg.go.dev/github.com/parallelworks/squall/azure/arm) | Azure Resource Manager: resource groups (get, create or update, list with tag filters, delete with everything in them that nothing outside uses), virtual machines (create or update, get, list, instance view, deallocate, start, delete), Uniform scale sets (create or update, update, get, list, delete, delete instances) and their VMs, virtual networks and their subnets, NAT gateways, network security groups, network interfaces and public IP addresses, the IP configurations of scale set VMs, private DNS zones, virtual network links and A record sets, and long-running operations to poll. |
 | [`azure/graph`](https://pkg.go.dev/github.com/parallelworks/squall/azure/graph) | Microsoft Graph: a directory's domains (list) and users (create with Microsoft Entra's name and password rules, get by ID or user principal name, delete), with application permissions checked as Graph documents them. |
 | [`gcp/compute`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/compute) | Compute Engine: instances (bulkInsert, insert, get, list, aggregatedList, delete, stop, start, setLabels, setMachineType, addAccessConfig, attachDisk, detachDisk), disks (get, list, aggregatedList, insert, delete), snapshots (insert, get, list, delete), zones, regional addresses (get, list, insert, delete, setLabels), resource policies, instance templates, routes, and zone, region and global operations (get, wait). |
 | [`gcp/storage`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/storage) | Cloud Storage: buckets (insert, get, list, patch labels, versioning and CORS, delete) and objects (multipart and media uploads, list with versions, delete by generation). |
@@ -254,12 +254,17 @@ For Azure Resource Manager:
   names match without regard to case. Fields it does not know are rejected
   with `InvalidRequestContent`; values it does not model, such as a Flexible
   scale set or a VM with `networkInterfaceConfigurations`, with `BadRequest`.
-- Virtual networks and subnets are not modeled; their IDs are recorded. Private
-  addresses come from 10.0.0.0/8, unique within a subnet ID, and public ones
-  from 100.64.0.0/10, assigned when created; `WithPrivateRange` and
-  `WithPublicRange` change the ranges. Once a range is used up, a change that
-  needs an address fails with `SubnetIsFull` or `PublicIPCountLimitReached`.
-  OS disks get names and IDs but are not served.
+- A subnet's address prefixes must lie in its virtual network's address space
+  (`NetcfgSubnetRangeOutsideVnet`), not overlap another subnet's
+  (`NetcfgSubnetRangesOverlap`) and be no smaller than a /29; a virtual
+  network PUT replaces its subnets, and a subnet, virtual network or NAT
+  gateway in use cannot be deleted. Interfaces in a subnet the server holds
+  take addresses from its prefix. A subnet the server does not hold is
+  recorded, not checked: its private addresses come from 10.0.0.0/8, unique
+  within the subnet ID, and public ones from 100.64.0.0/10, assigned when
+  created; `WithPrivateRange` and `WithPublicRange` change the ranges. Once a
+  range is used up, a change that needs an address fails with `SubnetIsFull` or
+  `PublicIPCountLimitReached`. OS disks get names and IDs but are not served.
 - Scale set VMs are numbered from 0 without reuse; raising `sku.capacity`
   creates them with their interfaces and addresses, and lowering it deletes the
   newest. A PUT to an existing scale set that leaves out `sku` keeps the

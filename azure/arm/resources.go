@@ -63,6 +63,8 @@ type resource struct {
 	scale   *scaleSet
 	account *accountState
 	pe      *peState
+	vnet    *vnetState
+	subnet  *subnetState
 	// held is the subnet address of a resource that takes one of its own,
 	// such as a NetApp volume.
 	held *heldAddress
@@ -135,7 +137,7 @@ func (s *Server) claim(id, verb string) (*resource, *apiError) {
 	}
 	op := res.pending
 	switch res.kind {
-	case nsgKind, nicKind, pipKind, linkKind:
+	case nsgKind, nicKind, pipKind, vnetKind, subnetKind, natKind, linkKind:
 		s.observe(op)
 		if op.complete == nil {
 			break
@@ -366,6 +368,10 @@ func (s *Server) remove(res *resource) {
 	case res.pe != nil:
 		if nic := s.resources[key(res.pe.nic)]; nic != nil {
 			s.remove(nic)
+		}
+	case res.vnet != nil:
+		for _, sn := range s.subnetsOf(res) {
+			s.remove(sn)
 		}
 	}
 }

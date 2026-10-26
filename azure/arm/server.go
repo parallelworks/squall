@@ -14,10 +14,12 @@
 //   - resource groups: get, check existence, create or update, list (with
 //     tag filters) and delete, which deletes everything in the group that
 //     nothing outside it uses;
-//   - Microsoft.Network: network security groups, network interfaces, public
-//     IP addresses and private endpoints (create or update, update tags, get,
-//     delete), and the IP configurations and public IP addresses of scale set
-//     VMs (get);
+//   - Microsoft.Network: virtual networks, NAT gateways, network security
+//     groups, network interfaces, public IP addresses and private endpoints
+//     (create or update, update tags, get, delete; virtual networks and NAT
+//     gateways also list in a group), subnets (create or update, get, list
+//     and delete), and the IP configurations and public IP addresses of scale
+//     set VMs (get);
 //   - Microsoft.Network private DNS: zones and virtual network links in the
 //     global location (create or update, get; another location fails with
 //     MissingRegistrationForLocation), and A record sets (create or update,
@@ -67,8 +69,9 @@
 //     URL only, and a private DNS zone or link change in progress answers 202
 //     with an empty object, as Azure does.
 //   - A change to a resource that has another in progress is answered as its
-//     provider answers it. Network security groups, network interfaces and
-//     public IP addresses fail it with 429 RetryableError
+//     provider answers it. Virtual networks, subnets, NAT gateways, network
+//     security groups, network interfaces and public IP addresses fail it
+//     with 429 RetryableError
 //     (RetryableErrorDueToAnotherOperation) and virtual network links with 409
 //     Conflict, counting the call as a read of the change in progress. A VM
 //     or scale set change preempts the one in progress, which takes effect
@@ -94,16 +97,53 @@
 //     server only records keep the JSON the caller sent; fields it does not
 //     know are rejected with InvalidRequestContent, and values it does not
 //     model, such as a Flexible scale set, with BadRequest.
-//   - Virtual networks and subnets are not modeled: subnet and virtual network
-//     IDs are recorded, not checked. Private IP addresses come from
-//     10.0.0.0/8 ([WithPrivateRange]), unique within a subnet ID, without the
-//     range's first four and last addresses, which Azure reserves in a
-//     subnet; public ones from 100.64.0.0/10 ([WithPublicRange]), unique
-//     across the server, assigned when the address is created whatever its
-//     allocation method. A change that needs more addresses than the range
-//     has free fails with SubnetIsFull or PublicIPCountLimitReached, the
-//     codes Azure answers for a full subnet and the public IP address quota.
-//     Network security groups list no default rules.
+//   - A virtual network PUT replaces its subnets: properties.subnets creates
+//     or updates those it lists and deletes the rest, failing with
+//     InUseSubnetCannotBeDeleted when one holds an address. A subnet takes
+//     addressPrefix or addressPrefixes, IPv4 only, which must lie in the
+//     virtual network's address space (400 NetcfgSubnetRangeOutsideVnet), not
+//     overlap another subnet's (400 NetcfgSubnetRangesOverlap) and be no
+//     smaller than a /29, the smallest Microsoft documents; a smaller one fails
+//     with 400 NetcfgInvalidSubnet, the code Azure answers for an invalid
+//     subnet, which for this case is inferred. A prefix that is not a network
+//     address in CIDR notation fails with 400 InvalidCIDRNotation, the code
+//     Microsoft documents; its message is inferred. Changing the prefixes of a
+//     subnet that holds an address fails with 400 InUseSubnetCannotBeUpdated.
+//     A subnet's NAT gateway and network security group must exist in its
+//     virtual network's location, or the write fails with
+//     InvalidResourceReference, and a PUT that leaves one out detaches it.
+//     Delegations and service endpoints are recorded: their actions and
+//     locations are as the caller sent them, where Azure fills them in. A
+//     subnet does not list the IP configurations, private endpoints or other
+//     resources in it. Deleting a subnet, or the virtual network holding it,
+//     while it holds an address fails with 400 InUseSubnetCannotBeDeleted,
+//     naming what holds it; deleting a virtual network deletes its subnets.
+//     A missing subnet answers 404 ResourceNotFound, as other types do, which
+//     is inferred.
+//   - A NAT gateway takes the Standard SKU, which it shows with the Regional
+//     tier, and is Standard when the body names none, which is inferred; its
+//     idleTimeoutInMinutes is 4 unless set. Its public IP addresses must exist
+//     in its location, and each shows the NAT gateway as its natGateway. One
+//     already used by an interface or another NAT gateway fails with 400
+//     PublicIPAddressInUse, and a public IP address a NAT gateway uses cannot
+//     be deleted (PublicIPAddressCannotBeDeleted); both are inferred from how
+//     Azure answers an interface's public IP address. Public IP prefixes are
+//     recorded, not checked. The NAT gateway lists the subnets that use it,
+//     and deleting it while one does fails with 400
+//     InUseNatGatewayCannotBeDeleted; the code and message are inferred.
+//   - A subnet the server does not hold, such as one a network interface,
+//     private endpoint or scale set names in a virtual network the server
+//     never saw, is recorded, not checked. Private IP addresses in a subnet
+//     the server holds come from its first prefix; in any other they come
+//     from 10.0.0.0/8 ([WithPrivateRange]), unique within the subnet ID. Either
+//     way the range's first four and last addresses, which Azure reserves in
+//     a subnet, are left out. Public addresses come from 100.64.0.0/10
+//     ([WithPublicRange]), unique across the server, assigned when the address
+//     is created whatever its allocation method. A change that needs more
+//     addresses than the range has free fails with SubnetIsFull or
+//     PublicIPCountLimitReached, the codes Azure answers for a full subnet and
+//     the public IP address quota. A static private address need not lie in
+//     its subnet's prefix. Network security groups list no default rules.
 //   - A virtual machine takes existing network interfaces only, not
 //     networkInterfaceConfigurations. Its OS disk gets a name and a managed
 //     disk ID, with the group's name upper-cased as Azure writes it, but disks
@@ -254,7 +294,11 @@
 // that needs one it lacks with 403 AuthorizationFailed, before any fault. A
 // write that references another resource also needs the action ARM checks on
 // it, such as Microsoft.Network/virtualNetworks/subnets/join/action for a
-// network interface's subnet or Microsoft.Network/networkInterfaces/join/action
+// network interface's subnet, Microsoft.Network/natGateways/join/action and
+// Microsoft.Network/networkSecurityGroups/join/action for a subnet's NAT
+// gateway and security group, whether the subnet is written alone or in its
+// virtual network, Microsoft.Network/publicIPAddresses/join/action for a NAT
+// gateway's public IP address, or Microsoft.Network/networkInterfaces/join/action
 // for a VM's interface, and fails without it with LinkedAuthorizationFailed,
 // naming each action and resource it lacks. A private endpoint with an
 // automatic connection needs the target's privateEndpointConnectionsApproval
@@ -443,13 +487,21 @@ func (s *Server) registerRoutes() {
 	s.add("GET", network+"/privateDnsOperationStatuses/{op}", "Microsoft.Network/privateDnsOperationStatuses/read", false, s.operationStatus)
 	s.add("GET", network+"/privateDnsOperationResults/{op}", "Microsoft.Network/privateDnsOperationResults/read", false, s.operationResult)
 
-	for _, k := range []*kind{nsgKind, nicKind, pipKind, peKind} {
+	for _, k := range []*kind{nsgKind, nicKind, pipKind, peKind, vnetKind, natKind} {
 		item := network + "/" + k.plural + "/{name}"
 		s.add("PUT", item, k.action("write"), true, s.putNetwork(k))
 		s.add("PATCH", item, k.action("write"), false, s.patchTags(k))
 		s.add("GET", item, k.action("read"), false, s.getResource(k))
 		s.add("DELETE", item, k.action("delete"), true, s.deleteNetwork(k))
 	}
+	for _, k := range []*kind{vnetKind, natKind} {
+		s.add("GET", network+"/"+k.plural, k.action("read"), false, s.listNetwork(k))
+	}
+	subnets := network + "/virtualNetworks/{vnet}/subnets"
+	s.add("GET", subnets, subnetKind.action("read"), false, s.listSubnets)
+	s.add("PUT", subnets+"/{name}", subnetKind.action("write"), true, s.putNetwork(subnetKind))
+	s.add("GET", subnets+"/{name}", subnetKind.action("read"), false, s.getResource(subnetKind))
+	s.add("DELETE", subnets+"/{name}", subnetKind.action("delete"), true, s.deleteNetwork(subnetKind))
 
 	zone := network + "/privateDnsZones/{zone}"
 	s.add("PUT", zone, zoneKind.action("write"), true, s.putZone)
