@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.0](https://github.com/parallelworks/squall/compare/v0.15.0...v0.16.0) (2026-10-26)
+
+
+### Features
+
+* **azure:** virtual networks, subnets and NAT gateways ([#44](https://github.com/parallelworks/squall/issues/44)) ([5628880](https://github.com/parallelworks/squall/commit/562888078ea6ce20b32acc982e8d3f98f36825e4))
+
 ## [0.15.0](https://github.com/parallelworks/squall/compare/v0.14.0...v0.15.0) (2026-10-26)
 
 
