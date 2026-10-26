@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.0](https://github.com/parallelworks/squall/compare/v0.14.0...v0.15.0) (2026-10-26)
+
+
+### Features
+
+* **azure:** Machine Learning workspaces, key vaults, Application Insights, role assignments and a Microsoft Graph stand-in ([#42](https://github.com/parallelworks/squall/issues/42)) ([1a755a2](https://github.com/parallelworks/squall/commit/1a755a269ed0a93e87ea7ffcaa4f27749928d25f))
+
 ## [0.14.0](https://github.com/parallelworks/squall/compare/v0.13.0...v0.14.0) (2026-10-26)
 
 
