@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.0](https://github.com/parallelworks/squall/compare/v0.13.0...v0.14.0) (2026-10-26)
+
+
+### Features
+
+* **arm:** Azure Cognitive Services accounts and deployments, and Search services ([#39](https://github.com/parallelworks/squall/issues/39)) ([2c94c89](https://github.com/parallelworks/squall/commit/2c94c8903a4bc577b329905b461d2e7f6d201eb6))
+
 ## [0.13.0](https://github.com/parallelworks/squall/compare/v0.12.0...v0.13.0) (2026-10-26)
 
 
