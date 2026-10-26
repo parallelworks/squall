@@ -65,6 +65,7 @@ type resource struct {
 	pe      *peState
 	vnet    *vnetState
 	subnet  *subnetState
+	lb      *lbState
 	// held is the subnet address of a resource that takes one of its own,
 	// such as a NetApp volume.
 	held *heldAddress
@@ -137,7 +138,7 @@ func (s *Server) claim(id, verb string) (*resource, *apiError) {
 	}
 	op := res.pending
 	switch res.kind {
-	case nsgKind, nicKind, pipKind, vnetKind, subnetKind, natKind, linkKind:
+	case nsgKind, nicKind, pipKind, vnetKind, subnetKind, natKind, lbKind, linkKind:
 		s.observe(op)
 		if op.complete == nil {
 			break

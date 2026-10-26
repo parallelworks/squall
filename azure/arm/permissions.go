@@ -40,6 +40,7 @@ var linkedActions = map[string][]link{
 	"Microsoft.Network/networkInterfaces/write": {
 		linkAt("Microsoft.Network/virtualNetworks/subnets/join/action", "properties.ipConfigurations.[].properties.subnet.id"),
 		linkAt("Microsoft.Network/publicIPAddresses/join/action", "properties.ipConfigurations.[].properties.publicIPAddress.id"),
+		linkAt("Microsoft.Network/loadBalancers/backendAddressPools/join/action", "properties.ipConfigurations.[].properties.loadBalancerBackendAddressPools.[].id"),
 		linkAt("Microsoft.Network/networkSecurityGroups/join/action", "properties.networkSecurityGroup.id"),
 	},
 	"Microsoft.Network/virtualNetworks/write": {
@@ -53,6 +54,9 @@ var linkedActions = map[string][]link{
 	"Microsoft.Network/natGateways/write": {
 		linkAt("Microsoft.Network/publicIPAddresses/join/action", "properties.publicIpAddresses.[].id"),
 		linkAt("Microsoft.Network/publicIPPrefixes/join/action", "properties.publicIpPrefixes.[].id"),
+	},
+	"Microsoft.Network/loadBalancers/write": {
+		linkAt("Microsoft.Network/publicIPAddresses/join/action", "properties.frontendIPConfigurations.[].properties.publicIPAddress.id"),
 	},
 	"Microsoft.Network/privateEndpoints/write": {
 		linkAt("Microsoft.Network/virtualNetworks/subnets/join/action", "properties.subnet.id"),
@@ -71,6 +75,8 @@ var linkedActions = map[string][]link{
 			"properties.virtualMachineProfile.networkProfile.networkInterfaceConfigurations.[].properties.ipConfigurations.[].properties.subnet.id"),
 		linkAt("Microsoft.Network/networkSecurityGroups/join/action",
 			"properties.virtualMachineProfile.networkProfile.networkInterfaceConfigurations.[].properties.networkSecurityGroup.id"),
+		linkAt("Microsoft.Network/loadBalancers/backendAddressPools/join/action",
+			"properties.virtualMachineProfile.networkProfile.networkInterfaceConfigurations.[].properties.ipConfigurations.[].properties.loadBalancerBackendAddressPools.[].id"),
 		linkAt(imageRead, "properties.virtualMachineProfile.storageProfile.imageReference.id"),
 	},
 }

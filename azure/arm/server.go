@@ -14,10 +14,10 @@
 //   - resource groups: get, check existence, create or update, list (with
 //     tag filters) and delete, which deletes everything in the group that
 //     nothing outside it uses;
-//   - Microsoft.Network: virtual networks, NAT gateways, network security
-//     groups, network interfaces, public IP addresses and private endpoints
-//     (create or update, update tags, get, delete; virtual networks and NAT
-//     gateways also list in a group), subnets (create or update, get, list
+//   - Microsoft.Network: virtual networks, NAT gateways, load balancers,
+//     network security groups, network interfaces, public IP addresses and
+//     private endpoints (create or update, update tags, get, delete; virtual
+//     networks, NAT gateways and load balancers also list in a group), subnets (create or update, get, list
 //     and delete), and the IP configurations and public IP addresses of scale
 //     set VMs (get);
 //   - Microsoft.Network private DNS: zones and virtual network links in the
@@ -69,9 +69,9 @@
 //     URL only, and a private DNS zone or link change in progress answers 202
 //     with an empty object, as Azure does.
 //   - A change to a resource that has another in progress is answered as its
-//     provider answers it. Virtual networks, subnets, NAT gateways, network
-//     security groups, network interfaces and public IP addresses fail it
-//     with 429 RetryableError
+//     provider answers it. Virtual networks, subnets, NAT gateways, load
+//     balancers, network security groups, network interfaces and public IP
+//     addresses fail it with 429 RetryableError
 //     (RetryableErrorDueToAnotherOperation) and virtual network links with 409
 //     Conflict, counting the call as a read of the change in progress. A VM
 //     or scale set change preempts the one in progress, which takes effect
@@ -124,13 +124,66 @@
 //     tier, and is Standard when the body names none, which is inferred; its
 //     idleTimeoutInMinutes is 4 unless set. Its public IP addresses must exist
 //     in its location, and each shows the NAT gateway as its natGateway. One
-//     already used by an interface or another NAT gateway fails with 400
-//     PublicIPAddressInUse, and a public IP address a NAT gateway uses cannot
-//     be deleted (PublicIPAddressCannotBeDeleted); both are inferred from how
-//     Azure answers an interface's public IP address. Public IP prefixes are
-//     recorded, not checked. The NAT gateway lists the subnets that use it,
-//     and deleting it while one does fails with 400
+//     already used by an interface, a load balancer or another NAT gateway
+//     fails with 400 PublicIPAddressInUse, and a public IP address a NAT
+//     gateway uses cannot be deleted (PublicIPAddressCannotBeDeleted); both
+//     are inferred from how Azure answers an interface's public IP address.
+//     Public IP prefixes are recorded, not checked. The NAT gateway lists the
+//     subnets that use it, and deleting it while one does fails with 400
 //     InUseNatGatewayCannotBeDeleted; the code and message are inferred.
+//   - A load balancer is public and takes the Standard SKU, which it shows
+//     with the Regional tier, and is Standard when the body names none, which
+//     is inferred. Each frontend IP configuration takes a public IP address in
+//     its location, which shows the frontend as its ipConfiguration. One
+//     already used by an interface, a NAT gateway or another frontend fails
+//     with 400 PublicIPAddressInUse, inferred as for a NAT gateway, and one a
+//     frontend uses cannot be deleted. Frontends, backend address pools and
+//     outbound rules show as children, with IDs under the load balancer, its
+//     etag and provisioningState, and the references between them. An
+//     outbound rule's backendAddressPool and frontendIPConfigurations must
+//     name children in the same body, or the write fails with
+//     InvalidResourceReference, the code Azure answers for a reference that
+//     does not resolve, which for one inside a load balancer is inferred. An
+//     outbound rule needs protocol, as the API requires; its
+//     idleTimeoutInMinutes is 4 and enableTcpReset false unless set. A scale
+//     set's or interface's IP configuration joins a pool through
+//     loadBalancerBackendAddressPools, which must name a pool a load balancer
+//     in its location holds, or the write fails with InvalidResourceReference,
+//     and the pool lists it in backendIPConfigurations. A scale set VM's entry
+//     there, its IP configuration under
+//     virtualMachines/{instance}/networkInterfaces, is inferred.
+//   - Outbound rule ports are checked as Microsoft documents outbound rules,
+//     with the codes it lists for them: allocatedOutboundPorts that is not a
+//     multiple of 8 fails with 400
+//     SpecifiedAllocatedOutboundPortsForOutboundRuleIsNotAMultipleOfEight,
+//     more than 64,000 with
+//     SpecifiedAllocatedOutboundPortsForOutboundRuleExceedsTotalNumberOfAllowedPortsPerRule,
+//     and more than the rule's frontends give each member of its pool, 64,000
+//     per public IP address, with
+//     SpecifiedAllocatedOutboundPortsForOutboundRuleExceedsTotalNumberOfAvailablePorts,
+//     naming the ports each member could have, in multiples of 8. The members
+//     are the primary IP configurations in the pool, one for each VM of a
+//     scale set; secondary ones do not count, as outbound rules do not apply
+//     to them. The check fails whichever write would break it: the load
+//     balancer's, or the scale set or interface write that grows the pool,
+//     such as a capacity raise, as Azure fails a scale set operation with it.
+//     The first two messages and the status of all three are inferred. A rule
+//     with no ports, or 0, takes the default allocation, is not checked and
+//     shows the ports Microsoft's default allocation table gives the pool's
+//     size, times its frontends, up to 1,024; that an empty pool's shows 1,024
+//     is recorded, the rest inferred.
+//   - Deleting a load balancer whose pool a scale set uses fails with 400
+//     LoadBalancerInUseByVirtualMachineScaleSet, as Azure answers it. Deleting
+//     one whose pool an interface uses, or a PUT that leaves out a pool in
+//     use, fails with 400 InUseBackendAddressPoolCannotBeDeleted, whose code
+//     and message are inferred. Load balancing rules, probes, inbound NAT
+//     rules and pools, internal frontends, public IP prefixes and backend
+//     addresses given by IP address are not modeled, and a body that gives
+//     one fails with BadRequest; nor are an outbound rule's allocationPolicy,
+//     which is not shown, or the routes of a load balancer's children, such
+//     as backendAddressPools/{name}. The operation name a change in progress
+//     gives in RetryableErrorDueToAnotherOperation, PutLoadBalancerOperation,
+//     is inferred.
 //   - A subnet the server does not hold, such as one a network interface,
 //     private endpoint or scale set names in a virtual network the server
 //     never saw, is recorded, not checked. Private IP addresses in a subnet
@@ -298,7 +351,10 @@
 // Microsoft.Network/networkSecurityGroups/join/action for a subnet's NAT
 // gateway and security group, whether the subnet is written alone or in its
 // virtual network, Microsoft.Network/publicIPAddresses/join/action for a NAT
-// gateway's public IP address, or Microsoft.Network/networkInterfaces/join/action
+// gateway's or load balancer frontend's public IP address,
+// Microsoft.Network/loadBalancers/backendAddressPools/join/action for the
+// pools an interface's or scale set's IP configurations join, or
+// Microsoft.Network/networkInterfaces/join/action
 // for a VM's interface, and fails without it with LinkedAuthorizationFailed,
 // naming each action and resource it lacks. A private endpoint with an
 // automatic connection needs the target's privateEndpointConnectionsApproval
@@ -487,14 +543,14 @@ func (s *Server) registerRoutes() {
 	s.add("GET", network+"/privateDnsOperationStatuses/{op}", "Microsoft.Network/privateDnsOperationStatuses/read", false, s.operationStatus)
 	s.add("GET", network+"/privateDnsOperationResults/{op}", "Microsoft.Network/privateDnsOperationResults/read", false, s.operationResult)
 
-	for _, k := range []*kind{nsgKind, nicKind, pipKind, peKind, vnetKind, natKind} {
+	for _, k := range []*kind{nsgKind, nicKind, pipKind, peKind, vnetKind, natKind, lbKind} {
 		item := network + "/" + k.plural + "/{name}"
 		s.add("PUT", item, k.action("write"), true, s.putNetwork(k))
 		s.add("PATCH", item, k.action("write"), false, s.patchTags(k))
 		s.add("GET", item, k.action("read"), false, s.getResource(k))
 		s.add("DELETE", item, k.action("delete"), true, s.deleteNetwork(k))
 	}
-	for _, k := range []*kind{vnetKind, natKind} {
+	for _, k := range []*kind{vnetKind, natKind, lbKind} {
 		s.add("GET", network+"/"+k.plural, k.action("read"), false, s.listNetwork(k))
 	}
 	subnets := network + "/virtualNetworks/{vnet}/subnets"

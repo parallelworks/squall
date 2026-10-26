@@ -64,7 +64,9 @@ type ipConfig struct {
 	static  bool
 	primary bool
 	pip     string
-	props   map[string]any
+	// pools are the load balancer backend address pools it is in.
+	pools []string
+	props map[string]any
 }
 
 type pipState struct {
@@ -216,6 +218,8 @@ func (s *Server) putNetwork(k *kind) handler {
 		spec.prepare = s.prepareSubnet
 	case natKind:
 		spec.prepare = s.prepareNAT
+	case lbKind:
+		spec.prepare = s.prepareLB
 	case nicKind:
 		spec.prepare = s.prepareNIC
 	case pipKind:
@@ -281,6 +285,9 @@ func (s *Server) prepareNIC(res *resource, p *parsed) (func(), *apiError) {
 		}
 	}
 	if err := s.checkFree(subnets, 0, res.id); err != nil {
+		return nil, err
+	}
+	if err := s.checkJoin(res.id, res.loc, nicPools(configs)); err != nil {
 		return nil, err
 	}
 	return func() {
@@ -366,6 +373,12 @@ func (s *Server) parseIPConfig(res *resource, rc map[string]any, i, n int) (*ipC
 				"Resource %s/ipConfigurations/%s is referencing public IP address %s that is already allocated to resource %s.",
 				res.id, ic.name, ic.pip, user)
 		}
+	}
+	if ic.pools, err = refIDs(props, "loadBalancerBackendAddressPools"); err != nil {
+		return nil, err
+	}
+	if err := s.checkPoolRefs(ic.pools, res.id, res.loc); err != nil {
+		return nil, err
 	}
 	ic.props = map[string]any{}
 	for k, v := range props {
@@ -488,6 +501,8 @@ func (s *Server) checkUnused(res *resource) *apiError {
 				"Nat Gateway %s cannot be deleted because it is in use by the following resources: %s. In order to delete the Nat Gateway, remove the association with the resource(s).",
 				res.id, strings.Join(users, ", "))
 		}
+	case lbKind:
+		return s.lbInUse(res)
 	case netappAccountKind, poolKind:
 		return s.netappInUse(res)
 	}
@@ -524,8 +539,9 @@ func (s *Server) nsgUsers(id string) []string {
 	return users
 }
 
-// pipUser returns the IP configuration or NAT gateway that uses the public
-// IP address id, or "". The caller holds s.mu.
+// pipUser returns the IP configuration, NAT gateway or load balancer frontend
+// IP configuration that uses the public IP address id, or "". The caller
+// holds s.mu.
 func (s *Server) pipUser(id string) string {
 	for _, res := range s.resources {
 		if res.nic == nil {
@@ -537,7 +553,7 @@ func (s *Server) pipUser(id string) string {
 			}
 		}
 	}
-	return s.pipNAT(id)
+	return cmp.Or(s.pipNAT(id), s.pipLB(id))
 }
 
 func (s *Server) renderNetwork(res *resource) map[string]any {
@@ -599,6 +615,8 @@ func (s *Server) renderNetwork(res *resource) map[string]any {
 		s.renderVNet(res, props)
 	case natKind:
 		s.renderNAT(res, props)
+	case lbKind:
+		s.renderLB(res, props)
 	}
 	return m
 }

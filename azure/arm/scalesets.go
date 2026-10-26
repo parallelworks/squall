@@ -57,6 +57,8 @@ type ipConfigSpec struct {
 	name, subnet string
 	primary      bool
 	pip          map[string]any
+	// pools are the load balancer backend address pools it joins.
+	pools []string
 }
 
 type instance struct {
@@ -280,6 +282,9 @@ func parseIPConfigSpec(ri map[string]any, path string) (ipConfigSpec, *apiError)
 		return spec, unsupported("privateIPAddressVersion %s is not supported", v)
 	}
 	spec.primary, _ = boolean(props, "primary")
+	if spec.pools, err = refIDs(props, "loadBalancerBackendAddressPools"); err != nil {
+		return spec, err
+	}
 	if spec.pip, err = object(props, "publicIPAddressConfiguration"); err != nil {
 		return spec, err
 	}
@@ -335,6 +340,13 @@ func (s *Server) putScaleSet(c *call) (*reply, *apiError) {
 	case b.prefix != "" && !strings.EqualFold(b.prefix, res.scale.prefix):
 		return nil, changeNotAllowed("computerNamePrefix")
 	}
+	for _, cfg := range b.nics {
+		for _, spec := range cfg.ips {
+			if err := s.checkPoolRefs(spec.pools, id, b.location); err != nil {
+				return nil, err
+			}
+		}
+	}
 	sc := res.scale
 	capacity := sc.capacity
 	if b.sku != nil {
@@ -350,6 +362,9 @@ func (s *Server) putScaleSet(c *call) (*reply, *apiError) {
 		return accepted(c, op, status, status, false, func() []byte { return withState(res, putState(status), render) }), nil
 	}
 	if err := s.checkScaleOut(b.nics, capacity-len(sc.sorted())); err != nil {
+		return nil, err
+	}
+	if err := s.checkJoin(id, b.location, scalePools(b.nics, capacity)); err != nil {
 		return nil, err
 	}
 	if sc.profile != "" && sc.profile != b.profile {
@@ -535,6 +550,9 @@ func (s *Server) patchScaleSet(c *call) (*reply, *apiError) {
 		}), nil
 	}
 	if err := s.checkScaleOut(sc.nics, capacity-len(sc.sorted())); err != nil {
+		return nil, err
+	}
+	if err := s.checkJoin(res.id, res.loc, scalePools(sc.nics, capacity)); err != nil {
 		return nil, err
 	}
 	if sku != nil {
