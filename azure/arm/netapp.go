@@ -3,7 +3,6 @@ package arm
 import (
 	"cmp"
 	"net/http"
-	"net/netip"
 	"slices"
 	"strings"
 )
@@ -43,12 +42,6 @@ var (
 	}
 )
 
-// volumeState is what a NetApp volume holds beyond its body.
-type volumeState struct {
-	subnet  string
-	address netip.Addr
-}
-
 const (
 	netappAccount = rg + "/providers/Microsoft.NetApp/netAppAccounts/{account}"
 	netappPool    = netappAccount + "/capacityPools/{pool}"
@@ -75,9 +68,11 @@ func netappName(id string) string {
 	return strings.Join(names, "/")
 }
 
+// netappLocation is the query a NetApp operation's Location URL adds to its path.
+const netappLocation = "operationResultResponseType=Location"
+
 // netappOps are the paths of a Microsoft.NetApp operation, whose
-// Azure-AsyncOperation and Location URLs share one path: the Location URL adds
-// operationResultResponseType=Location.
+// Azure-AsyncOperation and Location URLs share one path.
 func netappOps(c *call, location string) opPaths {
 	path := "/subscriptions/" + c.val("sub") + "/providers/Microsoft.NetApp/locations/" + location + "/operationResults/"
 	return opPaths{status: path, result: path, resultStatus: http.StatusOK}
@@ -99,7 +94,8 @@ var netappLevels = []*netappLevel{
 }
 
 func (s *Server) registerNetAppRoutes() {
-	s.add("GET", sub+"/providers/Microsoft.NetApp/locations/{loc}/operationResults/{op}", "Microsoft.NetApp/locations/operationresults/read", false, s.netappOperation)
+	s.add("GET", sub+"/providers/Microsoft.NetApp/locations/{loc}/operationResults/{op}", "Microsoft.NetApp/locations/operationresults/read", false,
+		s.onePathOperation(netappLocation, s.netappOperation))
 	for _, l := range netappLevels {
 		s.add("GET", l.path[:strings.LastIndex(l.path, "/")], l.kind.action("read"), false, s.listNetApp(l))
 		s.add("PUT", l.path, l.kind.action("write"), true, s.putNetApp(l))
@@ -135,19 +131,7 @@ func (s *Server) prepareVolume(res *resource, p *parsed) (func(), *apiError) {
 	if subnet == "" || str(p.props, "creationToken") == "" || p.props["usageThreshold"] == nil {
 		return nil, unsupported("a volume needs creationToken, subnetId and usageThreshold")
 	}
-	if res.volume != nil {
-		if key(subnet) != key(res.volume.subnet) {
-			return nil, changeNotAllowed("subnetId")
-		}
-		return func() { s.update(res, p) }, nil
-	}
-	if err := s.checkFree([]string{subnet}, 0, ""); err != nil {
-		return nil, err
-	}
-	return func() {
-		res.volume = &volumeState{subnet: subnet, address: s.allocPrivate(subnet, res.id)}
-		s.update(res, p)
-	}, nil
+	return s.holdAddress(res, p, subnet, "subnetId")
 }
 
 func (s *Server) getNetApp(l *netappLevel) handler {
@@ -200,15 +184,7 @@ func (s *Server) deleteNetApp(l *netappLevel) handler {
 			return nil, err
 		}
 		op := s.change(c, res, netappOps(c, res.loc), 0, stateDeleting, func() { s.remove(res) })
-		if op.status == opSucceeded {
-			return &reply{status: http.StatusNoContent}, nil
-		}
-		h := http.Header{}
-		h.Set("retry-after-ms", retryAfterMS)
-		status := c.base() + op.statusPath + "?api-version=" + c.query("api-version")
-		h.Set("Azure-AsyncOperation", status)
-		h.Set("Location", status+"&operationResultResponseType=Location")
-		return &reply{status: http.StatusAccepted, header: h}, nil
+		return acceptedOnePath(c, op, netappLocation), nil
 	}
 }
 
@@ -235,9 +211,9 @@ func renderNetApp(res *resource) map[string]any {
 		props["poolId"] = res.guid
 	case volumeKind:
 		props["fileSystemId"] = res.guid
-		if res.volume != nil {
+		if res.held != nil {
 			props["mountTargets"] = []any{map[string]any{
-				"mountTargetId": res.guid, "fileSystemId": res.guid, "ipAddress": res.volume.address.String(),
+				"mountTargetId": res.guid, "fileSystemId": res.guid, "ipAddress": res.held.address.String(),
 			}}
 		}
 	}
@@ -262,14 +238,10 @@ type netappOpResource struct {
 	Action       string `json:"action"`
 }
 
-// netappOperation answers a poll of a NetApp operation. Its Azure-AsyncOperation
-// URL answers 200 with the operation's status, which reads as the state the
-// resource shows, such as Creating, until it ends; its Location URL answers as
-// [Server.operationResult] does.
+// netappOperation answers a poll of a NetApp operation's Azure-AsyncOperation
+// URL: 200 with the operation's status, which reads as the state the resource
+// shows, such as Creating, until it ends.
 func (s *Server) netappOperation(c *call) (*reply, *apiError) {
-	if strings.EqualFold(c.query("operationResultResponseType"), "Location") {
-		return s.operationResult(c)
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	op, err := s.lookupOperation(c, false)
@@ -312,8 +284,8 @@ func (s *Server) Volumes() []Volume {
 	defer s.mu.Unlock()
 	var out []Volume
 	for _, res := range s.resources {
-		if res.volume != nil {
-			out = append(out, Volume{ID: res.id, MountAddress: res.volume.address.String()})
+		if res.kind == volumeKind && res.held != nil {
+			out = append(out, Volume{ID: res.id, MountAddress: res.held.address.String()})
 		}
 	}
 	slices.SortFunc(out, func(a, b Volume) int { return cmp.Compare(a.ID, b.ID) })

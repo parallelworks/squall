@@ -21,6 +21,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/privatedns/armprivatedns"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources/v3"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/storage/armstorage"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/storagecache/armstoragecache/v3"
 
 	"github.com/parallelworks/squall/azure/arm"
 	"github.com/parallelworks/squall/fault"
@@ -63,6 +64,8 @@ type clients struct {
 	netapps    *armnetapp.AccountsClient
 	pools      *armnetapp.PoolsClient
 	volumes    *armnetapp.VolumesClient
+	lustre     *armstoragecache.AmlFilesystemsClient
+	cache      *armstoragecache.ManagementClient
 	requests   *[]string
 }
 
@@ -120,6 +123,10 @@ func setupWith(t *testing.T, retry policy.RetryOptions, opts ...arm.Option) *cli
 	if err != nil {
 		t.Fatal(err)
 	}
+	cache, err := armstoragecache.NewClientFactory(subscription, credential{}, options)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return &clients{
 		server: s, groups: resources.NewResourceGroupsClient(),
 		vms: compute.NewVirtualMachinesClient(), sets: compute.NewVirtualMachineScaleSetsClient(),
@@ -129,6 +136,7 @@ func setupWith(t *testing.T, retry policy.RetryOptions, opts ...arm.Option) *cli
 		accounts: store.NewAccountsClient(), blob: store.NewBlobServicesClient(), containers: store.NewBlobContainersClient(),
 		files: store.NewFileServicesClient(), shares: store.NewFileSharesClient(), endpoints: network.NewPrivateEndpointsClient(),
 		netapps: netapp.NewAccountsClient(), pools: netapp.NewPoolsClient(), volumes: netapp.NewVolumesClient(),
+		lustre: cache.NewAmlFilesystemsClient(), cache: cache.NewManagementClient(),
 		requests: requests,
 	}
 }

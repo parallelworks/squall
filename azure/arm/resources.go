@@ -63,7 +63,9 @@ type resource struct {
 	scale   *scaleSet
 	account *accountState
 	pe      *peState
-	volume  *volumeState
+	// held is the subnet address of a resource that takes one of its own,
+	// such as a NetApp volume.
+	held *heldAddress
 }
 
 // inGroup reports whether r is in the group with key gk.
@@ -357,8 +359,8 @@ func (s *Server) remove(res *resource) {
 		}
 	case res.account != nil:
 		s.removeAccountChildren(res)
-	case res.volume != nil:
-		s.releasePrivate(res.volume.subnet, res.volume.address)
+	case res.held != nil:
+		s.releasePrivate(res.held.subnet, res.held.address)
 	case res.pe != nil:
 		if nic := s.resources[key(res.pe.nic)]; nic != nil {
 			s.remove(nic)
