@@ -41,7 +41,14 @@
 //     delete), deleted accounts (get and purge) and model capacities (list,
 //     as [WithModelCapacities] sets them);
 //   - Microsoft.Search: search services (create or update, get and delete)
-//     and their admin keys (list).
+//     and their admin keys (list);
+//   - Microsoft.KeyVault: vaults (create or update, get and list in a group);
+//   - Microsoft.Insights: Application Insights components (create or update,
+//     get and list in a group);
+//   - Microsoft.MachineLearningServices: workspaces (create or update, get and
+//     delete);
+//   - Microsoft.Authorization: role assignments at a resource group's scope
+//     (create and delete).
 //
 // Other calls answer 404. Every call needs an api-version, which may be any
 // value, and a bearer token, which is not checked. Where it differs from
@@ -195,6 +202,39 @@
 //     service answers 200 at once. Search service names are not unique across
 //     the server, where Azure makes them unique across Azure. Admin keys are
 //     derived from the service and never change.
+//   - Key vaults are body-polled too: a create or update answers 200, as Key
+//     Vault does, and the vault shows RegisteringDns until it is done, and
+//     the URI https://{name}.vault.azure.net/. A vault needs tenantId and
+//     sku.name. Vault names are not unique across the server, where Azure
+//     makes them unique across Azure, and deleting a vault's group deletes
+//     it outright, where Azure keeps a deleted vault until it is purged.
+//   - An Application Insights component create or update finishes at once
+//     and answers 200, whatever [WithSettleAfter] says, as Application
+//     Insights answers. The component's type, and the namespace in its ID,
+//     are in lower case, as Application Insights writes them. It needs kind
+//     and Application_Type, and its instrumentation key and connection string
+//     are derived from it and never change. A component without a
+//     WorkspaceResourceId is accepted.
+//   - A Machine Learning workspace change in progress answers 202 with no
+//     body and an Azure-AsyncOperation URL under
+//     Microsoft.MachineLearningServices/locations/{location}/workspaceOperationsStatus,
+//     and a Location URL, the same path with type=location, which answers 200
+//     once it is done; a create that finishes at once answers 200. The
+//     workspace shows a workspaceId and, with a system-assigned identity, a
+//     principalId. The storage account, key vault and Application Insights
+//     component it names are recorded, not checked. Deleting a workspace
+//     deletes it outright, with or without forceToPurge, where Azure keeps a
+//     workspace deleted without it as soft-deleted.
+//   - A role assignment's create answers 201, and one that puts it again with
+//     the same principal and role answers 200, as the 2022-04-01 API
+//     documents. Changing either fails with 400
+//     RoleAssignmentUpdateNotPermitted, and assigning a role a principal holds
+//     at the scope under another name fails with 409 RoleAssignmentExists.
+//     A delete answers 200 with the assignment, or 204 when there is none.
+//     Principals and role definitions are not checked, so a principal Azure
+//     has not replicated yet never fails with PrincipalNotFound, and names
+//     need not be GUIDs or unique across scopes. Deleting the group deletes
+//     the assignments at its scope.
 //
 // Fault method names are the operation's Azure RBAC action, such as
 // "Microsoft.Compute/virtualMachines/write",
@@ -230,7 +270,9 @@
 // Microsoft.NetApp/locations/operationresults/read, a Microsoft.StorageCache
 // one Microsoft.StorageCache/locations/ascOperations/read and a
 // Microsoft.CognitiveServices one
-// Microsoft.CognitiveServices/locations/operationresults/read. Actions are not
+// Microsoft.CognitiveServices/locations/operationresults/read, and a
+// Microsoft.MachineLearningServices one
+// Microsoft.MachineLearningServices/locations/workspaceOperationsStatus/read. Actions are not
 // checked against the scope they act on: a grant covers every subscription.
 //
 // A lost response aborts the handler with [http.ErrAbortHandler] after
@@ -446,6 +488,10 @@ func (s *Server) registerRoutes() {
 	s.registerStorageCacheRoutes()
 	s.registerCognitiveRoutes()
 	s.registerSearchRoutes()
+	s.registerKeyVaultRoutes()
+	s.registerInsightsRoutes()
+	s.registerMachineLearningRoutes()
+	s.registerAuthorizationRoutes()
 }
 
 func (s *Server) add(method, pattern, action string, lro bool, h handler) {

@@ -173,3 +173,26 @@ func TestPrivateDNSChangesInProgressAnswer202(t *testing.T) {
 		t.Fatalf("operation done = %d %v", rec.Code, op)
 	}
 }
+
+// A workspace change in progress answers 202 with no body and both polling
+// URLs on one path, the Location URL adding type=location, which answers 202
+// until the change is done.
+func TestWorkspaceChangesInProgressAnswer202(t *testing.T) {
+	s := arm.New(arm.WithSettleAfter(-1))
+	newGroup(t, s)
+	rec, _ := do(t, s, http.MethodPut, groupPath+"/providers/Microsoft.MachineLearningServices/workspaces/ws", `{"location":"eastus"}`)
+	status, location := rec.Header().Get("Azure-AsyncOperation"), rec.Header().Get("Location")
+	if rec.Code != http.StatusAccepted || rec.Body.Len() != 0 ||
+		!strings.Contains(status, "/providers/Microsoft.MachineLearningServices/locations/eastus/workspaceOperationsStatus/") ||
+		location != status+"&type=location" {
+		t.Fatalf("create = %d %q %q %q", rec.Code, rec.Body, status, location)
+	}
+	u, _ := url.Parse(location)
+	if rec, _ := do(t, s, http.MethodGet, u.RequestURI(), ""); rec.Code != http.StatusAccepted {
+		t.Fatalf("Location poll in progress = %d", rec.Code)
+	}
+	s.Settle()
+	if rec, body := do(t, s, http.MethodGet, u.RequestURI(), ""); rec.Code != http.StatusOK || body["name"] != "ws" {
+		t.Fatalf("Location poll once done = %d %v", rec.Code, body)
+	}
+}

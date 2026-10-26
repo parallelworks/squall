@@ -206,6 +206,12 @@ func accessKey(res *resource, name string, n int) string {
 	return strings.ToUpper(hex.EncodeToString(sum[:]))[:n]
 }
 
+// derivedUUID derives the UUID called name of res, so it never changes.
+func derivedUUID(res *resource, name string) string {
+	k := strings.ToLower(accessKey(res, name, 32))
+	return k[:8] + "-" + k[8:12] + "-" + k[12:16] + "-" + k[16:20] + "-" + k[20:]
+}
+
 func renderCognitiveAccount(res *resource) map[string]any {
 	m, props := envelope(res)
 	props["endpoint"] = "https://" + res.loc + ".api.cognitive.microsoft.com/"

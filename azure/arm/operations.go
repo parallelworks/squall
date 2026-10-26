@@ -26,6 +26,8 @@ type operation struct {
 	// with result's body when it is 200 and result is set.
 	resultStatus int
 	result       func() []byte
+	// locationQuery is what the Location URL adds to resultPath, if anything.
+	locationQuery string
 	// pollStatus answers a poll of statusPath while the operation runs.
 	pollStatus int
 	status     string
@@ -57,6 +59,8 @@ type opPaths struct {
 	status, result string
 	pollStatus     int
 	resultStatus   int
+	// locationQuery is what the Location URL adds to the result path, if anything.
+	locationQuery string
 }
 
 func providerOps(c *call, namespace, location string) opPaths {
@@ -89,7 +93,7 @@ func (s *Server) begin(c *call, paths opPaths, resultStatus int, complete func()
 	id := s.newUUID()
 	op := &operation{
 		id: id, resultPath: paths.result + id, resultStatus: cmp.Or(resultStatus, paths.resultStatus, http.StatusNoContent),
-		pollStatus: cmp.Or(paths.pollStatus, http.StatusOK), start: s.now(),
+		pollStatus: cmp.Or(paths.pollStatus, http.StatusOK), locationQuery: paths.locationQuery, start: s.now(),
 	}
 	if paths.status != "" {
 		op.statusPath = paths.status + id
@@ -201,7 +205,11 @@ func accepted(c *call, op *operation, syncStatus, asyncStatus int, location bool
 		h.Set("Azure-AsyncOperation", c.base()+op.statusPath+query)
 	}
 	if location || op.statusPath == "" {
-		h.Set("Location", c.base()+op.resultPath+query)
+		location := c.base() + op.resultPath + query
+		if op.locationQuery != "" {
+			location += "&" + op.locationQuery
+		}
+		h.Set("Location", location)
 	}
 	return &reply{status: asyncStatus, header: h, body: body()}
 }
