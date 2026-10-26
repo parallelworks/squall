@@ -63,6 +63,7 @@ type resource struct {
 	scale   *scaleSet
 	account *accountState
 	pe      *peState
+	volume  *volumeState
 }
 
 // inGroup reports whether r is in the group with key gk.
@@ -316,6 +317,7 @@ func (s *Server) change(c *call, res *resource, paths opPaths, resultStatus int,
 		}
 		return nil
 	})
+	op.target, op.state = res.id, state
 	if op.status == opInProgress {
 		res.state, res.pending = state, op
 	}
@@ -355,6 +357,8 @@ func (s *Server) remove(res *resource) {
 		}
 	case res.account != nil:
 		s.removeAccountChildren(res)
+	case res.volume != nil:
+		s.releasePrivate(res.volume.subnet, res.volume.address)
 	case res.pe != nil:
 		if nic := s.resources[key(res.pe.nic)]; nic != nil {
 			s.remove(nic)
