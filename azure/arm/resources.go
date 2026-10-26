@@ -361,6 +361,8 @@ func (s *Server) remove(res *resource) {
 		s.removeAccountChildren(res)
 	case res.held != nil:
 		s.releasePrivate(res.held.subnet, res.held.address)
+	case res.kind == cognitiveAccountKind:
+		s.softDelete(res)
 	case res.pe != nil:
 		if nic := s.resources[key(res.pe.nic)]; nic != nil {
 			s.remove(nic)
