@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/parallelworks/squall/compare/v0.11.0...v0.12.0) (2026-10-26)
+
+
+### Features
+
+* **arm:** Azure NetApp Files accounts, capacity pools and volumes ([#35](https://github.com/parallelworks/squall/issues/35)) ([f299634](https://github.com/parallelworks/squall/commit/f29963432595a65679ccf1b37b27fba4dec19206))
+
 ## [0.11.0](https://github.com/parallelworks/squall/compare/v0.10.0...v0.11.0) (2026-10-25)
 
 
