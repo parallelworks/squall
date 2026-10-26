@@ -274,3 +274,32 @@ func (s *Server) operationResult(c *call) (*reply, *apiError) {
 	}
 	return rep, nil
 }
+
+// onePathOperation answers the polls of an operation whose Azure-AsyncOperation
+// and Location URLs share a path, the Location URL adding query, as NetApp's
+// and StorageCache's do: with status, and with [Server.operationResult] when
+// the query is there.
+func (s *Server) onePathOperation(query string, status handler) handler {
+	name, value, _ := strings.Cut(query, "=")
+	return func(c *call) (*reply, *apiError) {
+		if strings.EqualFold(c.query(name), value) {
+			return s.operationResult(c)
+		}
+		return status(c)
+	}
+}
+
+// acceptedOnePath answers a delete that started op, polled as
+// [Server.onePathOperation] describes: 204 when it finished at once, and
+// otherwise 202 with both URLs.
+func acceptedOnePath(c *call, op *operation, query string) *reply {
+	if op.status == opSucceeded {
+		return &reply{status: http.StatusNoContent}
+	}
+	h := http.Header{}
+	h.Set("retry-after-ms", retryAfterMS)
+	status := c.base() + op.statusPath + "?api-version=" + c.query("api-version")
+	h.Set("Azure-AsyncOperation", status)
+	h.Set("Location", status+"&"+query)
+	return &reply{status: http.StatusAccepted, header: h}
+}

@@ -141,3 +141,29 @@ func (s *Server) allocPublic(holder string) netip.Addr {
 	s.publicIPs[a] = holder
 	return a
 }
+
+// heldAddress is an address a resource takes in a subnet of its own, rather
+// than through a network interface.
+type heldAddress struct {
+	subnet  string
+	address netip.Addr
+}
+
+// holdAddress returns how to apply p to res, which takes an address in subnet,
+// named by the property member. A new one takes the next free address; an
+// existing one keeps its own and cannot move. The caller holds s.mu.
+func (s *Server) holdAddress(res *resource, p *parsed, subnet, member string) (func(), *apiError) {
+	if res.held != nil {
+		if key(subnet) != key(res.held.subnet) {
+			return nil, changeNotAllowed(member)
+		}
+		return func() { s.update(res, p) }, nil
+	}
+	if err := s.checkFree([]string{subnet}, 0, ""); err != nil {
+		return nil, err
+	}
+	return func() {
+		res.held = &heldAddress{subnet: subnet, address: s.allocPrivate(subnet, res.id)}
+		s.update(res, p)
+	}, nil
+}

@@ -33,7 +33,9 @@
 //     blob and file services' properties (set and get), and blob containers
 //     and file shares (create, get, list and delete);
 //   - Microsoft.NetApp: accounts, capacity pools and volumes (create or
-//     update, get, list in their group, account or pool, and delete).
+//     update, get, list in their group, account or pool, and delete);
+//   - Microsoft.StorageCache: Azure Managed Lustre file systems (create or
+//     update, get, list in a group and delete), and subnet checks.
 //
 // Other calls answer 404. Every call needs an api-version, which may be any
 // value, and a bearer token, which is not checked. Where it differs from
@@ -146,6 +148,18 @@
 //     checked. Deleting an account or pool that holds pools or volumes fails
 //     with 409 CannotDeleteResource, as Azure refuses it; the code is
 //     inferred. An update's status, Updating, is inferred too.
+//   - A Managed Lustre change in progress answers with an
+//     Azure-AsyncOperation URL under
+//     Microsoft.StorageCache/locations/{location}/ascOperations; a delete
+//     also answers a Location URL, the same path with monitor=true, which
+//     answers 200 with no body once it is done. A new file system takes an
+//     address in its filesystemSubnet, which its clientInfo shows as
+//     mgsAddress, with a mount command, once created; until then they are
+//     empty and its health is Transitioning. Its throughput is its capacity
+//     times the MB/s per TiB its SKU names, such as 250 for
+//     AMLFS-Durable-Premium-250. An update answers 200 and shows Updating,
+//     where Azure answers 201 and shows Creating. A subnet check answers 200
+//     for any subnet.
 //
 // Fault method names are the operation's Azure RBAC action, such as
 // "Microsoft.Compute/virtualMachines/write",
@@ -178,7 +192,8 @@
 // Microsoft.Compute defines no operationResults action, and polling a
 // Microsoft.Storage operation needs Microsoft.Storage/operations/read, and
 // polling a Microsoft.NetApp one needs
-// Microsoft.NetApp/locations/operationresults/read. Actions are not
+// Microsoft.NetApp/locations/operationresults/read and a Microsoft.StorageCache
+// one Microsoft.StorageCache/locations/ascOperations/read. Actions are not
 // checked against the scope they act on: a grant covers every subscription.
 //
 // A lost response aborts the handler with [http.ErrAbortHandler] after
@@ -388,6 +403,7 @@ func (s *Server) registerRoutes() {
 	s.add("GET", sub+"/providers/Microsoft.Compute/skus", "Microsoft.Compute/skus/read", false, s.listSKUs)
 	s.registerStorageRoutes()
 	s.registerNetAppRoutes()
+	s.registerStorageCacheRoutes()
 }
 
 func (s *Server) add(method, pattern, action string, lro bool, h handler) {
