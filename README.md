@@ -24,8 +24,8 @@ failure replays from its seed.
 | [`access`](https://pkg.go.dev/github.com/parallelworks/squall/access) | Grants a set of permissions (Google Cloud IAM permissions, AWS IAM actions or Azure RBAC actions) and refuses calls that need one it lacks, with the error the cloud answers, including those a request's fields add and Azure's linked checks. Reports which permissions were needed but missing and which were granted but never used. |
 | [`aws/ec2`](https://pkg.go.dev/github.com/parallelworks/squall/aws/ec2) | Amazon EC2: instances (run with client tokens, describe with filters and pages, start, stop, terminate, change type), images (describe, register from snapshots, deregister), instance types, EBS volumes (create, describe, attach, detach, delete), EBS snapshots (create, describe with filters and pages, delete), placement groups, tags, Elastic IP addresses (allocate, describe, release, associate with an interface or instance, disassociate) and network interfaces (create with client tokens, describe, delete). |
 | [`aws/s3`](https://pkg.go.dev/github.com/parallelworks/squall/aws/s3) | Amazon S3: general purpose buckets (create, head, list with pages and filters, delete), their tags, versioning, policy and CORS rules, and objects (put, delete one or many, list versions and delete markers). |
-| [`azure/arm`](https://pkg.go.dev/github.com/parallelworks/squall/azure/arm) | Azure Resource Manager: resource groups (get, create or update, list with tag filters, delete with everything in them that nothing outside uses), virtual machines (create or update, get, list, instance view, deallocate, start, delete) and their extensions (create or update, get, list, delete), Uniform scale sets (create or update, update, get, list, delete, delete instances) and their VMs, managed disks (VM OS disks included) and snapshots, with cross-region incremental snapshot copies whose completionPercent climbs to 100, Azure Compute Gallery galleries, image definitions and image versions with their replication status, virtual networks and their subnets, NAT gateways, public load balancers with backend pools and outbound rules, network security groups, network interfaces and public IP addresses, the IP configurations of scale set VMs, private DNS zones, virtual network links and A record sets, resource provider registration, Cost Management exports at a subscription's scope, and long-running operations to poll. |
-| [`azure/graph`](https://pkg.go.dev/github.com/parallelworks/squall/azure/graph) | Microsoft Graph: a directory's domains (list) and users (create with Microsoft Entra's name and password rules, get by ID or user principal name, delete), with application permissions checked as Graph documents them. |
+| [`azure/arm`](https://pkg.go.dev/github.com/parallelworks/squall/azure/arm) | Azure Resource Manager: resource groups (get, create or update, list with tag filters, delete with everything in them that nothing outside uses), virtual machines (create or update, get, list, instance view, deallocate, start, delete) and their extensions (create or update, get, list, delete), Uniform scale sets (create or update, update, get, list, delete, delete instances) and their VMs, managed disks (VM OS disks included) and snapshots, with cross-region incremental snapshot copies whose completionPercent climbs to 100, Azure Compute Gallery galleries, image definitions and image versions with their replication status, virtual networks and their subnets, NAT gateways, public load balancers with backend pools and outbound rules, network security groups, network interfaces and public IP addresses, the IP configurations of scale set VMs, private DNS zones, virtual network links and A record sets, resource provider registration, Cost Management exports at a subscription's scope, Log Analytics workspaces (create or update, recover, get, list, delete with soft deletion) and the default workspace Application Insights makes for a component that names none, Cognitive Services deployments with partner model attestations, and long-running operations to poll. |
+| [`azure/graph`](https://pkg.go.dev/github.com/parallelworks/squall/azure/graph) | Microsoft Graph: the organization (list), a directory's domains (list) and users (create with Microsoft Entra's name and password rules, get by ID or user principal name, delete, permanently delete once deleted), with application permissions checked as Graph documents them. |
 | [`gcp/compute`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/compute) | Compute Engine: instances (bulkInsert, insert, get, list, aggregatedList, delete, stop, start, setLabels, setMachineType, addAccessConfig, attachDisk, detachDisk), disks (get, list, aggregatedList, insert, delete), snapshots (insert, get, list, delete), zones, regional addresses (get, list, insert, delete, setLabels), resource policies, instance templates, routes, and zone, region and global operations (get, wait). |
 | [`gcp/lustre`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/lustre) | Managed Lustre: instances (create with the API's capacity, tier, ID, filesystem, root squash and maintenance rules, get, list with filters on name, state, filesystem, network, description and labels, patch labels, description, gkeSupportEnabled and capacity, delete) and their long-running operations (get, list, delete, cancel). |
 | [`gcp/storage`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/storage) | Cloud Storage: buckets (insert, get, list, patch labels, versioning and CORS, delete) and objects (multipart and media uploads, list with versions, delete by generation). |
@@ -400,9 +400,77 @@ For Azure Resource Manager:
   so deleting a resource group, even the destination's, leaves them. Runs,
   run history, `$expand` and other scopes are not served. `Exports` shows
   each export's definition, destination, schedule and eTag.
+- A Log Analytics workspace create answers 201 and an update 200, polled
+  through an `Azure-AsyncOperation` URL under
+  `Microsoft.OperationalInsights/locations/{location}/operationstatuses`, and
+  a delete 200, or 202 with a `Location` URL under
+  `workspaces/{name}/operationresults` as well, as Azure CLI recordings
+  (`test_monitor_log_analytics_workspace_default`) and the REST API's
+  `WorkspacesDelete` example show; deleting a missing workspace answers 204,
+  as Microsoft documents. A workspace shows a `customerId`, and the PerGB2018
+  SKU, 30 days of retention, public network access and the `features` and
+  `workspaceCapping` a recording shows unless set: 30 days is the default
+  Microsoft documents and PerGB2018 its pay-as-you-go tier, which as the
+  default when a create names no SKU is inferred. Deleting a workspace, or
+  its group, keeps it as deleted for 14 days, as Microsoft documents, unless
+  the delete passes `force=true`; `DeletedLogAnalyticsWorkspaces` lists them.
+  A create with the deleted workspace's group, name and location recovers
+  it, keeping its `customerId`, showing `Restoring` while in progress (201,
+  as a recording of `az monitor log-analytics workspace recover` shows); that
+  it keeps the properties the create leaves out is inferred from that
+  recording. A create in another location while the name is held fails with
+  409 `Conflict`; the code and message are inferred. The polling action for
+  `operationresults`,
+  `Microsoft.OperationalInsights/workspaces/operationresults/read`, is
+  inferred from the path. Tables, data sources, deleted workspace listing and
+  shared keys are not served.
+- An Application Insights component records and echoes
+  `properties.WorkspaceResourceId` as sent, and shows `IngestionMode`
+  `LogAnalytics` when linked unless set, as the REST API's
+  `ComponentsCreate` example shows. The workspace it names is not checked. A
+  component created without one gets a workspace made for it, as Microsoft
+  Learn documents ("a new Log Analytics resource is created automatically");
+  it is `DefaultWorkspace-{subscription}-{code}` in the group
+  `DefaultResourceGroup-{code}`, both in the component's location, where
+  `{code}` is the location's `laRegionCode` in the Application Insights
+  portal's region mapping, the names the Azure CLI uses for the same default
+  (`appservice/_create_util.py`). Making them in Application Insights rather
+  than the client, their location, and using the location's name as the code
+  for one the mapping gives none are inferred. Later components reuse them,
+  an update that leaves out the link keeps it (inferred), and they outlive
+  the component's group, as `Resources` and `ResourceGroups` show. No RBAC
+  action is checked on them.
+- A Cognitive Services deployment records and echoes
+  `properties.modelProviderData` (`industry`, `organizationName`,
+  `countryCode`), which clients send for partner models such as Anthropic's
+  on newer api-versions than the SDK's, as the Azure-Samples Claude starter
+  kit and an azure-rest-api-specs issue (#43610) show; the published specs
+  do not describe it. Other members fail with `InvalidRequestContent`.
+  Values are not checked, and a partner model deployed without it is not
+  failed, though those sources report Azure failing it with
+  `AnthropicOrganizationCreationFailed`. `Deployments` shows it.
 - Fault method names are the Azure RBAC action, such as
   `Microsoft.Compute/virtualMachines/write`, and a rule's `Resource` is the
   resource ID in the call's path.
+
+For Microsoft Graph:
+
+- Permanently deleting a deleted user (`DELETE /directory/deletedItems/{id}`)
+  answers 204 and moves it from `DeletedUsers` to `PurgedUsers`, as
+  Microsoft documents. It needs `User.DeleteRestore.All`, the only
+  application permission Graph lists for a user; `Directory.ReadWrite.All` is
+  documented as not allowing user deletion, and without it the call fails
+  with the stand-in's usual 403 `Authorization_RequestDenied`. An ID that is
+  not a deleted user's fails with 404 `Request_ResourceNotFound`, the status
+  and code a public report records for the call; the message is inferred.
+- `GET /organization` lists one organization, as Graph documents, in the
+  shape of its example: `WithOrganization` sets its ID (the tenant ID),
+  display name, `countryLetterCode` and `defaultUsageLocation`, which default
+  to `00000000-0000-0000-0000-000000000001`, Squall, US and US, and
+  `verifiedDomains` are the verified domains `WithDomains` sets. It needs
+  `Organization.Read.All`, `Directory.Read.All`,
+  `Organization.ReadWrite.All` or `Directory.ReadWrite.All`, as Graph
+  documents. Each verified domain's capabilities and type are inferred.
 
 ## Requirements
 

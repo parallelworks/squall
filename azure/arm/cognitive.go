@@ -31,7 +31,7 @@ var (
 		typ: "Microsoft.CognitiveServices/accounts/deployments", plural: "deployments", typeName: "Deployment",
 		top: []string{"sku"},
 		props: []string{
-			"capacitySettings", "currentCapacity", "deploymentState", "model", "parentDeploymentName", "raiPolicyName", "routing",
+			"capacitySettings", "currentCapacity", "deploymentState", "model", "modelProviderData", "parentDeploymentName", "raiPolicyName", "routing",
 			"scaleSettings", "serviceTier", "spilloverDeploymentName", "versionUpgradeOption",
 		},
 		readOnly: []string{"callRateLimit", "capabilities", "dynamicThrottlingEnabled", "provisioningState", "rateLimits"},
@@ -294,7 +294,58 @@ func (s *Server) prepareDeployment(res *resource, p *parsed) (func(), *apiError)
 	if str(sku, "name") == "" || str(model, "name") == "" || str(model, "format") == "" {
 		return nil, unsupported("a deployment needs sku.name, properties.model.name and properties.model.format")
 	}
+	data, err := object(p.props, "modelProviderData")
+	if err != nil {
+		return nil, err
+	}
+	if err := checkMembers(data, "ModelProviderData", "properties.modelProviderData", "countryCode", "industry", "organizationName"); err != nil {
+		return nil, err
+	}
 	return func() { s.update(res, p) }, nil
+}
+
+// Deployment is a snapshot of a Cognitive Services deployment.
+type Deployment struct {
+	ID string
+	// Account is the ID of the account it belongs to.
+	Account                              string
+	ModelFormat, ModelName, ModelVersion string
+	SKU                                  string
+	ProvisioningState                    string
+	// ModelProviderData is what the deployment told the model's provider about the caller, or nil.
+	ModelProviderData *ModelProviderData
+}
+
+// ModelProviderData is the attestation a deployment of a partner model gives its provider.
+type ModelProviderData struct {
+	Industry, OrganizationName, CountryCode string
+}
+
+// Deployments returns the Cognitive Services deployments the server holds, ordered by ID.
+func (s *Server) Deployments() []Deployment {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Deployment
+	for _, res := range s.resources {
+		if res.kind != deploymentKind {
+			continue
+		}
+		model, _ := res.props["model"].(map[string]any)
+		sku, _ := res.top["sku"].(map[string]any)
+		d := Deployment{
+			ID: res.id, Account: res.id[:strings.LastIndex(strings.ToLower(res.id), "/deployments/")],
+			ModelFormat: str(model, "format"), ModelName: str(model, "name"), ModelVersion: str(model, "version"), SKU: str(sku, "name"),
+			ProvisioningState: res.state,
+		}
+		if data, ok := res.props["modelProviderData"].(map[string]any); ok {
+			d.ModelProviderData = &ModelProviderData{
+				Industry: str(data, "industry"), OrganizationName: str(data, "organizationName"), CountryCode: str(data, "countryCode"),
+			}
+		}
+		out = append(out, d)
+	}
+	slices.SortFunc(out, func(a, b Deployment) int { return cmp.Compare(a.ID, b.ID) })
+	return out
 }
 
 func (s *Server) getDeployment(c *call) (*reply, *apiError) {

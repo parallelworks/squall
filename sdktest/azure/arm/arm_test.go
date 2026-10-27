@@ -24,6 +24,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/machinelearning/armmachinelearning/v4"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/netapp/armnetapp/v6"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v9"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/operationalinsights/armoperationalinsights/v3"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/privatedns/armprivatedns"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources/v3"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/search/armsearch"
@@ -92,6 +93,7 @@ type clients struct {
 	vaults      *armkeyvault.VaultsClient
 	components  *armapplicationinsights.ComponentsClient
 	workspaces  *armmachinelearning.WorkspacesClient
+	logs        *armoperationalinsights.WorkspacesClient
 	roles       *armauthorization.RoleAssignmentsClient
 	providers   *armresources.ProvidersClient
 	exports     *armcostmanagement.ExportsClient
@@ -176,6 +178,10 @@ func setupWith(t *testing.T, retry policy.RetryOptions, opts ...arm.Option) *cli
 	if err != nil {
 		t.Fatal(err)
 	}
+	logs, err := armoperationalinsights.NewClientFactory(subscription, credential{}, options)
+	if err != nil {
+		t.Fatal(err)
+	}
 	authorization, err := armauthorization.NewClientFactory(subscription, credential{}, options)
 	if err != nil {
 		t.Fatal(err)
@@ -201,7 +207,7 @@ func setupWith(t *testing.T, retry policy.RetryOptions, opts ...arm.Option) *cli
 		cognitive: cog.NewAccountsClient(), deployments: cog.NewDeploymentsClient(), deleted: cog.NewDeletedAccountsClient(),
 		capacities: cog.NewModelCapacitiesClient(), search: search.NewServicesClient(), searchKeys: search.NewAdminKeysClient(),
 		vaults: keyvault.NewVaultsClient(), components: insights.NewComponentsClient(), workspaces: ml.NewWorkspacesClient(),
-		roles: authorization.NewRoleAssignmentsClient(), providers: resources.NewProvidersClient(), exports: cost.NewExportsClient(),
+		logs: logs.NewWorkspacesClient(), roles: authorization.NewRoleAssignmentsClient(), providers: resources.NewProvidersClient(), exports: cost.NewExportsClient(),
 		requests: requests,
 	}
 }

@@ -36,7 +36,17 @@ func (s *Server) prepareComponent(res *resource, p *parsed) (func(), *apiError) 
 	if str(p.top, "kind") == "" || str(p.props, "Application_Type") == "" {
 		return nil, unsupported("an Application Insights component needs kind and properties.Application_Type")
 	}
-	return func() { s.update(res, p) }, nil
+	if str(p.props, "WorkspaceResourceId") != "" {
+		return func() { s.update(res, p) }, nil
+	}
+	return func() {
+		workspace := str(res.props, "WorkspaceResourceId")
+		if workspace == "" {
+			workspace = s.defaultLogWorkspace(res.sub, res.loc)
+		}
+		p.props["WorkspaceResourceId"] = workspace
+		s.update(res, p)
+	}, nil
 }
 
 func (s *Server) getComponent(c *call) (*reply, *apiError) {
@@ -73,5 +83,8 @@ func renderComponent(res *resource) map[string]any {
 	props["InstrumentationKey"] = instrumentationKey
 	props["ConnectionString"] = "InstrumentationKey=" + instrumentationKey + ";IngestionEndpoint=https://" + res.loc + "-0.in.applicationinsights.azure.com/"
 	props["CreationDate"] = timestamp(res.created)
+	if props["IngestionMode"] == nil && props["WorkspaceResourceId"] != nil {
+		props["IngestionMode"] = "LogAnalytics"
+	}
 	return m
 }

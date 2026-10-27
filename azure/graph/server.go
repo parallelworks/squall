@@ -9,9 +9,10 @@
 // makes chosen calls fail, including after they took effect, so tests can
 // check that code which retries converges.
 //
-// It covers domains (list, as [WithDomains] sets them) and users (create, get
-// by ID or user principal name, and delete). Other calls answer 404. Where it
-// differs from Microsoft Graph:
+// It covers the organization (list, as [WithOrganization] sets it), domains
+// (list, as [WithDomains] sets them), users (create, get by ID or user
+// principal name, and delete) and deleted users (permanently delete). Other
+// calls answer 404. Where it differs from Microsoft Graph:
 //
 //   - The bearer token is not checked; a call without one fails with 401
 //     InvalidAuthenticationToken, which is inferred. Query parameters such as
@@ -35,6 +36,19 @@
 //     served, and its user principal name is free again, where Microsoft
 //     Entra may hold it until the user is gone for good. Request headers such
 //     as Prefer and ConsistencyLevel are ignored.
+//   - DELETE /directory/deletedItems/{id} permanently deletes a deleted user,
+//     answering 204 as Graph documents, which [Server.PurgedUsers] then lists
+//     instead of [Server.DeletedUsers]. An ID that is not a deleted user's,
+//     including a user that is not deleted, fails with 404
+//     Request_ResourceNotFound, the status and code recorded for the call; the
+//     message is the one Graph answers for a missing user, which for this
+//     call is inferred. Deleted users are not purged on their own after 30
+//     days, and other deleted object types are not served.
+//   - The organization is the one [WithOrganization] describes, with the
+//     verified domains [WithDomains] sets. It shows the members Graph's
+//     example of the call shows, with empty plans and notification lists;
+//     each verified domain's capabilities, "Email, OfficeCommunicationsOnline"
+//     as in that example, and type Managed are inferred.
 //
 // [WithPolicy] grants the caller a set of Microsoft Graph application
 // permissions and refuses a call that needs one it lacks with 403
@@ -43,11 +57,16 @@
 // Domain.ReadWrite.All or Directory.Read.All; creating a user User.Create,
 // User.ReadWrite.All or Directory.ReadWrite.All; reading one User.Read.All,
 // User.ReadWrite.All, Directory.Read.All or Directory.ReadWrite.All; and
-// deleting one User.ReadWrite.All.
+// deleting one User.ReadWrite.All; permanently deleting a deleted user
+// User.DeleteRestore.All, the only permission Graph lists for it
+// (Directory.ReadWrite.All is documented as not allowing user deletion); and
+// reading the organization Organization.Read.All, Directory.Read.All,
+// Organization.ReadWrite.All or Directory.ReadWrite.All.
 //
 // Fault method names are "graph." and the operation, such as
 // "graph.users.create", "graph.users.get", "graph.users.delete" and
-// "graph.domains.list". A call's resource is its path after /v1.0, such as
+// "graph.domains.list", "graph.deletedItems.delete" and
+// "graph.organization.list". A call's resource is its path after /v1.0, such as
 // "/users" or "/users/{id}". Graph has no long-running operations, so
 // [fault.ModeFailOperation] fails a call as [fault.ModeReject] does. A
 // fault's Reason is the error code, except that the fault package's generic
@@ -96,6 +115,18 @@ type User struct {
 	Created                                          time.Time
 	// Deleted is when the user was deleted, or zero.
 	Deleted time.Time
+	// Purged is when the deleted user was permanently deleted, or zero.
+	Purged time.Time
+}
+
+// Organization is the directory's tenant, as GET /organization lists it.
+type Organization struct {
+	// ID is the tenant ID.
+	ID, DisplayName string
+	// CountryLetterCode is the tenant's country, such as US.
+	CountryLetterCode string
+	// DefaultUsageLocation is the usage location new users get, such as US.
+	DefaultUsageLocation string
 }
 
 // Server is a stand-in for Microsoft Graph. Create one with [New]. It is
@@ -107,9 +138,12 @@ type Server struct {
 
 	mu      sync.Mutex
 	seq     uint64
+	org     Organization
+	created time.Time
 	domains []Domain
 	users   map[string]*User
 	deleted []*User
+	purged  []*User
 }
 
 // Option configures a [Server].
@@ -138,16 +172,33 @@ func WithDomains(domains ...Domain) Option {
 	return func(s *Server) { s.domains = slices.Clone(domains) }
 }
 
+// WithOrganization sets the directory's organization. A field left empty
+// keeps its default: the tenant ID 00000000-0000-0000-0000-000000000001, the
+// display name Squall, and US as the country and default usage location.
+func WithOrganization(org Organization) Option {
+	return func(s *Server) {
+		s.org = Organization{
+			ID: cmp.Or(org.ID, s.org.ID), DisplayName: cmp.Or(org.DisplayName, s.org.DisplayName),
+			CountryLetterCode:    cmp.Or(org.CountryLetterCode, s.org.CountryLetterCode),
+			DefaultUsageLocation: cmp.Or(org.DefaultUsageLocation, s.org.DefaultUsageLocation),
+		}
+	}
+}
+
 // New returns a directory with no users.
 func New(opts ...Option) *Server {
 	s := &Server{
 		now:     time.Now,
 		users:   map[string]*User{},
 		domains: []Domain{{ID: "squall.onmicrosoft.com", IsDefault: true, IsVerified: true}},
+		org: Organization{
+			ID: "00000000-0000-0000-0000-000000000001", DisplayName: "Squall", CountryLetterCode: "US", DefaultUsageLocation: "US",
+		},
 	}
 	for _, opt := range opts {
 		opt(s)
 	}
+	s.created = s.now()
 	return s
 }
 
@@ -164,6 +215,8 @@ func (s *Server) routes() []route {
 		{"POST", "/users", "users.create", "User.Create|User.ReadWrite.All|Directory.ReadWrite.All", s.createUser},
 		{"GET", "/users/{id}", "users.get", "User.Read.All|User.ReadWrite.All|Directory.Read.All|Directory.ReadWrite.All", s.getUser},
 		{"DELETE", "/users/{id}", "users.delete", "User.ReadWrite.All", s.deleteUser},
+		{"DELETE", "/directory/deletedItems/{id}", "deletedItems.delete", "User.DeleteRestore.All", s.purgeUser},
+		{"GET", "/organization", "organization.list", "Organization.Read.All|Directory.Read.All|Organization.ReadWrite.All|Directory.ReadWrite.All", s.listOrganization},
 	}
 }
 
@@ -370,7 +423,11 @@ func (s *Server) user(ref string) (*User, *apiError) {
 			return u, nil
 		}
 	}
-	return nil, &apiError{
+	return nil, notFound(ref)
+}
+
+func notFound(ref string) *apiError {
+	return &apiError{
 		Status: http.StatusNotFound, Code: "Request_ResourceNotFound",
 		Message: fmt.Sprintf("Resource '%s' does not exist or one of its queried reference-property objects are not present.", ref),
 	}
@@ -399,6 +456,44 @@ func (s *Server) deleteUser(c *call) (*reply, *apiError) {
 	u.Deleted = s.now()
 	s.deleted = append(s.deleted, u)
 	return &reply{status: http.StatusNoContent}, nil
+}
+
+// purgeUser permanently deletes a deleted user.
+func (s *Server) purgeUser(c *call) (*reply, *apiError) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := slices.IndexFunc(s.deleted, func(u *User) bool { return strings.EqualFold(u.ID, c.id) })
+	if i < 0 {
+		return nil, notFound(c.id)
+	}
+	u := s.deleted[i]
+	s.deleted = slices.Delete(s.deleted, i, i+1)
+	u.Purged = s.now()
+	s.purged = append(s.purged, u)
+	return &reply{status: http.StatusNoContent}, nil
+}
+
+func (s *Server) listOrganization(c *call) (*reply, *apiError) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	domains := []map[string]any{}
+	for _, d := range s.domains {
+		if d.IsVerified {
+			domains = append(domains, map[string]any{
+				"capabilities": "Email, OfficeCommunicationsOnline", "isDefault": d.IsDefault, "isInitial": d.IsDefault, "name": d.ID, "type": "Managed",
+			})
+		}
+	}
+	org := map[string]any{
+		"id": s.org.ID, "deletedDateTime": nil, "businessPhones": []string{}, "city": nil, "country": nil,
+		"countryLetterCode": s.org.CountryLetterCode, "createdDateTime": s.created.UTC().Format(time.RFC3339),
+		"defaultUsageLocation": s.org.DefaultUsageLocation, "displayName": s.org.DisplayName,
+		"isMultipleDataLocationsForServicesEnabled": nil, "marketingNotificationEmails": []string{}, "onPremisesLastSyncDateTime": nil,
+		"onPremisesSyncEnabled": nil, "postalCode": nil, "preferredLanguage": "en", "securityComplianceNotificationMails": []string{},
+		"securityComplianceNotificationPhones": []string{}, "state": nil, "street": nil, "technicalNotificationMails": []string{},
+		"tenantType": "AAD", "assignedPlans": []any{}, "provisionedPlans": []any{}, "verifiedDomains": domains,
+	}
+	return &reply{status: http.StatusOK, body: map[string]any{"@odata.context": context(c, "organization"), "value": []any{org}}}, nil
 }
 
 // render shows the properties Graph returns for a user by default.
@@ -435,6 +530,17 @@ func (s *Server) DeletedUsers() []User {
 	defer s.mu.Unlock()
 	out := make([]User, 0, len(s.deleted))
 	for _, u := range s.deleted {
+		out = append(out, *u)
+	}
+	return out
+}
+
+// PurgedUsers returns the deleted users that were permanently deleted, in the order they were purged.
+func (s *Server) PurgedUsers() []User {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]User, 0, len(s.purged))
+	for _, u := range s.purged {
 		out = append(out, *u)
 	}
 	return out

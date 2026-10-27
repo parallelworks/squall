@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/parallelworks/squall/azure/arm"
 	"github.com/parallelworks/squall/fault"
@@ -572,5 +573,116 @@ func TestExportWhileTheExportsProviderRegisters(t *testing.T) {
 	}
 	if rec, body := do(t, s, http.MethodPut, exportPath, exportBody("")); rec.Code != http.StatusCreated {
 		t.Fatalf("create once registered = %d %v", rec.Code, body)
+	}
+}
+
+const logWorkspacePath = groupPath + "/providers/Microsoft.OperationalInsights/workspaces/law"
+
+// A Log Analytics workspace answers as Azure CLI recordings show: a create
+// 201 with an Azure-AsyncOperation URL under the provider's operationstatuses,
+// and a delete 200, or 202 with a Location URL under the workspace.
+func TestLogAnalyticsWorkspaceShapes(t *testing.T) {
+	s := arm.New(arm.WithSettleAfter(-1))
+	newGroup(t, s)
+	rec, body := do(t, s, http.MethodPut, logWorkspacePath, `{"location":"eastus","properties":{"sku":{"name":"PerGB2018"}}}`)
+	props, _ := body["properties"].(map[string]any)
+	if rec.Code != http.StatusCreated || props["provisioningState"] != "Creating" || props["retentionInDays"] != 30.0 || props["customerId"] == "" ||
+		!strings.Contains(rec.Header().Get("Azure-AsyncOperation"), "/providers/Microsoft.OperationalInsights/locations/eastus/operationstatuses/") {
+		t.Fatalf("create = %d %v %v", rec.Code, rec.Header(), body)
+	}
+	s.Settle()
+	rec, body = do(t, s, http.MethodDelete, logWorkspacePath, "")
+	location := rec.Header().Get("Location")
+	if rec.Code != http.StatusAccepted || !strings.Contains(location, "/workspaces/law/operationresults/") || rec.Header().Get("Azure-AsyncOperation") == "" {
+		t.Fatalf("delete = %d %v %v", rec.Code, rec.Header(), body)
+	}
+	s.Settle()
+	u, _ := url.Parse(location)
+	if rec, _ := do(t, s, http.MethodGet, u.RequestURI(), ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("delete result = %d", rec.Code)
+	}
+	if rec, _ := do(t, s, http.MethodDelete, logWorkspacePath, ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("deleting a deleted workspace = %d", rec.Code)
+	}
+}
+
+// A deleted workspace can be recovered by a create with its name and location
+// for 14 days, keeping its customer ID and properties, and showing Restoring
+// while it is, as an Azure CLI recording shows; force=true deletes it for good.
+func TestLogAnalyticsWorkspaceRecovery(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s := arm.New(arm.WithClock(func() time.Time { return now }))
+	newGroup(t, s)
+	_, body := do(t, s, http.MethodPut, logWorkspacePath, `{"location":"eastus","properties":{"retentionInDays":90}}`)
+	customerID := body["properties"].(map[string]any)["customerId"]
+	if rec, _ := do(t, s, http.MethodDelete, logWorkspacePath, ""); rec.Code != http.StatusOK {
+		t.Fatalf("delete = %d", rec.Code)
+	}
+	if deleted := s.DeletedLogAnalyticsWorkspaces(); len(deleted) != 1 || !strings.HasSuffix(deleted[0], "/workspaces/law") {
+		t.Fatalf("deleted workspaces = %v", deleted)
+	}
+	if rec, body := do(t, s, http.MethodPut, logWorkspacePath, `{"location":"westus"}`); rec.Code != http.StatusConflict {
+		t.Fatalf("a create in another location = %d %v", rec.Code, body)
+	}
+
+	settling := arm.New(arm.WithSettleAfter(-1))
+	newGroup(t, settling)
+	do(t, settling, http.MethodPut, logWorkspacePath, `{"location":"eastus"}`)
+	settling.Settle()
+	do(t, settling, http.MethodDelete, logWorkspacePath, "")
+	settling.Settle()
+	if _, body := do(t, settling, http.MethodPut, logWorkspacePath, `{"location":"eastus"}`); body["properties"].(map[string]any)["provisioningState"] != "Restoring" {
+		t.Fatalf("a recovery in progress = %v", body)
+	}
+
+	rec, body := do(t, s, http.MethodPut, logWorkspacePath, `{"location":"eastus"}`)
+	props := body["properties"].(map[string]any)
+	if rec.Code != http.StatusCreated || props["customerId"] != customerID || props["retentionInDays"] != 90.0 || len(s.DeletedLogAnalyticsWorkspaces()) != 0 {
+		t.Fatalf("recovery = %d %v", rec.Code, body)
+	}
+	do(t, s, http.MethodDelete, logWorkspacePath+"?api-version=2025-07-01&force=true", "")
+	if deleted := s.DeletedLogAnalyticsWorkspaces(); len(deleted) != 0 {
+		t.Fatalf("deleted workspaces after a forced delete = %v", deleted)
+	}
+	do(t, s, http.MethodPut, logWorkspacePath, `{"location":"eastus"}`)
+	do(t, s, http.MethodDelete, logWorkspacePath, "")
+	now = now.Add(14 * 24 * time.Hour)
+	if deleted := s.DeletedLogAnalyticsWorkspaces(); len(deleted) != 0 {
+		t.Fatalf("deleted workspaces after 14 days = %v", deleted)
+	}
+	if _, body := do(t, s, http.MethodPut, logWorkspacePath, `{"location":"westus"}`); body["properties"].(map[string]any)["customerId"] == customerID {
+		t.Fatalf("a workspace made after the recovery period = %v", body)
+	}
+}
+
+// A deployment records modelProviderData, which clients send on api-versions
+// newer than the SDK's, echoes it, and rejects members it does not know.
+func TestDeploymentModelProviderData(t *testing.T) {
+	s := arm.New()
+	newGroup(t, s)
+	account := groupPath + "/providers/Microsoft.CognitiveServices/accounts/ai"
+	if rec, body := do(t, s, http.MethodPut, account, `{"location":"eastus","kind":"AIServices","sku":{"name":"S0"}}`); rec.Code >= 300 {
+		t.Fatalf("account = %d %v", rec.Code, body)
+	}
+	const data = `{"industry":"technology","organizationName":"Contoso","countryCode":"US"}`
+	path := account + "/deployments/claude?api-version=2026-07-01"
+	rec, body := do(t, s, http.MethodPut, path,
+		`{"sku":{"name":"GlobalStandard","capacity":1},"properties":{"model":{"format":"Anthropic","name":"claude-sonnet-4-6","version":"1"},"modelProviderData":`+data+`}}`)
+	got, _ := json.Marshal(body["properties"].(map[string]any)["modelProviderData"])
+	if rec.Code != http.StatusCreated || string(got) != `{"countryCode":"US","industry":"technology","organizationName":"Contoso"}` {
+		t.Fatalf("create = %d %v", rec.Code, body)
+	}
+	if _, body := do(t, s, http.MethodGet, path, ""); body["properties"].(map[string]any)["modelProviderData"] == nil {
+		t.Fatalf("get = %v", body)
+	}
+	if deployments := s.Deployments(); len(deployments) != 1 || deployments[0].ModelProviderData == nil ||
+		*deployments[0].ModelProviderData != (arm.ModelProviderData{Industry: "technology", OrganizationName: "Contoso", CountryCode: "US"}) ||
+		deployments[0].ModelFormat != "Anthropic" || !strings.HasSuffix(deployments[0].Account, "/accounts/ai") {
+		t.Fatalf("deployments = %+v", deployments)
+	}
+	rec, body = do(t, s, http.MethodPut, path,
+		`{"sku":{"name":"GlobalStandard"},"properties":{"model":{"format":"Anthropic","name":"claude-sonnet-4-6"},"modelProviderData":{"color":"red"}}}`)
+	if rec.Code != http.StatusBadRequest || errorCode(body) != "InvalidRequestContent" {
+		t.Fatalf("an unknown member = %d %v", rec.Code, body)
 	}
 }
