@@ -449,3 +449,128 @@ func TestVMExtensionShapes(t *testing.T) {
 		t.Fatalf("Location poll = %d %q", rec.Code, rec.Body)
 	}
 }
+
+// A provider registers in place: register answers 200 with the provider
+// Registering and no polling header, and a get shows it Registered once the
+// reads WithSettleAfter sets are spent.
+func TestProviderRegistrationShapes(t *testing.T) {
+	s := arm.New(arm.WithSettleAfter(1), arm.WithUnregisteredProviders("Microsoft.CostManagementExports"))
+	const provider = "/subscriptions/s/providers/Microsoft.CostManagementExports"
+	if _, body := do(t, s, http.MethodGet, provider, ""); body["registrationState"] != "NotRegistered" || body["id"] != provider ||
+		body["namespace"] != "Microsoft.CostManagementExports" {
+		t.Fatalf("get = %v", body)
+	}
+	rec, body := do(t, s, http.MethodPost, provider+"/register", "")
+	if rec.Code != http.StatusOK || body["registrationState"] != "Registering" || rec.Header().Get("Location") != "" ||
+		rec.Header().Get("Azure-AsyncOperation") != "" {
+		t.Fatalf("register = %d %v %v", rec.Code, rec.Header(), body)
+	}
+	for _, want := range []string{"Registering", "Registered"} {
+		if _, body := do(t, s, http.MethodGet, provider, ""); body["registrationState"] != want {
+			t.Fatalf("get = %v, want %s", body, want)
+		}
+	}
+	if _, body := do(t, s, http.MethodGet, "/subscriptions/s/providers/Microsoft.Compute", ""); body["registrationState"] != "Registered" {
+		t.Fatalf("get of another namespace = %v", body)
+	}
+}
+
+// A namespace a subscription has not registered refuses calls with 409
+// MissingSubscriptionRegistration, naming it as the detail's target, and
+// takes them once it is registering.
+func TestUnregisteredNamespacesRefuseCalls(t *testing.T) {
+	s := arm.New(arm.WithSettleAfter(-1), arm.WithUnregisteredProviders("Microsoft.Network"))
+	newGroup(t, s)
+	const nsg = groupPath + "/providers/Microsoft.Network/networkSecurityGroups/n"
+	rec, body := do(t, s, http.MethodPut, nsg, `{"location":"eastus"}`)
+	e, _ := body["error"].(map[string]any)
+	details, _ := e["details"].([]any)
+	if rec.Code != http.StatusConflict || errorCode(body) != "MissingSubscriptionRegistration" || len(details) != 1 ||
+		details[0].(map[string]any)["target"] != "Microsoft.Network" {
+		t.Fatalf("create = %d %v", rec.Code, body)
+	}
+	do(t, s, http.MethodPost, "/subscriptions/s/providers/Microsoft.Network/register", "")
+	if rec, body := do(t, s, http.MethodPut, nsg, `{"location":"eastus"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("create while Registering = %d %v", rec.Code, body)
+	}
+	if rec, body := do(t, s, http.MethodPut, "/subscriptions/other/resourceGroups/rg", `{"location":"eastus"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("create group = %d %v", rec.Code, body)
+	}
+	other := "/subscriptions/other/resourceGroups/rg/providers/Microsoft.Network/networkSecurityGroups/n"
+	if rec, _ := do(t, s, http.MethodPut, other, `{"location":"eastus"}`); rec.Code != http.StatusConflict {
+		t.Fatalf("create in another subscription = %d, want 409", rec.Code)
+	}
+}
+
+const exportPath = "/subscriptions/s/providers/Microsoft.CostManagement/exports/daily"
+
+func exportBody(etag string) string {
+	b := `{"properties":{"format":"Csv","definition":{"type":"Usage","timeframe":"MonthToDate"},` +
+		`"deliveryInfo":{"destination":{"type":"AzureBlob","resourceId":"` + groupPath + `/providers/Microsoft.Storage/storageAccounts/a","container":"c"}},` +
+		`"schedule":{"recurrence":"Daily","recurrencePeriod":{"from":"2026-10-28T00:00:00.000Z","to":"2046-10-28T00:00:00Z"},"status":"Active"}}`
+	if etag != "" {
+		quoted, _ := json.Marshal(etag)
+		b += `,"eTag":` + string(quoted)
+	}
+	return b + "}"
+}
+
+// An export create answers 201 and an update with the current eTag 200, each
+// with a new eTag. An update without one fails with 400, and with a stale one
+// 412, both with the HTTP status as the code. A missing export answers 404,
+// and a delete 200 with no body.
+func TestExportShapes(t *testing.T) {
+	s := arm.New()
+	rec, body := do(t, s, http.MethodGet, exportPath, "")
+	e, _ := body["error"].(map[string]any)
+	if rec.Code != http.StatusNotFound || e["code"] != "404" ||
+		!strings.HasPrefix(fmt.Sprint(e["message"]), "No export found for daily, Subscription: s. (Request ID: ") {
+		t.Fatalf("get of a missing export = %d %v", rec.Code, body)
+	}
+	rec, body = do(t, s, http.MethodPut, exportPath, exportBody(""))
+	props, _ := body["properties"].(map[string]any)
+	dest := props["deliveryInfo"].(map[string]any)["destination"].(map[string]any)
+	period := props["schedule"].(map[string]any)["recurrencePeriod"].(map[string]any)
+	etag, _ := body["eTag"].(string)
+	if rec.Code != http.StatusCreated || body["id"] != exportPath || body["type"] != "Microsoft.CostManagement/exports" || body["name"] != "daily" ||
+		!strings.HasPrefix(etag, `"`) || dest["type"] != nil || dest["container"] != "c" || period["from"] != "2026-10-28T00:00:00Z" {
+		t.Fatalf("create = %d %v", rec.Code, body)
+	}
+	if v, ok := dest["rootFolderPath"]; !ok || v != nil {
+		t.Errorf("destination = %v, want a null rootFolderPath", dest)
+	}
+	rec, body = do(t, s, http.MethodPut, exportPath, exportBody(""))
+	if e, _ := body["error"].(map[string]any); rec.Code != http.StatusBadRequest || e["code"] != "400" ||
+		!strings.HasPrefix(fmt.Sprint(e["message"]), "Etag value required for update operation of report: daily.Please get the latest to avoid overwrite.") {
+		t.Fatalf("update without an eTag = %d %v", rec.Code, body)
+	}
+	if rec, body = do(t, s, http.MethodPut, exportPath, exportBody(etag)); rec.Code != http.StatusOK || body["eTag"] == etag {
+		t.Fatalf("update = %d %v", rec.Code, body)
+	}
+	if rec, body := do(t, s, http.MethodPut, exportPath, exportBody(etag)); rec.Code != http.StatusPreconditionFailed || errorCode(body) != "412" {
+		t.Fatalf("update with a stale eTag = %d %v", rec.Code, body)
+	}
+	list := "/subscriptions/s/providers/Microsoft.CostManagement/exports"
+	if rec, body := do(t, s, http.MethodGet, list, ""); rec.Code != http.StatusOK || len(body["value"].([]any)) != 1 {
+		t.Fatalf("list = %d %v", rec.Code, body)
+	}
+	if rec, _ := do(t, s, http.MethodDelete, exportPath, ""); rec.Code != http.StatusOK || rec.Body.Len() != 0 {
+		t.Fatalf("delete = %d %q", rec.Code, rec.Body)
+	}
+	if rec, body := do(t, s, http.MethodDelete, exportPath, ""); rec.Code != http.StatusNotFound || errorCode(body) != "404" {
+		t.Fatalf("delete again = %d %v", rec.Code, body)
+	}
+}
+
+// An export write while Microsoft.CostManagementExports is being registered
+// fails with 503, counting as a read of the registration.
+func TestExportWhileTheExportsProviderRegisters(t *testing.T) {
+	s := arm.New(arm.WithSettleAfter(1), arm.WithUnregisteredProviders("Microsoft.CostManagementExports"))
+	do(t, s, http.MethodPost, "/subscriptions/s/providers/Microsoft.CostManagementExports/register", "")
+	if rec, body := do(t, s, http.MethodPut, exportPath, exportBody("")); rec.Code != http.StatusServiceUnavailable || errorCode(body) != "503" {
+		t.Fatalf("create while registering = %d %v", rec.Code, body)
+	}
+	if rec, body := do(t, s, http.MethodPut, exportPath, exportBody("")); rec.Code != http.StatusCreated {
+		t.Fatalf("create once registered = %d %v", rec.Code, body)
+	}
+}

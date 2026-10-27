@@ -56,7 +56,11 @@
 //   - Microsoft.MachineLearningServices: workspaces (create or update, get and
 //     delete);
 //   - Microsoft.Authorization: role assignments at a resource group's scope
-//     (create and delete).
+//     (create and delete);
+//   - Microsoft.Resources resource providers: a subscription's registration
+//     of a namespace (get and register);
+//   - Microsoft.CostManagement: exports at a subscription's scope (create or
+//     update, get, list and delete).
 //
 // Other calls answer 404. Every call needs an api-version, which may be any
 // value, and a bearer token, which is not checked. Where it differs from
@@ -438,6 +442,41 @@
 //     has not replicated yet never fails with PrincipalNotFound, and names
 //     need not be GUIDs or unique across scopes. Deleting the group deletes
 //     the assignments at its scope.
+//   - Every namespace is Registered in every subscription unless
+//     [WithUnregisteredProviders] names it; Azure registers only some by
+//     default, such as Microsoft.Resources and Microsoft.CostManagement but
+//     not Microsoft.CostManagementExports, as Microsoft documents. A call to a
+//     namespace that is NotRegistered fails with 409
+//     MissingSubscriptionRegistration, as Azure answers. Registering answers
+//     200 with the provider Registering and no operation to poll, as Azure
+//     answers; it is Registered after the reads [WithSettleAfter] sets, which
+//     are gets of the provider and export writes it turns away, or on
+//     [Server.Settle], and at once by default. A namespace being registered
+//     takes calls, as Microsoft documents that callers need not wait. A
+//     provider lists no resource types, any namespace is one, and
+//     unregistering is not served. That registering a Registered namespace
+//     leaves it Registered is inferred.
+//   - An export create answers 201 and an update 200, each with a new eTag,
+//     as Azure answers. An update needs the export's current eTag in the
+//     body: without one it fails with 400 and the message Azure answers, and
+//     with another, 412 with a message of its own, which is inferred. Cost
+//     Management errors carry the HTTP status as their code, such as "404",
+//     and a message ending in a request ID, as Azure answers them. A get of a
+//     missing export answers 404 "No export found for {name}, Subscription:
+//     {subscription}.", as Azure answers, and a delete of one the same, which
+//     is inferred; the SDK takes only 200 from a delete. An export write while
+//     Microsoft.CostManagementExports is Registering fails with 503, as
+//     Microsoft documents; its message is inferred. One while it is
+//     NotRegistered is not refused, as no source shows how Azure answers it.
+//     The destination storage account and container are recorded, not
+//     checked, and the schedule's dates are not checked. An export shows its
+//     destination without its type and with a null rootFolderPath when it has
+//     none, and its recurrence dates in RFC 3339 UTC, as Azure shows them. A
+//     system-assigned identity gets a principalId; its tenantId is a zero
+//     GUID. Exports do not run, so they have no run history or next run
+//     time, and $expand and run are not served. Exports are not resources in
+//     a group, so deleting a group leaves them. Scopes other than a
+//     subscription are not served.
 //
 // Fault method names are the operation's Azure RBAC action, such as
 // "Microsoft.Compute/virtualMachines/write",
@@ -488,7 +527,10 @@
 // Microsoft.CognitiveServices one
 // Microsoft.CognitiveServices/locations/operationresults/read, and a
 // Microsoft.MachineLearningServices one
-// Microsoft.MachineLearningServices/locations/workspaceOperationsStatus/read. Actions are not
+// Microsoft.MachineLearningServices/locations/workspaceOperationsStatus/read. Getting a
+// resource provider needs Microsoft.Resources/subscriptions/providers/read and
+// registering one {namespace}/register/action, such as
+// Microsoft.CostManagementExports/register/action. Actions are not
 // checked against the scope they act on: a grant covers every subscription.
 //
 // A lost response aborts the handler with [http.ErrAbortHandler] after
@@ -552,6 +594,10 @@ type Server struct {
 	public     *pool
 	deleted    map[string]*softDeleted
 	capacities []ModelCapacity
+	// unregistered are the namespaces that start NotRegistered, by their lower-case names.
+	unregistered map[string]string
+	providers    map[string]*provider
+	exports      map[string]*export
 }
 
 // Option configures a [Server].
@@ -587,15 +633,18 @@ func WithCopySteps(n int) Option {
 // New returns an empty server.
 func New(opts ...Option) *Server {
 	s := &Server{
-		now:        time.Now,
-		copySteps:  2,
-		groups:     map[string]*group{},
-		resources:  map[string]*resource{},
-		ops:        map[string]*operation{},
-		pending:    map[*operation]struct{}{},
-		privateIPs: map[string]map[netip.Addr]string{},
-		publicIPs:  map[netip.Addr]string{},
-		deleted:    map[string]*softDeleted{},
+		now:          time.Now,
+		copySteps:    2,
+		groups:       map[string]*group{},
+		resources:    map[string]*resource{},
+		ops:          map[string]*operation{},
+		pending:      map[*operation]struct{}{},
+		privateIPs:   map[string]map[netip.Addr]string{},
+		publicIPs:    map[netip.Addr]string{},
+		deleted:      map[string]*softDeleted{},
+		unregistered: map[string]string{},
+		providers:    map[string]*provider{},
+		exports:      map[string]*export{},
 		// Neither range is routable on the internet, so a test cannot reach a real host by mistake.
 		private: newPool(netip.MustParsePrefix("10.0.0.0/8"), 4, 1),
 		public:  newPool(netip.MustParsePrefix("100.64.0.0/10"), 1, 0),
@@ -732,6 +781,8 @@ func (s *Server) registerRoutes() {
 	s.registerInsightsRoutes()
 	s.registerMachineLearningRoutes()
 	s.registerAuthorizationRoutes()
+	s.registerProviderRoutes()
+	s.registerExportRoutes()
 }
 
 func (s *Server) add(method, pattern, action string, lro bool, h handler) {
@@ -789,7 +840,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resource := "/" + path
+	if strings.Contains(rt.action, "{") {
+		rt = &route{method: rt.method, segments: rt.segments, action: expand(rt.action, vals), lro: rt.lro, h: rt.h}
+	}
 	if err := s.authorize(rt, r, resource); err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := s.checkRegistration(rt, vals); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -806,6 +864,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		return func() { writeJSON(w, rep.status, rep.header, rep.body) }, true
 	})
+}
+
+// expand fills the wildcards in an action, such as {ns}/register/action, from vals.
+func expand(action string, vals map[string]string) string {
+	for name, v := range vals {
+		action = strings.ReplaceAll(action, "{"+name+"}", v)
+	}
+	return action
 }
 
 // newUUID returns a fresh UUID-shaped ID. The caller holds s.mu.

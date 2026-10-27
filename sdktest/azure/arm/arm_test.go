@@ -19,6 +19,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/authorization/armauthorization/v2"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/cognitiveservices/armcognitiveservices"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v8"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/costmanagement/armcostmanagement/v3"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/keyvault/armkeyvault"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/machinelearning/armmachinelearning/v4"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/netapp/armnetapp/v6"
@@ -92,6 +93,8 @@ type clients struct {
 	components  *armapplicationinsights.ComponentsClient
 	workspaces  *armmachinelearning.WorkspacesClient
 	roles       *armauthorization.RoleAssignmentsClient
+	providers   *armresources.ProvidersClient
+	exports     *armcostmanagement.ExportsClient
 	requests    *[]string
 }
 
@@ -177,6 +180,10 @@ func setupWith(t *testing.T, retry policy.RetryOptions, opts ...arm.Option) *cli
 	if err != nil {
 		t.Fatal(err)
 	}
+	cost, err := armcostmanagement.NewClientFactory(credential{}, options)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return &clients{
 		server: s, groups: resources.NewResourceGroupsClient(),
 		vms: compute.NewVirtualMachinesClient(), extensions: compute.NewVirtualMachineExtensionsClient(), sets: compute.NewVirtualMachineScaleSetsClient(),
@@ -194,7 +201,8 @@ func setupWith(t *testing.T, retry policy.RetryOptions, opts ...arm.Option) *cli
 		cognitive: cog.NewAccountsClient(), deployments: cog.NewDeploymentsClient(), deleted: cog.NewDeletedAccountsClient(),
 		capacities: cog.NewModelCapacitiesClient(), search: search.NewServicesClient(), searchKeys: search.NewAdminKeysClient(),
 		vaults: keyvault.NewVaultsClient(), components: insights.NewComponentsClient(), workspaces: ml.NewWorkspacesClient(),
-		roles: authorization.NewRoleAssignmentsClient(), requests: requests,
+		roles: authorization.NewRoleAssignmentsClient(), providers: resources.NewProvidersClient(), exports: cost.NewExportsClient(),
+		requests: requests,
 	}
 }
 
