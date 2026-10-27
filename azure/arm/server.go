@@ -25,7 +25,8 @@
 //     MissingRegistrationForLocation), and A record sets (create or update,
 //     get, delete);
 //   - Microsoft.Compute virtual machines: create or update, get, list in a
-//     group, instance view, deallocate, start and delete;
+//     group, instance view, deallocate, start and delete, and their
+//     extensions (create or update, get, list on a VM and delete);
 //   - Microsoft.Compute scale sets in the Uniform orchestration mode: create
 //     or update, update, get, list in a group, delete and delete instances,
 //     and their VMs (list, get);
@@ -219,6 +220,23 @@
 //     is recorded, not checked. Deleting an attached disk fails with 409
 //     OperationNotAllowed, naming the VM. Data disks, and the OS disks of
 //     scale set VMs, are not modeled.
+//   - A VM extension create answers 201, and an update 200, with an
+//     Azure-AsyncOperation URL under
+//     Microsoft.Compute/locations/{location}/operations; a delete in progress
+//     answers 202 with a Location URL as well, the same path with
+//     monitor=true, which answers 200 with no body once it is done, as Azure
+//     answers. The extension shows Creating while it is created, then
+//     Succeeded, as Azure shows it; that an update shows Updating is
+//     inferred. Its protectedSettings are recorded, not returned, as Azure
+//     leaves them out. Its handler does not run, so it never ends Failed, and
+//     its instance view is not served. A write under a VM that does not exist
+//     fails with ParentResourceNotFound and the message Microsoft documents
+//     for it; the status, 404, is inferred. A get or list under a missing VM
+//     fails with 404 ResourceNotFound naming the VM, a get of a missing
+//     extension with 404 ResourceNotFound naming it, and a delete of either
+//     answers 204; all three are inferred. Deleting the VM, or its group,
+//     deletes its extensions, as Microsoft documents deleting a parent
+//     deleting its children. Its location is not checked against the VM's.
 //   - A disk or snapshot change in progress answers 202 with the resource,
 //     which shows Updating even while it is created, and an
 //     Azure-AsyncOperation URL under
@@ -645,8 +663,10 @@ func (s *Server) registerRoutes() {
 	s.add("DELETE", rg, groupAction+"delete", true, s.deleteGroup)
 	s.add("GET", sub+"/operationresults/{op}", "Microsoft.Resources/subscriptions/operationresults/read", false, s.operationResult)
 
+	s.add("GET", sub+"/providers/Microsoft.Compute/locations/{loc}/operations/{op}", "Microsoft.Compute/locations/operations/read", false,
+		s.onePathOperation(cacheMonitor, s.operationStatus))
+	s.add("GET", sub+"/providers/Microsoft.Network/locations/{loc}/operations/{op}", "Microsoft.Network/locations/operations/read", false, s.operationStatus)
 	for _, ns := range []string{"Microsoft.Compute", "Microsoft.Network"} {
-		s.add("GET", sub+"/providers/"+ns+"/locations/{loc}/operations/{op}", ns+"/locations/operations/read", false, s.operationStatus)
 		s.add("GET", sub+"/providers/"+ns+"/locations/{loc}/operationResults/{op}", ns+"/locations/operationResults/read", false, s.operationResult)
 	}
 	s.add("GET", network+"/privateDnsOperationStatuses/{op}", "Microsoft.Network/privateDnsOperationStatuses/read", false, s.operationStatus)
@@ -685,6 +705,7 @@ func (s *Server) registerRoutes() {
 	s.add("POST", vm+"/deallocate", vmKind.action("deallocate/action"), true, s.powerVM(powerDeallocated))
 	s.add("POST", vm+"/start", vmKind.action("start/action"), true, s.powerVM(powerRunning))
 	s.add("DELETE", vm, vmKind.action("delete"), true, s.deleteVM)
+	s.registerExtensionRoutes()
 
 	vmss := compute + "/virtualMachineScaleSets/{name}"
 	s.add("GET", compute+"/virtualMachineScaleSets", vmssKind.action("read"), false, s.listScaleSets)

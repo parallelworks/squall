@@ -409,3 +409,43 @@ func TestGalleryShapes(t *testing.T) {
 		t.Fatalf("Location poll = %d %q", rec.Code, rec.Body)
 	}
 }
+
+// A VM extension create answers 201 with only an Azure-AsyncOperation URL
+// under Microsoft.Compute operations, without its protectedSettings, and its
+// deletion 202 with a Location URL on the same path adding monitor=true,
+// which answers 200 with no body once done.
+func TestVMExtensionShapes(t *testing.T) {
+	s := arm.New(arm.WithSettleAfter(-1))
+	newGroup(t, s)
+	const nic = groupPath + "/providers/Microsoft.Network/networkInterfaces/nic"
+	do(t, s, http.MethodPut, nic, `{"location":"eastus","properties":{"ipConfigurations":[{"name":"ip","properties":{"subnet":{"id":"/subscriptions/s/resourceGroups/net/providers/Microsoft.Network/virtualNetworks/v/subnets/d"}}}]}}`)
+	s.Settle()
+	const vm = groupPath + "/providers/Microsoft.Compute/virtualMachines/vm"
+	do(t, s, http.MethodPut, vm, `{"location":"eastus","properties":{"hardwareProfile":{"vmSize":"Standard_D2s_v5"},`+
+		`"storageProfile":{"imageReference":{"publisher":"p","offer":"o","sku":"s","version":"latest"}},"osProfile":{"adminUsername":"u"},`+
+		`"networkProfile":{"networkInterfaces":[{"id":"`+nic+`"}]}}}`)
+	s.Settle()
+	const ext = vm + "/extensions/CustomScriptExtension"
+	rec, body := do(t, s, http.MethodPut, ext, `{"location":"eastus","properties":{"publisher":"Microsoft.Compute","type":"CustomScriptExtension",`+
+		`"typeHandlerVersion":"1.10","settings":{"commandToExecute":"hostname"},"protectedSettings":{"secret":"x"}}}`)
+	props, _ := body["properties"].(map[string]any)
+	if rec.Code != http.StatusCreated || !strings.HasPrefix(rec.Header().Get("Azure-AsyncOperation"), "http://example.com/subscriptions/s/providers/Microsoft.Compute/locations/eastus/operations/") ||
+		rec.Header().Get("Location") != "" || body["type"] != "Microsoft.Compute/virtualMachines/extensions" || body["id"] != ext ||
+		props["provisioningState"] != "Creating" || props["protectedSettings"] != nil || fmt.Sprint(props["settings"]) != "map[commandToExecute:hostname]" {
+		t.Fatalf("create = %d %v %v", rec.Code, rec.Header(), body)
+	}
+	s.Settle()
+	rec, _ = do(t, s, http.MethodDelete, ext, "")
+	location := rec.Header().Get("Location")
+	if rec.Code != http.StatusAccepted || location != rec.Header().Get("Azure-AsyncOperation")+"&monitor=true" {
+		t.Fatalf("delete = %d %v", rec.Code, rec.Header())
+	}
+	u, _ := url.Parse(location)
+	if rec, _ := do(t, s, http.MethodGet, u.RequestURI(), ""); rec.Code != http.StatusAccepted {
+		t.Fatalf("Location poll in progress = %d %q", rec.Code, rec.Body)
+	}
+	s.Settle()
+	if rec, _ := do(t, s, http.MethodGet, u.RequestURI(), ""); rec.Code != http.StatusOK || rec.Body.Len() != 0 {
+		t.Fatalf("Location poll = %d %q", rec.Code, rec.Body)
+	}
+}
