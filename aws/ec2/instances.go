@@ -974,19 +974,55 @@ func (s *Server) terminateInstances(c *call) (response, *apiError) {
 	})
 }
 
+// deleteOnTermination is a block device mapping of ModifyInstanceAttribute:
+// whether terminating the instance deletes the volume at device.
+type deleteOnTermination struct {
+	device   string
+	volumeID string
+	delete   bool
+}
+
+func readDeleteOnTermination(p *params) ([]deleteOnTermination, *apiError) {
+	var out []deleteOnTermination
+	for _, n := range p.indexes("BlockDeviceMapping") {
+		k := "BlockDeviceMapping." + n + "."
+		device, err := p.required(k + "DeviceName")
+		if err != nil {
+			return nil, err
+		}
+		d := deleteOnTermination{device: device, volumeID: p.get(k + "Ebs.VolumeId")}
+		if d.delete, err = p.bool(k+"Ebs.DeleteOnTermination", true); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, nil
+}
+
 func (s *Server) modifyInstanceAttribute(c *call) (response, *apiError) {
 	id, err := c.p.required("InstanceId")
 	if err != nil {
 		return nil, err
 	}
 	instanceType := c.p.get("InstanceType.Value")
-	if attribute := c.p.get("Attribute"); attribute != "" {
-		if attribute != "instanceType" {
-			return nil, invalidValue("squall: only the instanceType attribute can be modified.")
-		}
+	attribute := c.p.get("Attribute")
+	switch attribute {
+	case "", "blockDeviceMapping":
+	case "instanceType":
 		instanceType = c.p.get("Value")
+	default:
+		return nil, invalidValue("squall: only the instanceType and blockDeviceMapping attributes can be modified.")
 	}
-	if instanceType == "" {
+	mappings, err := readDeleteOnTermination(c.p)
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case instanceType != "" && len(mappings) > 0:
+		return nil, clientError("InvalidParameterCombination", "Fields for multiple attribute types specified: instanceType, blockDeviceMapping")
+	case instanceType == "" && len(mappings) == 0 && attribute == "blockDeviceMapping":
+		return nil, missing("BlockDeviceMapping")
+	case instanceType == "" && len(mappings) == 0:
 		return nil, missing("InstanceType")
 	}
 	if err := c.p.done(); err != nil {
@@ -994,9 +1030,13 @@ func (s *Server) modifyInstanceAttribute(c *call) (response, *apiError) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	inst, err := s.lookupRegion(c.region).instance(id)
+	rs := s.lookupRegion(c.region)
+	inst, err := rs.instance(id)
 	if err != nil {
 		return nil, err
+	}
+	if len(mappings) > 0 {
+		return setDeleteOnTermination(rs, id, mappings)
 	}
 	if err := s.checkInstanceType(instanceType, inst.Architecture, "InvalidInstanceAttributeValue"); err != nil {
 		return nil, err
@@ -1007,6 +1047,29 @@ func (s *Server) modifyInstanceAttribute(c *call) (response, *apiError) {
 	cpu := s.instanceTypes[instanceType].defaultCPUOptions()
 	cpu.AmdSevSnp = inst.CPUOptions.AmdSevSnp
 	inst.InstanceType, inst.CPUOptions = instanceType, cpu
+	return &returnResponse{Return: true}, nil
+}
+
+// setDeleteOnTermination applies mappings to the volumes attached to the
+// instance id, or to none unless every mapping names one. The caller holds s.mu.
+func setDeleteOnTermination(rs *regionState, id string, mappings []deleteOnTermination) (response, *apiError) {
+	vols := make([]*Volume, len(mappings))
+	for i, m := range mappings {
+		for _, vol := range rs.volumes {
+			if vol.InstanceID == id && vol.Device == m.device {
+				vols[i] = vol
+			}
+		}
+		switch {
+		case vols[i] == nil:
+			return nil, clientError("InvalidBlockDeviceMapping", "No device is attached to instance %s at %s", id, m.device)
+		case m.volumeID != "" && m.volumeID != vols[i].VolumeID:
+			return nil, clientError("InvalidBlockDeviceMapping", "The volume %s is not attached to instance %s at %s", m.volumeID, id, m.device)
+		}
+	}
+	for i, m := range mappings {
+		vols[i].DeleteOnTermination = m.delete
+	}
 	return &returnResponse{Return: true}, nil
 }
 

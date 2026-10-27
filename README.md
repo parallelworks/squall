@@ -22,7 +22,7 @@ failure replays from its seed.
 | --- | --- |
 | [`fault`](https://pkg.go.dev/github.com/parallelworks/squall/fault) | Decides which calls fail and how: rejected, applied with the response lost, applied with an error, an operation that ends in an error, or slow. Scripted rules and a seeded random rate. |
 | [`access`](https://pkg.go.dev/github.com/parallelworks/squall/access) | Grants a set of permissions (Google Cloud IAM permissions, AWS IAM actions or Azure RBAC actions) and refuses calls that need one it lacks, with the error the cloud answers, including those a request's fields add and Azure's linked checks. Reports which permissions were needed but missing and which were granted but never used. |
-| [`aws/ec2`](https://pkg.go.dev/github.com/parallelworks/squall/aws/ec2) | Amazon EC2: instances (run with client tokens, describe with filters and pages, start, stop, terminate, change type), images (describe, register from snapshots, deregister), instance types, EBS volumes (create, describe, attach, detach, delete), EBS snapshots (create, copy across regions, describe with filters and pages, delete), placement groups, tags, Elastic IP addresses (allocate, describe, release, associate with an interface or instance, disassociate) and network interfaces (create with client tokens, describe, delete). |
+| [`aws/ec2`](https://pkg.go.dev/github.com/parallelworks/squall/aws/ec2) | Amazon EC2: instances (run with client tokens, describe with filters and pages, start, stop, terminate, change type or which attached volumes terminating deletes), images (describe, register from snapshots, deregister), instance types, EBS volumes (create, describe, attach, detach, delete), EBS snapshots (create, copy across regions, describe with filters and pages, delete), placement groups, tags, Elastic IP addresses (allocate, describe, release, associate with an interface or instance, disassociate) and network interfaces (create with client tokens, describe, delete). |
 | [`aws/s3`](https://pkg.go.dev/github.com/parallelworks/squall/aws/s3) | Amazon S3: general purpose buckets (create, head, list with pages and filters, delete), their tags, versioning, policy and CORS rules, and objects (put, delete one or many, list versions and delete markers). |
 | [`azure/arm`](https://pkg.go.dev/github.com/parallelworks/squall/azure/arm) | Azure Resource Manager: resource groups (get, create or update, list with tag filters, delete with everything in them that nothing outside uses), virtual machines (create or update, get, list, instance view, deallocate, start, delete) and their extensions (create or update, get, list, delete), Uniform scale sets (create or update, update, get, list, delete, delete instances) and their VMs, managed disks (VM OS disks included) and snapshots, with cross-region incremental snapshot copies whose completionPercent climbs to 100, Azure Compute Gallery galleries, image definitions and image versions with their replication status, virtual networks and their subnets, NAT gateways, public load balancers with backend pools and outbound rules, network security groups, network interfaces and public IP addresses, the IP configurations of scale set VMs, private DNS zones, virtual network links and A record sets, resource provider registration, Cost Management exports at a subscription's scope, and long-running operations to poll. |
 | [`azure/graph`](https://pkg.go.dev/github.com/parallelworks/squall/azure/graph) | Microsoft Graph: a directory's domains (list) and users (create with Microsoft Entra's name and password rules, get by ID or user principal name, delete), with application permissions checked as Graph documents them. |
@@ -188,6 +188,16 @@ For Amazon EC2:
   copies being full copies with their own ID). It is encrypted if its source
   is or `Encrypted` is set; KMS keys are accepted and not modeled, and Outpost,
   Local Zone and time-based copies are rejected as unknown parameters.
+- `ModifyInstanceAttribute` changes the instance type of a stopped instance,
+  or, with `BlockDeviceMapping`, the `DeleteOnTermination` of volumes
+  attached to the instance in any state, `true` when a mapping leaves it
+  out; `DescribeVolumes`, `DescribeInstances` and termination follow the new
+  value (sourced: the API reference for `ModifyInstanceAttribute` and
+  `BlockDeviceMapping.N`). A device with no volume of the instance attached,
+  or a `VolumeId` other than the one there, fails with
+  `InvalidBlockDeviceMapping` and changes nothing, and both attributes in one
+  call fail with `InvalidParameterCombination` (inferred: the reference says
+  only one attribute can change at a time and names no codes).
 - `RunInstances` records metadata, private DNS name and CPU options, and the
   primary interface's type (`interface` or `efa`; with an existing interface,
   only that interface's type) and network card index (only 0, the same launch

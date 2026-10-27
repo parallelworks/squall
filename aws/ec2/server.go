@@ -13,7 +13,8 @@
 // ReleaseAddress, AssociateAddress, DisassociateAddress), network interfaces
 // (CreateNetworkInterface, DescribeNetworkInterfaces, DeleteNetworkInterface),
 // instances (RunInstances, DescribeInstances, StartInstances, StopInstances,
-// TerminateInstances, ModifyInstanceAttribute for the instance type), images
+// TerminateInstances, ModifyInstanceAttribute for the instance type and
+// DeleteOnTermination of attached volumes), images
 // (DescribeImages, RegisterImage, DeregisterImage), instance types
 // (DescribeInstanceTypes), EBS volumes (CreateVolume, DescribeVolumes,
 // DeleteVolume, AttachVolume, DetachVolume), EBS snapshots (CreateSnapshot,
@@ -77,6 +78,14 @@
 //     is accepted, where EC2 accepts only the counts it lists for each type.
 //     A type change resets the core count and threads to the new type's
 //     defaults.
+//   - ModifyInstanceAttribute changes one attribute per call: the instance
+//     type, only while the instance is stopped, or the DeleteOnTermination
+//     of volumes attached to it, in any state, which defaults to true when a
+//     mapping leaves it out. A mapping's device must have a volume of the
+//     instance attached, and its VolumeId, if set, must be that volume;
+//     otherwise the call fails with InvalidBlockDeviceMapping and changes
+//     nothing. Both attributes in one call fail with
+//     InvalidParameterCombination.
 //   - An instance's image must be registered with [Server.PutImage], and its
 //     type must be one [Server.PutInstanceType] added or one of a small
 //     built-in set, which DescribeInstanceTypes lists, that runs the image's
