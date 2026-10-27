@@ -5,8 +5,8 @@ go 1.27.0
 toolchain go1.27.3
 
 require (
-	cloud.google.com/go/compute v1.71.0
-	cloud.google.com/go/longrunning v1.2.0
+	cloud.google.com/go/compute v1.73.0
+	cloud.google.com/go/longrunning v1.3.0
 	cloud.google.com/go/lustre v1.3.0
 	cloud.google.com/go/storage v1.69.0
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.23.3
@@ -26,14 +26,14 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.47.3
 	github.com/aws/aws-sdk-go-v2/config v1.33.9
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.9
-	github.com/aws/aws-sdk-go-v2/service/ec2 v1.338.4
+	github.com/aws/aws-sdk-go-v2/service/ec2 v1.339.0
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.3
 	github.com/aws/smithy-go v1.28.5
 	github.com/googleapis/gax-go/v2 v2.26.2
 	github.com/microsoft/kiota-abstractions-go v1.11.4
 	github.com/microsoftgraph/msgraph-sdk-go v1.104.0
 	github.com/parallelworks/squall v0.0.0
-	google.golang.org/api v0.301.0
+	google.golang.org/api v0.306.0
 	google.golang.org/grpc v1.84.0
 	google.golang.org/protobuf v1.36.12
 )
@@ -73,7 +73,7 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/s2a-go v0.1.11 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/googleapis/enterprise-certificate-proxy v0.3.22 // indirect
+	github.com/googleapis/enterprise-certificate-proxy v0.3.23 // indirect
 	github.com/microsoft/kiota-authentication-azure-go v1.3.1 // indirect
 	github.com/microsoft/kiota-http-go v1.5.6 // indirect
 	github.com/microsoft/kiota-serialization-form-go v1.1.3 // indirect
@@ -94,16 +94,16 @@ require (
 	go.opentelemetry.io/otel/sdk v1.45.0 // indirect
 	go.opentelemetry.io/otel/sdk/metric v1.45.0 // indirect
 	go.opentelemetry.io/otel/trace v1.47.0 // indirect
-	golang.org/x/crypto v0.57.0 // indirect
-	golang.org/x/net v0.59.0 // indirect
+	golang.org/x/crypto v0.58.0 // indirect
+	golang.org/x/net v0.61.0 // indirect
 	golang.org/x/oauth2 v0.37.0 // indirect
-	golang.org/x/sync v0.23.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
-	golang.org/x/text v0.42.0 // indirect
+	golang.org/x/sync v0.24.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
 	google.golang.org/genproto v0.0.0-20260715232425-e75dac1f907d // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260715232425-e75dac1f907d // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260928230214-8a89bd6388cc // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20261019180522-ce908d29299b // indirect
 )
 
 replace github.com/parallelworks/squall => ../
