@@ -8,11 +8,9 @@ import (
 	"time"
 )
 
-// maxOperations bounds how many operations the server keeps for get, list and
-// requestId replay. The oldest are dropped first.
+// maxOperations bounds memory; the oldest operations go first.
 const maxOperations = 10_000
 
-// operation is a long-running operation the server started.
 type operation struct {
 	name                  string
 	target                string
@@ -21,13 +19,11 @@ type operation struct {
 	requestedCancellation bool
 	requestKey            string
 
-	done bool
-	err  *apiError
-	// result is what the operation answers with once done: an instance, or nil for Empty.
+	done   bool
+	err    *apiError
 	result *Instance
-	// wait is how many more reads see the operation in progress.
-	wait int
-	// complete applies the call's effect and returns the result; it is nil once the operation is done.
+	wait   int
+	// complete is nil once the operation is done.
 	complete func() *Instance
 }
 
@@ -49,7 +45,6 @@ type operationMeta struct {
 	APIVersion            string     `json:"apiVersion"`
 }
 
-// wire is op in the API's JSON shape, with enums as numbers when intEnums is set.
 func (op *operation) wire(intEnums bool) operationJSON {
 	out := operationJSON{
 		Name: op.name,
@@ -71,10 +66,9 @@ func (op *operation) wire(intEnums bool) operationJSON {
 	case op.err != nil:
 		out.Error = op.err.operationStatus()
 	case op.result != nil:
-		out.Response = struct {
-			Type string `json:"@type"`
-			instanceJSON
-		}{"type.googleapis.com/google.cloud.lustre.v1.Instance", op.result.wire(intEnums)}
+		resp := op.result.wireMap(intEnums)
+		resp["@type"] = "type.googleapis.com/google.cloud.lustre.v1.Instance"
+		out.Response = resp
 	default:
 		out.Response = struct {
 			Type string `json:"@type"`
@@ -83,11 +77,7 @@ func (op *operation) wire(intEnums bool) operationJSON {
 	return out
 }
 
-// startOperation records an operation of verb on target in parent, started by
-// a call with requestKey. A non-nil failure ends it in that error without
-// complete running. Otherwise complete applies the call's effect when the
-// operation finishes: before the call returns, or after the reads
-// [WithSettleAfter] sets. The caller holds s.mu.
+// startOperation fails at once on failure, and otherwise runs complete now or after [WithSettleAfter] reads.
 func (s *Server) startOperation(parent, requestKey, verb, target string, failure *apiError, complete func() *Instance) *operation {
 	now := s.now().UTC()
 	id := s.newID()
@@ -113,7 +103,6 @@ func (s *Server) startOperation(parent, requestKey, verb, target string, failure
 	return op
 }
 
-// keepOperation stores op, and for replay under its request key. The caller holds s.mu.
 func (s *Server) keepOperation(op *operation) {
 	s.operations[op.name] = op
 	if op.requestKey != "" {
@@ -129,7 +118,7 @@ func (s *Server) keepOperation(op *operation) {
 	s.opNext = (s.opNext + 1) % maxOperations
 }
 
-// forget drops the named operation, leaving its effect in progress. The caller holds s.mu.
+// forget drops an operation but not the change it tracks, as the API documents for delete.
 func (s *Server) forget(name string) {
 	op := s.operations[name]
 	if op == nil {
@@ -141,12 +130,10 @@ func (s *Server) forget(name string) {
 	}
 }
 
-// done marks op finished. The caller holds s.mu.
 func (s *Server) done(op *operation) {
 	op.done, op.endTime = true, s.now().UTC()
 }
 
-// finish applies op's effect now, if it is still in progress. The caller holds s.mu.
 func (s *Server) finish(op *operation) {
 	if op == nil || op.complete == nil {
 		return
@@ -158,8 +145,6 @@ func (s *Server) finish(op *operation) {
 	s.done(op)
 }
 
-// observe counts one read of op while it is in progress, and finishes it once
-// the reads [WithSettleAfter] sets are spent. The caller holds s.mu.
 func (s *Server) observe(op *operation) {
 	if op == nil || op.complete == nil || s.settleAfter < 0 {
 		return
@@ -171,8 +156,7 @@ func (s *Server) observe(op *operation) {
 	op.wait--
 }
 
-// Settle finishes every operation in progress, with the effects finishing
-// has, such as an instance becoming ACTIVE or a deleted one going away.
+// Settle finishes every change in progress.
 func (s *Server) Settle() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -181,7 +165,6 @@ func (s *Server) Settle() {
 	}
 }
 
-// replay returns the operation an earlier call with key started, if any. The caller holds s.mu.
 func (s *Server) replay(key string) (*operation, bool) {
 	if key == "" {
 		return nil, false
@@ -233,7 +216,6 @@ func (s *Server) listOperations(c *call, _ *apiError) (any, *apiError) {
 	return out, nil
 }
 
-// deleteOperation forgets an operation; the change it tracks goes on.
 func (s *Server) deleteOperation(c *call, _ *apiError) (any, *apiError) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -257,7 +239,6 @@ func (s *Server) cancelOperation(c *call, _ *apiError) (any, *apiError) {
 	return struct{}{}, nil
 }
 
-// newID returns a fresh number for an operation or instance. The caller holds s.mu.
 func (s *Server) newID() uint64 {
 	s.nextID++
 	return s.nextID

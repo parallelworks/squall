@@ -37,17 +37,19 @@
 //     perUnitStorageThroughput 0 or none. Locations are not checked, and
 //     networks, KMS keys, placement policies and quotas are not looked up.
 //     A mount point's address comes from 10.0.0.0/8 and is set once the
-//     instance is ACTIVE. Fields the server only records, such as
-//     maintenancePolicy or dynamicTierOptions, keep the JSON the caller
-//     sent; fields it does not know, at any depth, are rejected with 400.
-//     An access rule's ranges are CIDR ranges or addresses that must not
-//     overlap.
+//     instance is ACTIVE. Access rule ranges are CIDR ranges or addresses
+//     that must not overlap, and a maintenance policy has one weekly window
+//     and at most one exclusion window. Options are stored as the API reads
+//     them, so an enum sent by name or number reads back the same, as names
+//     or, with enum-encoding=int, numbers. Fields the server does not know,
+//     at any depth, are rejected with 400.
 //   - A patch changes only labels, description, gkeSupportEnabled and
 //     capacityGib, which may only grow and, from the smaller step, not past
-//     its threshold; other update mask paths are rejected with 400. Without
-//     an updateMask it changes those of them the body holds, ignores
-//     output-only fields, and rejects any other field that differs from the
-//     instance's. A patched instance returns to the state it was in.
+//     its threshold. The fields a patch names, by its updateMask, by * for
+//     all, or with no mask by those the body holds, may include output-only
+//     fields, which are ignored, and others whose value is unchanged, as
+//     AIP-203 directs; any other change, or a nested path, is rejected with
+//     400. A patched instance returns to the state it was in.
 //   - List filters follow AIP-160: field = value and field != value on name,
 //     state, filesystem, network, description and labels.KEY, labels.KEY:*
 //     and labels:KEY for a label's presence, joined by AND, OR, NOT, - and
@@ -56,8 +58,9 @@
 //     wildcard or a comparison with <, is rejected with 400 rather than
 //     ignored. The location - lists every location.
 //   - Canceling an operation records the request and changes nothing else,
-//     which the API allows. The fields parameter is accepted and ignored:
-//     responses are always whole. Other parameters a method does not take are
+//     which the API allows. The discovery document's standard parameters,
+//     such as fields or callback, are accepted and ignored: responses are
+//     always whole JSON. Other parameters a method does not take are
 //     rejected with 400. Error messages are the stand-in's own.
 //
 // Fault method names are the API's method IDs, such as
@@ -103,8 +106,7 @@ const (
 	maxList = 1000
 )
 
-// Server is a stand-in for the Managed Lustre API. Create one with [New]. It
-// is safe for concurrent use.
+// Server is a stand-in for the Managed Lustre API, safe for concurrent use. Create one with [New].
 type Server struct {
 	mux    *http.ServeMux
 	faults *fault.Injector
@@ -137,11 +139,7 @@ func WithClock(now func() time.Time) Option {
 	return func(s *Server) { s.now = now }
 }
 
-// WithSettleAfter sets how many reads see a change to an instance in
-// progress before it finishes: gets and lists that return the instance, and
-// gets of its operation. The default, 0, finishes every change before the
-// call that makes it returns. A negative n finishes changes only on
-// [Server.Settle].
+// WithSettleAfter holds each change in progress for n reads of the instance or its operation (0, the default, finishes it at once; a negative n waits for [Server.Settle]).
 func WithSettleAfter(n int) Option {
 	return func(s *Server) { s.settleAfter = n }
 }
@@ -197,32 +195,29 @@ func (s *Server) registerRoutes() {
 	})
 }
 
-// handler answers one method with the body to encode. A non-nil opFault
-// means the call's operation must fail without the call taking effect.
+// handler answers one method; a non-nil opFault fails the operation it starts without the call taking effect.
 type handler func(c *call, opFault *apiError) (any, *apiError)
 
-// call is one request with what the route parsed from it.
 type call struct {
 	*http.Request
-	// resource is the call's path below /v1/, without a custom verb.
 	resource string
-	// intEnums is set when the caller asked for enums as numbers.
 	intEnums bool
 }
 
-// operationMethods are the methods that start a long-running operation.
+// operationMethods start an operation, so only they can fault with [fault.ModeFailOperation].
 var operationMethods = []string{
 	"lustre.projects.locations.instances.create",
 	"lustre.projects.locations.instances.patch",
 	"lustre.projects.locations.instances.delete",
 }
 
-// commonParams are the system parameters every method takes.
-var commonParams = []string{"$alt", "alt", "prettyPrint", "$prettyPrint", "fields", "$fields", "quotaUser", "key"}
+// commonParams are the discovery document's standard parameters, and the $ spellings the client sends.
+var commonParams = []string{
+	"$.xgafv", "access_token", "alt", "callback", "fields", "key", "oauth_token", "prettyPrint", "quotaUser", "upload_protocol", "uploadType",
+	"$alt", "$fields", "$prettyPrint",
+}
 
-// route registers h for pattern as method, which takes params. A verb, such
-// as ":cancel", must end the path. A non-nil target names the call's
-// resource in place of its path.
+// route registers h; verb, such as ":cancel", is a suffix ServeMux cannot match on its own.
 func (s *Server) route(pattern, method, verb string, h handler, target func(*call) string, params ...string) {
 	startsOperation := slices.Contains(operationMethods, method)
 	s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
@@ -262,8 +257,7 @@ func (s *Server) route(pattern, method, verb string, h handler, target func(*cal
 	})
 }
 
-// checkParams rejects a query parameter method does not take, as the API
-// does, and reads how the caller wants enums encoded.
+// checkParams rejects an unknown parameter as the API does, rather than ignoring it.
 func (c *call) checkParams(method string, params []string) *apiError {
 	q := c.URL.Query()
 	for name := range q {
@@ -288,7 +282,7 @@ func (c *call) checkParams(method string, params []string) *apiError {
 	return nil
 }
 
-// createTarget names the instance a create makes, from its instanceId.
+// createTarget names the instance a create makes, so a fault rule can target one ID.
 func createTarget(c *call) string {
 	if id := c.URL.Query().Get("instanceId"); id != "" {
 		return c.resource + "/" + id
@@ -296,14 +290,11 @@ func createTarget(c *call) string {
 	return c.resource
 }
 
-// parent is the "projects/p/locations/l" a call's path names.
 func (c *call) parent() string {
 	return "projects/" + c.PathValue("project") + "/locations/" + c.PathValue("location")
 }
 
-// requestKey returns the key a call's requestId replays under, scoped to its
-// project and method, or "" when it has none. The API takes a UUID other
-// than the zero UUID.
+// requestKey scopes a requestId to its project and method, as compute does.
 func (c *call) requestKey(method string) (string, *apiError) {
 	id := c.URL.Query().Get("requestId")
 	if id == "" {
@@ -334,8 +325,6 @@ func validUUID(id string) bool {
 	return true
 }
 
-// decodeStrict reads a JSON request body into v, rejecting fields v does not
-// have, as the API rejects fields it does not know.
 func decodeStrict(r *http.Request, v any) *apiError {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
 	if err != nil {
@@ -361,9 +350,7 @@ func decodeStrict(r *http.Request, v any) *apiError {
 	return nil
 }
 
-// pageOf returns the items after the call's page token, the next page token,
-// up to its pageSize. Items are in key order, and a token is the last key of
-// the page before, so a page survives deletes between calls.
+// pageOf pages by the last key returned, so a page survives deletes between calls.
 func pageOf[T any](c *call, items []T, key func(T) string, desc bool) ([]T, string, *apiError) {
 	q := c.URL.Query()
 	limit := maxList
@@ -401,11 +388,9 @@ func past(k, after string, desc bool) bool {
 	return k > after
 }
 
-// apiError is an error in the shape Google APIs answer with.
 type apiError struct {
-	Status  int
-	Message string
-	// Reason, when set, is reported in an ErrorInfo detail of Domain.
+	Status   int
+	Message  string
 	Reason   string
 	Domain   string
 	Metadata map[string]string
@@ -438,8 +423,7 @@ func faultError(f fault.Fault) *apiError {
 	}
 }
 
-// rpcCodes are the google.rpc.Code each HTTP status stands for, as Google's
-// HTTP mapping gives them.
+// rpcCodes follow Google's HTTP mapping of google.rpc.Code.
 var rpcCodes = map[int]struct {
 	code int
 	name string
@@ -458,7 +442,6 @@ var rpcCodes = map[int]struct {
 	http.StatusGatewayTimeout:      {4, "DEADLINE_EXCEEDED"},
 }
 
-// rpcCode is the google.rpc.Code number and name for an HTTP status.
 func rpcCode(status int) (int, string) {
 	if c, ok := rpcCodes[status]; ok {
 		return c.code, c.name
@@ -469,8 +452,7 @@ func rpcCode(status int) (int, string) {
 	return 2, "UNKNOWN"
 }
 
-// rpcStatus is a google.rpc.Status. In an error response, Code is the HTTP
-// status and Status the code's name; in an operation, Code is the code.
+// rpcStatus holds the HTTP status in an error response but the rpc code in an operation.
 type rpcStatus struct {
 	Code    int          `json:"code"`
 	Message string       `json:"message"`
@@ -492,7 +474,6 @@ func (e *apiError) details() []*errorInfo {
 	return []*errorInfo{{Type: "type.googleapis.com/google.rpc.ErrorInfo", Reason: e.Reason, Domain: e.Domain, Metadata: e.Metadata}}
 }
 
-// operationStatus is e as an operation's error.
 func (e *apiError) operationStatus() *rpcStatus {
 	code, _ := rpcCode(e.Status)
 	return &rpcStatus{Code: code, Message: e.Message, Details: e.details()}

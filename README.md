@@ -152,8 +152,11 @@ For Managed Lustre:
   `description` and labels (`labels.KEY = value`, `labels.KEY:*`,
   `labels:KEY`), with AND, OR, NOT and parentheses; anything else is rejected
   with 400. A patch changes labels, description, gkeSupportEnabled or
-  capacityGib, by `updateMask` or, without one, by the fields the body holds.
-  Error messages are the stand-in's own.
+  capacityGib, named by `updateMask`, by `*`, or without a mask by the fields
+  the body holds; output-only fields and unchanged ones are ignored, as
+  AIP-203 directs, and any other change is rejected. Options read back the
+  same whether their enums were sent by name or number. Error messages are
+  the stand-in's own.
 - Fault method names are the API's method IDs, such as
   `lustre.projects.locations.instances.create`, and a rule's `Resource` is the
   path below `/v1/`, for a create the instance it makes.

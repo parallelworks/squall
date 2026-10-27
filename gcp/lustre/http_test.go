@@ -258,10 +258,15 @@ func TestPatchKeepsTheInstancesState(t *testing.T) {
 
 func TestOptionsRejectWhatTheAPIDoesNotTake(t *testing.T) {
 	for extra, want := range map[string]int{
-		`,"dynamicTierOptions":{"mode":"DISABLED","size":1}`:                                                                                     http.StatusBadRequest,
-		`,"maintenancePolicy":{"weeklyMaintenanceWindows":[{"dayOfWeek":"MONDAY","startTime":{"hours":2}}]}`:                                     http.StatusOK,
+		`,"dynamicTierOptions":{"mode":"DISABLED","size":1}`:                                                 http.StatusBadRequest,
+		`,"maintenancePolicy":{"weeklyMaintenanceWindows":[{"dayOfWeek":"MONDAY","startTime":{"hours":2}}]}`: http.StatusOK,
+		`,"maintenancePolicy":{"weeklyMaintenanceWindows":[{"dayOfWeek":1,"startTime":{}}],"maintenanceExclusionWindow":[{"startDate":{"year":2026,"month":1,"day":1},"endDate":{"month":12,"day":24},"time":{}}]}`: http.StatusOK,
+		`,"maintenancePolicy":{"weeklyMaintenanceWindows":[{"dayOfWeek":"MONDAY","startTime":{}},{"dayOfWeek":"TUESDAY","startTime":{}}]}`:                                                                          http.StatusBadRequest,
+		`,"maintenancePolicy":{"weeklyMaintenanceWindows":[{"dayOfWeek":"MONDAY","startTime":{"hours":24}}]}`:                                                                                                       http.StatusBadRequest,
+		`,"maintenancePolicy":{"weeklyMaintenanceWindows":[{"dayOfWeek":"MONDAY","startTime":{}}],"maintenanceExclusionWindow":[{"startDate":{"year":2026,"month":1,"day":1}}]}`:                                    http.StatusBadRequest,
+		`,"upcomingMaintenanceSchedule":{"bogus":1}`:                                                                                             http.StatusBadRequest,
+		`,"upcomingMaintenanceSchedule":{"startTime":"2026-01-01T00:00:00Z"}`:                                                                    http.StatusOK,
 		`,"maintenancePolicy":{"weeklyMaintenanceWindows":[{"dayOfWeek":"MONDAY","duration":"1h"}]}`:                                             http.StatusBadRequest,
-		`,"maintenancePolicy":{"maintenanceExclusionWindow":[{"startDate":{"year":2026,"month":1,"day":1},"time":{}}]}`:                          http.StatusOK,
 		`,"accessRulesOptions":{"defaultSquashMode":"ROOT_SQUASH","defaultSquashUid":"65534","defaultSquashGid":"65534"}`:                        http.StatusOK,
 		`,"accessRulesOptions":{"defaultSquashMode":"ROOT_SQUASH","defaultSquashUid":"4294967296"}`:                                              http.StatusBadRequest,
 		`,"accessRulesOptions":{"defaultSquashMode":2,"accessRules":[{"name":"a","ipAddressRanges":["10.0.0.0/24","10.1.0.1"],"squashMode":1}]}`: http.StatusOK,
@@ -378,5 +383,127 @@ func TestPutInstanceSetsUpState(t *testing.T) {
 	_, list := do(t, s, http.MethodGet, "/v1/projects/p/locations/-/instances?filter=labels.run%3Dold", "")
 	if items := list["instances"].([]any); len(items) != 1 {
 		t.Errorf("list = %v", list)
+	}
+}
+
+func TestPatchIgnoresUnchangedOptionsHoweverTheyAreSpelled(t *testing.T) {
+	s := lustre.New()
+	const options = `,"accessRulesOptions":{"defaultSquashMode":"ROOT_SQUASH","defaultSquashUid":"65534","defaultSquashGid":0,"accessRules":[]},` +
+		`"maintenancePolicy":{"weeklyMaintenanceWindows":[{"dayOfWeek":"MONDAY","startTime":{"hours":0,"minutes":30}}]}`
+	create(t, s, "a", body(9_000, 1000, options))
+	patch := `{"description":"d","accessRulesOptions":{"defaultSquashMode":2,"defaultSquashUid":65534},` +
+		`"maintenancePolicy":{"weeklyMaintenanceWindows":[{"dayOfWeek":1,"startTime":{"minutes":30}}]}}`
+	if code, out := do(t, s, http.MethodPatch, instances+"/a", patch); code != http.StatusOK {
+		t.Fatalf("patch spelling the options as numbers and leaving out zeros = %d %v", code, out)
+	}
+	if code, _ := do(t, s, http.MethodPatch, instances+"/a", `{"accessRulesOptions":{"defaultSquashMode":1}}`); code != http.StatusBadRequest {
+		t.Errorf("patch changing the squash mode = %d, want 400", code)
+	}
+	_, got := do(t, s, http.MethodGet, instances+"/a?%24alt=json%3Benum-encoding%3Dint", "")
+	rules := got["accessRulesOptions"].(map[string]any)
+	day := got["maintenancePolicy"].(map[string]any)["weeklyMaintenanceWindows"].([]any)[0].(map[string]any)["dayOfWeek"]
+	if rules["defaultSquashMode"] != 2.0 || day != 1.0 || got["state"] != 1.0 {
+		t.Errorf("enums as numbers = %v, day %v", rules, day)
+	}
+	_, got = do(t, s, http.MethodGet, instances+"/a", "")
+	if got["accessRulesOptions"].(map[string]any)["defaultSquashMode"] != "ROOT_SQUASH" {
+		t.Errorf("enums as names = %v", got["accessRulesOptions"])
+	}
+}
+
+func TestPutInstanceChecksItsMaintenancePolicy(t *testing.T) {
+	s := lustre.New()
+	in := lustre.Instance{
+		Filesystem: "lfs", CapacityGib: 9_000, PerUnitStorageThroughput: 1000, Network: "projects/p/global/networks/n",
+		MaintenancePolicy: &lustre.MaintenancePolicy{},
+	}
+	if _, err := s.PutInstance("p", "us-central1-a", "a", in); err == nil {
+		t.Error("PutInstance took a maintenance policy with no weekly window")
+	}
+	in.MaintenancePolicy.WeeklyMaintenanceWindows = []lustre.WeeklyMaintenanceWindow{{DayOfWeek: "FRIDAY", StartTime: &lustre.TimeOfDay{Hours: 3}}}
+	if _, err := s.PutInstance("p", "us-central1-a", "a", in); err != nil {
+		t.Fatal(err)
+	}
+	if code, out := do(t, s, http.MethodGet, instances+"/a", ""); code != http.StatusOK || out["maintenancePolicy"] == nil {
+		t.Errorf("get = %d %v", code, out)
+	}
+}
+
+func TestUpdateMaskPaths(t *testing.T) {
+	s := lustre.New()
+	create(t, s, "a", body(18_000, 1000, ""))
+	_, current := do(t, s, http.MethodGet, instances+"/a", "")
+	for _, tc := range []struct {
+		mask, body string
+		want       int
+	}{
+		{"updateTime,description", `{"updateTime":"2020-01-01T00:00:00Z","description":"x"}`, http.StatusOK},
+		{"update_time", `{}`, http.StatusOK},
+		{"network", `{"network":"projects/p/global/networks/default"}`, http.StatusOK},
+		{"network", `{"network":"projects/p/global/networks/other"}`, http.StatusBadRequest},
+		{"filesystem", `{}`, http.StatusBadRequest},
+		{"labels.k", `{"labels":{"k":"v"}}`, http.StatusBadRequest},
+		{"bogus", `{}`, http.StatusBadRequest},
+		{"description", `{"maintenancePolicy":{"bogus":1}}`, http.StatusBadRequest},
+		{"description", `{"accessRulesOptions":{"x":1}}`, http.StatusBadRequest},
+		{"*", `{"description":"y"}`, http.StatusBadRequest},
+	} {
+		if code, out := do(t, s, http.MethodPatch, instances+"/a?updateMask="+tc.mask, tc.body); code != tc.want {
+			t.Errorf("patch %s %s = %d %v, want %d", tc.mask, tc.body, code, out, tc.want)
+		}
+	}
+	current["description"] = "all"
+	current["labels"] = map[string]any{"k": "v"}
+	sent, _ := json.Marshal(current)
+	if code, out := do(t, s, http.MethodPatch, instances+"/a?updateMask=*", string(sent)); code != http.StatusOK {
+		t.Fatalf("patch * of the whole instance = %d %v", code, out)
+	}
+	got, _ := s.LookupInstance("p", "us-central1-a", "a")
+	if got.Description != "all" || got.Labels["k"] != "v" || got.CapacityGib != 18_000 {
+		t.Errorf("instance = %+v", got)
+	}
+}
+
+func TestPatchWithAnEmptyBodyChangesNothing(t *testing.T) {
+	s := lustre.New()
+	create(t, s, "a", body(9_000, 1000, `,"description":"d"`))
+	if code, out := do(t, s, http.MethodPatch, instances+"/a", ""); code != http.StatusOK {
+		t.Fatalf("patch with no body = %d %v", code, out)
+	}
+	if got, _ := s.LookupInstance("p", "us-central1-a", "a"); got.Description != "d" {
+		t.Errorf("instance = %+v", got)
+	}
+}
+
+func TestStandardParametersAreAccepted(t *testing.T) {
+	s := lustre.New()
+	create(t, s, "a", body(9_000, 1000, ""))
+	for _, q := range []string{"oauth_token=t", "access_token=t", "%24.xgafv=2", "callback=f", "upload_protocol=raw", "uploadType=media", "key=k", "quotaUser=u", "prettyPrint=false", "fields=name", "alt=json"} {
+		if code, out := do(t, s, http.MethodGet, instances+"/a?"+q, ""); code != http.StatusOK {
+			t.Errorf("get with %s = %d %v", q, code, out)
+		}
+	}
+}
+
+func TestListPagesInDescendingOrder(t *testing.T) {
+	s := lustre.New()
+	for _, id := range []string{"a", "b", "c"} {
+		create(t, s, id, body(9_000, 1000, ""))
+	}
+	var got []string
+	token := ""
+	for range 4 {
+		_, page := do(t, s, http.MethodGet, instances+"?orderBy=name+desc&pageSize=1&pageToken="+token, "")
+		for _, item := range page["instances"].([]any) {
+			got = append(got, strings.TrimPrefix(item.(map[string]any)["name"].(string), "projects/p/locations/us-central1-a/instances/"))
+		}
+		next, _ := page["nextPageToken"].(string)
+		if next == "" {
+			break
+		}
+		token = next
+	}
+	if strings.Join(got, ",") != "c,b,a" {
+		t.Errorf("pages = %v, want c,b,a", got)
 	}
 }

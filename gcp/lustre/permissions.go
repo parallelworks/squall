@@ -8,15 +8,12 @@ import (
 	"github.com/parallelworks/squall/access"
 )
 
-// WithPolicy makes the server refuse calls that need a permission p lacks,
-// as Managed Lustre refuses them, and records what each call needed. Without
-// it every call is allowed.
+// WithPolicy refuses calls that need a permission p lacks and records what each needed; without it every call is allowed.
 func WithPolicy(p *access.Policy) Option {
 	return func(s *Server) { s.policy = p }
 }
 
-// basePermissions is what Managed Lustre checks for each method, from each
-// method's "IAM Permissions" in the REST reference.
+// basePermissions are from each method's "IAM Permissions" in the REST reference.
 var basePermissions = map[string][]string{
 	"lustre.projects.locations.instances.create": {"lustre.instances.create"},
 	"lustre.projects.locations.instances.list":   {"lustre.instances.list"},
@@ -30,8 +27,7 @@ var basePermissions = map[string][]string{
 	"lustre.projects.locations.operations.cancel": {"lustre.operations.cancel"},
 }
 
-// iamResource is the resource a method's permission is checked on: the
-// location for a create or a list, and otherwise the path.
+// iamResource is the parent for create and list, where the reference checks them.
 func iamResource(method, path string) string {
 	switch method {
 	case "lustre.projects.locations.instances.create", "lustre.projects.locations.instances.list":

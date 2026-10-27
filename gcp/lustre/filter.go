@@ -7,15 +7,13 @@ import (
 	"strings"
 )
 
-// expr is a parsed list filter: a comparison, the negation ('!') of its one
-// term, or all ('&') or any ('|') of its terms. A nil *expr matches everything.
+// expr is a comparison, or the negation (!), conjunction (&) or disjunction (|) of its terms; nil matches all.
 type expr struct {
 	op    byte
 	terms []expr
 	cmp   comparison
 }
 
-// comparison is field = value, field != value, or field:* (has).
 type comparison struct {
 	field string
 	op    string
@@ -48,7 +46,6 @@ func (e *expr) String() string {
 	return strings.Join(parts, " AND ")
 }
 
-// filterFields are the instance fields a filter can compare, besides labels.
 var filterFields = []string{"name", "state", "filesystem", "network", "description"}
 
 func (in *Instance) filterValue(field string) (string, bool) {
@@ -100,16 +97,7 @@ func (e *expr) matches(in *Instance) bool {
 
 var errUnsupportedFilter = errors.New("unsupported filter")
 
-// parseFilter parses the subset of the AIP-160 filter grammar the server
-// supports:
-//
-//   - Comparisons field = value and field != value, on name, state,
-//     filesystem, network, description and labels.KEY, with a value that has
-//     spaces in double quotes. A "*" in a value is rejected, since AIP-160
-//     reads it as a wildcard.
-//   - labels.KEY:* and labels:KEY, which match an instance that has the label.
-//   - Terms joined by AND or juxtaposition, and by OR, which binds tighter
-//     than AND, negated with NOT or -, and grouped with parentheses.
+// parseFilter takes an AIP-160 subset and rejects the rest, such as wildcards, rather than guess.
 func parseFilter(s string) (*expr, error) {
 	p := filterParser{s: s}
 	if p.skipSpace(); p.i == len(p.s) {
@@ -148,7 +136,6 @@ func (p *filterParser) consume(token string) bool {
 	return false
 }
 
-// keyword consumes word when a space or parenthesis follows it.
 func (p *filterParser) keyword(word string) bool {
 	rest := p.s[p.i:]
 	if !strings.HasPrefix(rest, word) || len(rest) > len(word) && !strings.ContainsRune(" \t(", rune(rest[len(word)])) {
@@ -158,7 +145,6 @@ func (p *filterParser) keyword(word string) bool {
 	return true
 }
 
-// until advances past bytes not in stop and returns them.
 func (p *filterParser) until(stop string) string {
 	start := p.i
 	for p.i < len(p.s) && !strings.ContainsRune(stop, rune(p.s[p.i])) {
@@ -172,8 +158,7 @@ func (p *filterParser) atEnd() bool {
 	return p.i == len(p.s) || p.s[p.i] == ')'
 }
 
-// conjunction parses terms joined by AND or juxtaposition, up to a closing
-// parenthesis or the end.
+// conjunction binds looser than OR, as AIP-160 orders them.
 func (p *filterParser) conjunction() (*expr, error) {
 	var terms []expr
 	for {

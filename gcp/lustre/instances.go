@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"io"
 	"maps"
-	"math"
-	"net/netip"
 	"regexp"
 	"slices"
 	"strconv"
@@ -31,92 +29,117 @@ const (
 	stateUnspecified = "STATE_UNSPECIFIED"
 )
 
-// states are the instance states in the order of their enum numbers.
+// states are indexed by their enum numbers.
 var states = []string{stateUnspecified, StateActive, StateCreating, StateDeleting, StateUpgrading, StateRepairing, StateStopped, StateUpdating, StateSuspended}
 
 // Instance is a Managed Lustre instance, in the API's JSON shape.
 type Instance struct {
 	// Name is the full resource name, projects/{project}/locations/{location}/instances/{id}.
-	Name                     string            `json:"name"`
-	Filesystem               string            `json:"filesystem"`
-	CapacityGib              int64             `json:"capacityGib,string"`
-	Network                  string            `json:"network"`
-	State                    string            `json:"state"`
-	MountPoint               string            `json:"mountPoint,omitzero"`
-	CreateTime               time.Time         `json:"createTime"`
-	UpdateTime               time.Time         `json:"updateTime"`
-	Description              string            `json:"description,omitzero"`
-	Labels                   map[string]string `json:"labels,omitzero"`
-	PerUnitStorageThroughput int64             `json:"perUnitStorageThroughput,string,omitzero"`
-	GkeSupportEnabled        bool              `json:"gkeSupportEnabled,omitzero"`
-	UID                      string            `json:"uid"`
-	KmsKey                   string            `json:"kmsKey,omitzero"`
-	PlacementPolicy          string            `json:"placementPolicy,omitzero"`
-	TargetVersion            string            `json:"targetVersion,omitzero"`
-	// The options below keep the JSON the caller sent.
-	AccessRulesOptions json.RawMessage `json:"accessRulesOptions,omitzero"`
-	MaintenancePolicy  json.RawMessage `json:"maintenancePolicy,omitzero"`
-	DynamicTierOptions json.RawMessage `json:"dynamicTierOptions,omitzero"`
+	Name                     string              `json:"name"`
+	Filesystem               string              `json:"filesystem"`
+	CapacityGib              int64               `json:"capacityGib,string"`
+	Network                  string              `json:"network"`
+	State                    string              `json:"state"`
+	MountPoint               string              `json:"mountPoint,omitzero"`
+	CreateTime               time.Time           `json:"createTime"`
+	UpdateTime               time.Time           `json:"updateTime"`
+	Description              string              `json:"description,omitzero"`
+	Labels                   map[string]string   `json:"labels,omitempty"`
+	PerUnitStorageThroughput int64               `json:"perUnitStorageThroughput,string,omitzero"`
+	GkeSupportEnabled        bool                `json:"gkeSupportEnabled,omitzero"`
+	UID                      string              `json:"uid"`
+	KmsKey                   string              `json:"kmsKey,omitzero"`
+	PlacementPolicy          string              `json:"placementPolicy,omitzero"`
+	TargetVersion            string              `json:"targetVersion,omitzero"`
+	AccessRulesOptions       *AccessRulesOptions `json:"accessRulesOptions,omitzero"`
+	MaintenancePolicy        *MaintenancePolicy  `json:"maintenancePolicy,omitzero"`
+	DynamicTierOptions       *DynamicTierOptions `json:"dynamicTierOptions,omitzero"`
 }
 
 func (in *Instance) clone() Instance {
 	c := *in
 	c.Labels = maps.Clone(in.Labels)
-	c.AccessRulesOptions = bytes.Clone(in.AccessRulesOptions)
-	c.MaintenancePolicy = bytes.Clone(in.MaintenancePolicy)
-	c.DynamicTierOptions = bytes.Clone(in.DynamicTierOptions)
+	if o := in.AccessRulesOptions; o != nil {
+		o := *o
+		o.AccessRules = slices.Clone(o.AccessRules)
+		for i := range o.AccessRules {
+			o.AccessRules[i].IPAddressRanges = slices.Clone(o.AccessRules[i].IPAddressRanges)
+		}
+		c.AccessRulesOptions = &o
+	}
+	if p := in.MaintenancePolicy; p != nil {
+		p := *p
+		p.WeeklyMaintenanceWindows = slices.Clone(p.WeeklyMaintenanceWindows)
+		for i := range p.WeeklyMaintenanceWindows {
+			p.WeeklyMaintenanceWindows[i].StartTime = clonePtr(p.WeeklyMaintenanceWindows[i].StartTime)
+		}
+		p.MaintenanceExclusionWindow = slices.Clone(p.MaintenanceExclusionWindow)
+		for i := range p.MaintenanceExclusionWindow {
+			w := &p.MaintenanceExclusionWindow[i]
+			w.StartDate, w.EndDate, w.Time = clonePtr(w.StartDate), clonePtr(w.EndDate), clonePtr(w.Time)
+		}
+		c.MaintenancePolicy = &p
+	}
+	c.DynamicTierOptions = clonePtr(in.DynamicTierOptions)
 	return c
 }
 
-// instanceJSON is an instance as a response carries it, its state a name or,
-// when the caller asked for enums as numbers, a number.
-type instanceJSON struct {
-	*Instance
-	State any `json:"state"`
+func clonePtr[T any](p *T) *T {
+	if p == nil {
+		return nil
+	}
+	return new(*p)
 }
 
-func (in *Instance) wire(intEnums bool) instanceJSON {
-	c := in.clone()
-	out := instanceJSON{Instance: &c, State: c.State}
+// wire encodes enums as numbers when the caller asks, as the client does with enum-encoding=int.
+func (in *Instance) wire(intEnums bool) any {
+	if !intEnums {
+		return json.RawMessage(encoded(in))
+	}
+	return in.wireMap(true)
+}
+
+func (in *Instance) wireMap(intEnums bool) map[string]any {
+	var out map[string]any
+	if err := json.Unmarshal(encoded(in), &out); err != nil {
+		panic("squall: encoding an instance: " + err.Error())
+	}
 	if intEnums {
-		out.State = max(slices.Index(states, c.State), 0)
+		numberEnums(out)
 	}
 	return out
 }
 
-// instance is an instance the server holds, with its change in progress.
 type instance struct {
 	Instance
 	op *operation
 }
 
-// instanceInput is an instance as a create or patch sends it. Output-only
-// fields are read and ignored, as the API ignores them.
 type instanceInput struct {
-	Name                     string            `json:"name"`
-	Filesystem               string            `json:"filesystem"`
-	CapacityGib              int64Value        `json:"capacityGib"`
-	Network                  string            `json:"network"`
-	Description              string            `json:"description"`
-	Labels                   map[string]string `json:"labels"`
-	PerUnitStorageThroughput int64Value        `json:"perUnitStorageThroughput"`
-	GkeSupportEnabled        bool              `json:"gkeSupportEnabled"`
-	KmsKey                   string            `json:"kmsKey"`
-	PlacementPolicy          string            `json:"placementPolicy"`
-	TargetVersion            string            `json:"targetVersion"`
-	AccessRulesOptions       json.RawMessage   `json:"accessRulesOptions"`
-	MaintenancePolicy        json.RawMessage   `json:"maintenancePolicy"`
-	DynamicTierOptions       json.RawMessage   `json:"dynamicTierOptions"`
+	Name                     string              `json:"name"`
+	Filesystem               string              `json:"filesystem"`
+	CapacityGib              int64Value          `json:"capacityGib"`
+	Network                  string              `json:"network"`
+	Description              string              `json:"description"`
+	Labels                   map[string]string   `json:"labels"`
+	PerUnitStorageThroughput int64Value          `json:"perUnitStorageThroughput"`
+	GkeSupportEnabled        bool                `json:"gkeSupportEnabled"`
+	KmsKey                   string              `json:"kmsKey"`
+	PlacementPolicy          string              `json:"placementPolicy"`
+	TargetVersion            string              `json:"targetVersion"`
+	AccessRulesOptions       *AccessRulesOptions `json:"accessRulesOptions"`
+	MaintenancePolicy        *MaintenancePolicy  `json:"maintenancePolicy"`
+	DynamicTierOptions       *DynamicTierOptions `json:"dynamicTierOptions"`
 
-	State                       json.RawMessage `json:"state"`
-	MountPoint                  string          `json:"mountPoint"`
-	CreateTime                  json.RawMessage `json:"createTime"`
-	UpdateTime                  json.RawMessage `json:"updateTime"`
-	UID                         string          `json:"uid"`
-	StateReason                 string          `json:"stateReason"`
-	AvailableVersion            string          `json:"availableVersion"`
-	EffectiveVersion            string          `json:"effectiveVersion"`
-	UpcomingMaintenanceSchedule json.RawMessage `json:"upcomingMaintenanceSchedule"`
+	State                       json.RawMessage      `json:"state"`
+	MountPoint                  string               `json:"mountPoint"`
+	CreateTime                  json.RawMessage      `json:"createTime"`
+	UpdateTime                  json.RawMessage      `json:"updateTime"`
+	UID                         string               `json:"uid"`
+	StateReason                 string               `json:"stateReason"`
+	AvailableVersion            string               `json:"availableVersion"`
+	EffectiveVersion            string               `json:"effectiveVersion"`
+	UpcomingMaintenanceSchedule *maintenanceSchedule `json:"upcomingMaintenanceSchedule"`
 }
 
 var (
@@ -133,15 +156,13 @@ func validInstanceID(id string) *apiError {
 	return nil
 }
 
-// tier is a performance tier's capacity rules, in GiB.
 type tier struct {
 	min, max, step int64
 	// Above threshold, when set, capacity grows by bigStep.
 	threshold, bigStep int64
 }
 
-// tiers are the performance tiers by perUnitStorageThroughput, from the
-// Managed Lustre performance tiers documentation. 0 is the Dynamic tier.
+// tiers are from the performance tiers documentation; 0 is the Dynamic tier.
 var tiers = map[int64]tier{
 	1000: {min: 9_000, max: 10_008_000, step: 9_000, threshold: 2_556_000, bigStep: 72_000},
 	500:  {min: 18_000, max: 20_016_000, step: 18_000, threshold: 5_112_000, bigStep: 144_000},
@@ -161,26 +182,11 @@ func (t tier) check(capacity, throughput int64) *apiError {
 	return nil
 }
 
-// tierOf is the tier an instance's throughput and dynamic tier options choose.
-func tierOf(throughput int64, dynamic json.RawMessage) (tier, *apiError) {
-	isDynamic := false
-	if len(dynamic) > 0 && string(dynamic) != "null" {
-		var opts struct {
-			Mode json.RawMessage `json:"mode"`
-		}
-		if err := strictly(dynamic, &opts); err != nil {
-			return tier{}, invalid("Invalid dynamic_tier_options: %v", err)
-		}
-		mode, ok := enumName(opts.Mode, "MODE_UNSPECIFIED", "DISABLED", "DEFAULT_CACHE")
-		if !ok {
-			return tier{}, invalid("Invalid dynamic_tier_options.mode %s", opts.Mode)
-		}
-		isDynamic = mode == "DEFAULT_CACHE"
-	}
+func tierOf(throughput int64, dynamic *DynamicTierOptions) (tier, *apiError) {
 	switch {
-	case isDynamic && throughput != 0:
+	case dynamic.dynamic() && throughput != 0:
 		return tier{}, invalid("per_unit_storage_throughput must be 0 or unset for an instance on the Dynamic tier.")
-	case isDynamic:
+	case dynamic.dynamic():
 		return tiers[0], nil
 	}
 	t, ok := tiers[throughput]
@@ -190,140 +196,11 @@ func tierOf(throughput int64, dynamic json.RawMessage) (tier, *apiError) {
 	return t, nil
 }
 
-// enumName reads an enum sent as its name or number, reporting whether it is one of names.
-func enumName(raw json.RawMessage, names ...string) (string, bool) {
-	if len(raw) == 0 || string(raw) == "null" {
-		return names[0], true
-	}
-	var name string
-	if json.Unmarshal(raw, &name) == nil {
-		return name, slices.Contains(names, name)
-	}
-	var n int
-	if json.Unmarshal(raw, &n) == nil && n >= 0 && n < len(names) {
-		return names[n], true
-	}
-	return "", false
-}
-
-// checkAccessRules applies the rules the API documents for root squash options.
-func checkAccessRules(raw json.RawMessage) *apiError {
-	if len(raw) == 0 || string(raw) == "null" {
-		return nil
-	}
-	var opts struct {
-		AccessRules []struct {
-			Name            string          `json:"name"`
-			IPAddressRanges []string        `json:"ipAddressRanges"`
-			SquashMode      json.RawMessage `json:"squashMode"`
-		} `json:"accessRules"`
-		DefaultSquashMode json.RawMessage `json:"defaultSquashMode"`
-		DefaultSquashUID  int64Value      `json:"defaultSquashUid"`
-		DefaultSquashGID  int64Value      `json:"defaultSquashGid"`
-	}
-	if err := strictly(raw, &opts); err != nil {
-		return invalid("Invalid access_rules_options: %v", err)
-	}
-	for _, id := range []int64Value{opts.DefaultSquashUID, opts.DefaultSquashGID} {
-		if id < math.MinInt32 || id > math.MaxInt32 {
-			return invalid("Invalid access_rules_options: squash ID %d is out of range.", id)
-		}
-	}
-	modes := []string{"SQUASH_MODE_UNSPECIFIED", "NO_SQUASH", "ROOT_SQUASH"}
-	mode, ok := enumName(opts.DefaultSquashMode, modes...)
-	if !ok || mode == modes[0] {
-		return invalid("access_rules_options.default_squash_mode is required and must be NO_SQUASH or ROOT_SQUASH.")
-	}
-	if mode == "NO_SQUASH" && (opts.DefaultSquashUID != 0 || opts.DefaultSquashGID != 0) {
-		return invalid("access_rules_options.default_squash_uid and default_squash_gid must not be set when default_squash_mode is NO_SQUASH.")
-	}
-	for _, rule := range opts.AccessRules {
-		if !ruleNamePattern.MatchString(rule.Name) {
-			return invalid("Invalid access rule name %q: it must have at most 16 letters, digits and underscores.", rule.Name)
-		}
-		if err := checkRanges(rule.Name, rule.IPAddressRanges); err != nil {
-			return err
-		}
-		if mode, ok := enumName(rule.SquashMode, modes...); !ok || mode != "NO_SQUASH" {
-			return invalid("Access rule %q: squash_mode must be NO_SQUASH; ROOT_SQUASH is not supported inside an access rule.", rule.Name)
-		}
-	}
-	return nil
-}
-
-// checkRanges reads an access rule's ranges, CIDR ranges or single
-// addresses, which must not overlap.
-func checkRanges(rule string, ranges []string) *apiError {
-	if len(ranges) == 0 {
-		return invalid("Access rule %q needs ip_address_ranges.", rule)
-	}
-	var seen []netip.Prefix
-	for _, r := range ranges {
-		prefix, err := netip.ParsePrefix(r)
-		if err != nil {
-			addr, aerr := netip.ParseAddr(r)
-			if aerr != nil {
-				return invalid("Access rule %q: %q is neither a CIDR range nor an IP address.", rule, r)
-			}
-			prefix = netip.PrefixFrom(addr, addr.BitLen())
-		}
-		prefix = prefix.Masked()
-		for _, other := range seen {
-			if prefix.Overlaps(other) {
-				return invalid("Access rule %q: the ranges %s and %s overlap.", rule, other, prefix)
-			}
-		}
-		seen = append(seen, prefix)
-	}
-	return nil
-}
-
-// checkMaintenance checks that a maintenance policy has only the fields the API knows.
-func checkMaintenance(raw json.RawMessage) *apiError {
-	if len(raw) == 0 || string(raw) == "null" {
-		return nil
-	}
-	type timeOfDay struct {
-		Hours   int32 `json:"hours"`
-		Minutes int32 `json:"minutes"`
-		Seconds int32 `json:"seconds"`
-		Nanos   int32 `json:"nanos"`
-	}
-	type date struct {
-		Year  int32 `json:"year"`
-		Month int32 `json:"month"`
-		Day   int32 `json:"day"`
-	}
-	var policy struct {
-		WeeklyMaintenanceWindows []struct {
-			DayOfWeek json.RawMessage `json:"dayOfWeek"`
-			StartTime *timeOfDay      `json:"startTime"`
-		} `json:"weeklyMaintenanceWindows"`
-		MaintenanceExclusionWindow []struct {
-			StartDate *date      `json:"startDate"`
-			EndDate   *date      `json:"endDate"`
-			Time      *timeOfDay `json:"time"`
-		} `json:"maintenanceExclusionWindow"`
-	}
-	if err := strictly(raw, &policy); err != nil {
-		return invalid("Invalid maintenance_policy: %v", err)
-	}
-	return nil
-}
-
-// strictly decodes raw into v, rejecting fields v does not have.
-func strictly(raw json.RawMessage, v any) error {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	return dec.Decode(v)
-}
-
 const (
 	maxLabels      = 64
 	maxLabelLength = 63
 )
 
-// validLabel reports whether s is a valid label key or, with key false, value.
 func validLabel(s string, key bool) bool {
 	if utf8.RuneCountInString(s) > maxLabelLength || key && s == "" {
 		return false
@@ -349,7 +226,6 @@ func checkLabels(labels map[string]string) *apiError {
 	return nil
 }
 
-// check validates a new instance as the API documents.
 func (in *instanceInput) check() *apiError {
 	switch {
 	case in.Filesystem == "":
@@ -370,10 +246,10 @@ func (in *instanceInput) check() *apiError {
 	if err := t.check(int64(in.CapacityGib), int64(in.PerUnitStorageThroughput)); err != nil {
 		return err
 	}
-	if err := checkAccessRules(in.AccessRulesOptions); err != nil {
+	if err := in.AccessRulesOptions.check(); err != nil {
 		return err
 	}
-	if err := checkMaintenance(in.MaintenancePolicy); err != nil {
+	if err := in.MaintenancePolicy.check(); err != nil {
 		return err
 	}
 	return checkLabels(in.Labels)
@@ -381,8 +257,7 @@ func (in *instanceInput) check() *apiError {
 
 func instancePath(parent, id string) string { return parent + "/instances/" + id }
 
-// lookup returns the instance at name, after counting a read of its change
-// in progress, which may finish it. The caller holds s.mu.
+// lookup counts as a read of the change in progress, which may finish it.
 func (s *Server) lookup(name string) (*instance, *apiError) {
 	if inst, ok := s.instances[name]; ok {
 		s.observe(inst.op)
@@ -394,8 +269,7 @@ func (s *Server) lookup(name string) (*instance, *apiError) {
 	return inst, nil
 }
 
-// current returns the instance at name once any change in progress on it
-// finishes. The caller holds s.mu.
+// current finishes a change in progress first, as a new change on the instance does.
 func (s *Server) current(name string) (*instance, *apiError) {
 	if inst, ok := s.instances[name]; ok {
 		s.finish(inst.op)
@@ -407,9 +281,6 @@ func (s *Server) current(name string) (*instance, *apiError) {
 	return inst, nil
 }
 
-// change starts an operation of verb on inst, holding it in state while the
-// operation is in progress; apply makes the change and returns the result.
-// The caller holds s.mu.
 func (s *Server) change(inst *instance, parent, requestKey, verb, state string, opFault *apiError, apply func() *Instance) *operation {
 	var op *operation
 	complete := func() *Instance {
@@ -474,9 +345,9 @@ func (s *Server) createInstance(c *call, opFault *apiError) (any, *apiError) {
 		KmsKey:                   in.KmsKey,
 		PlacementPolicy:          in.PlacementPolicy,
 		TargetVersion:            in.TargetVersion,
-		AccessRulesOptions:       rawOrNil(in.AccessRulesOptions),
-		MaintenancePolicy:        rawOrNil(in.MaintenancePolicy),
-		DynamicTierOptions:       rawOrNil(in.DynamicTierOptions),
+		AccessRulesOptions:       in.AccessRulesOptions,
+		MaintenancePolicy:        in.MaintenancePolicy,
+		DynamicTierOptions:       in.DynamicTierOptions,
 	}
 	if len(inst.Labels) == 0 {
 		inst.Labels = nil
@@ -492,13 +363,11 @@ func (s *Server) createInstance(c *call, opFault *apiError) (any, *apiError) {
 	return op.wire(c.intEnums), nil
 }
 
-// activate makes in ACTIVE, giving it a mount point if it has none. The caller holds s.mu.
 func (s *Server) activate(in *Instance) {
 	in.State, in.UpdateTime = StateActive, s.now().UTC()
 	s.mount(in)
 }
 
-// mount gives in a mount point if it has none. The caller holds s.mu.
 func (s *Server) mount(in *Instance) {
 	if in.MountPoint == "" {
 		in.MountPoint = s.nextIP.String() + "@tcp:/" + in.Filesystem
@@ -509,13 +378,6 @@ func (s *Server) mount(in *Instance) {
 func (s *Server) newUID() string {
 	id := s.newID()
 	return fmt.Sprintf("%08x-%04x-4%03x-8%03x-%012x", id>>32, id>>16&0xffff, id>>4&0xfff, id&0xfff, id)
-}
-
-func rawOrNil(raw json.RawMessage) json.RawMessage {
-	if len(raw) == 0 || string(raw) == "null" {
-		return nil
-	}
-	return bytes.Clone(raw)
 }
 
 func (s *Server) getInstance(c *call, _ *apiError) (any, *apiError) {
@@ -564,10 +426,10 @@ func (s *Server) listInstances(c *call, _ *apiError) (any, *apiError) {
 		return nil, err
 	}
 	out := struct {
-		Instances     []instanceJSON `json:"instances,omitzero"`
-		NextPageToken string         `json:"nextPageToken,omitzero"`
+		Instances     []any  `json:"instances,omitzero"`
+		NextPageToken string `json:"nextPageToken,omitzero"`
 	}{NextPageToken: next}
-	// Only the instances a page returns count as read, and one that the read finishes may no longer belong.
+	// Only returned instances count as read, and a read that finishes a delete drops one.
 	for _, inst := range page {
 		if inst, err := s.lookup(inst.Name); err == nil && filter.matches(&inst.Instance) {
 			out.Instances = append(out.Instances, inst.wire(c.intEnums))
@@ -576,69 +438,90 @@ func (s *Server) listInstances(c *call, _ *apiError) (any, *apiError) {
 	return out, nil
 }
 
-// updatable are the update mask paths a patch takes, in both spellings.
-var updatable = map[string]string{
-	"labels":              "labels",
-	"description":         "description",
-	"capacity_gib":        "capacityGib",
-	"capacityGib":         "capacityGib",
-	"gke_support_enabled": "gkeSupportEnabled",
-	"gkeSupportEnabled":   "gkeSupportEnabled",
-}
+var updatable = []string{"labels", "description", "capacityGib", "gkeSupportEnabled"}
 
-// outputOnly are the fields the API sets, which a request may carry and the
-// server ignores, as AIP-203 directs, along with the name the path gives.
+// outputOnly fields are ignored in a request, as AIP-203 directs; name comes from the path.
 var outputOnly = []string{
 	"name", "state", "mountPoint", "createTime", "updateTime", "uid", "stateReason",
 	"availableVersion", "effectiveVersion", "upcomingMaintenanceSchedule",
 }
 
-// unmaskedPaths are the fields a patch without an update mask changes: the
-// updatable ones present in body. Any other field present must equal what
-// inst holds, since the server cannot change it.
-func unmaskedPaths(body []byte, inst *Instance) ([]string, *apiError) {
-	var present map[string]json.RawMessage
-	if err := json.Unmarshal(body, &present); err != nil {
-		return nil, invalid("Invalid JSON payload received. %v", err)
-	}
-	stored := map[string]json.RawMessage{}
-	_ = json.Unmarshal(encoded(inst), &stored)
-	var paths []string
-	for _, field := range slices.Sorted(maps.Keys(present)) {
-		if path, ok := updatable[field]; ok {
-			paths = append(paths, path)
-			continue
-		}
-		if slices.Contains(outputOnly, field) || sameJSON(present[field], stored[field]) {
-			continue
-		}
-		return nil, invalid("squall: a patch cannot change %s; only labels, description, capacityGib and gkeSupportEnabled can change", field)
-	}
-	return paths, nil
+// instanceFields are what a * update mask names.
+var instanceFields = []string{
+	"name", "filesystem", "capacityGib", "network", "state", "mountPoint", "createTime", "updateTime",
+	"description", "labels", "perUnitStorageThroughput", "gkeSupportEnabled", "uid", "kmsKey",
+	"placementPolicy", "targetVersion", "accessRulesOptions", "maintenancePolicy", "dynamicTierOptions",
+	"stateReason", "availableVersion", "effectiveVersion", "upcomingMaintenanceSchedule",
 }
 
-// sameJSON reports whether a and b hold the same value, reading an int64
-// sent as a string or a number alike.
-func sameJSON(a, b json.RawMessage) bool {
-	var x, y any
-	if json.Unmarshal(a, &x) != nil || json.Unmarshal(b, &y) != nil {
-		return false
+// camel spells a snake_case mask path as the JSON field it names.
+func camel(path string) string {
+	parts := strings.Split(path, "_")
+	for i := 1; i < len(parts); i++ {
+		if parts[i] != "" {
+			parts[i] = strings.ToUpper(parts[i][:1]) + parts[i][1:]
+		}
 	}
-	return fmt.Sprint(x) == fmt.Sprint(y) || isZero(x) && b == nil
+	return strings.Join(parts, "")
 }
 
-func isZero(v any) bool {
-	switch v := v.(type) {
-	case nil:
-		return true
-	case string:
-		return v == "" || v == "0"
-	case float64:
-		return v == 0
-	case bool:
-		return !v
+func patchFields(mask string, body []byte) ([]string, *apiError) {
+	switch strings.TrimSpace(mask) {
+	case "":
+		var present map[string]json.RawMessage
+		if err := json.Unmarshal(body, &present); err != nil {
+			return nil, invalid("Invalid JSON payload received. %v", err)
+		}
+		return slices.Sorted(maps.Keys(present)), nil
+	case "*":
+		return instanceFields, nil
 	}
-	return false
+	var fields []string
+	for p := range strings.SplitSeq(mask, ",") {
+		field := camel(strings.TrimSpace(p))
+		if !slices.Contains(instanceFields, field) {
+			return nil, invalid("squall: the update mask path %q is not supported; paths name top-level instance fields", p)
+		}
+		fields = append(fields, field)
+	}
+	return fields, nil
+}
+
+// changes rejects a change to anything not updatable; AIP-203 lets an unchanged immutable field through.
+func changes(fields []string, in *instanceInput, stored *Instance) ([]string, *apiError) {
+	proposed := map[string]json.RawMessage{}
+	_ = json.Unmarshal(encoded(in.instance()), &proposed)
+	current := map[string]json.RawMessage{}
+	_ = json.Unmarshal(encoded(stored), &current)
+	var out []string
+	for _, field := range fields {
+		switch {
+		case slices.Contains(updatable, field):
+			out = append(out, field)
+		case slices.Contains(outputOnly, field), bytes.Equal(proposed[field], current[field]):
+		default:
+			return nil, invalid("squall: a patch cannot change %s; only labels, description, capacityGib and gkeSupportEnabled can change", field)
+		}
+	}
+	return out, nil
+}
+
+func (in *instanceInput) instance() *Instance {
+	return &Instance{
+		Filesystem:               in.Filesystem,
+		CapacityGib:              int64(in.CapacityGib),
+		Network:                  in.Network,
+		Description:              in.Description,
+		Labels:                   in.Labels,
+		PerUnitStorageThroughput: int64(in.PerUnitStorageThroughput),
+		GkeSupportEnabled:        in.GkeSupportEnabled,
+		KmsKey:                   in.KmsKey,
+		PlacementPolicy:          in.PlacementPolicy,
+		TargetVersion:            in.TargetVersion,
+		AccessRulesOptions:       in.AccessRulesOptions,
+		MaintenancePolicy:        in.MaintenancePolicy,
+		DynamicTierOptions:       in.DynamicTierOptions,
+	}
 }
 
 func encoded(v any) []byte {
@@ -650,17 +533,6 @@ func encoded(v any) []byte {
 }
 
 func (s *Server) patchInstance(c *call, opFault *apiError) (any, *apiError) {
-	mask := c.URL.Query().Get("updateMask")
-	var paths []string
-	if mask != "" {
-		for p := range strings.SplitSeq(mask, ",") {
-			field, ok := updatable[strings.TrimSpace(p)]
-			if !ok {
-				return nil, invalid("squall: the update mask path %q is not supported; only labels, description, capacityGib and gkeSupportEnabled are", p)
-			}
-			paths = append(paths, field)
-		}
-	}
 	key, err := c.requestKey("patch")
 	if err != nil {
 		return nil, err
@@ -669,9 +541,16 @@ func (s *Server) patchInstance(c *call, opFault *apiError) (any, *apiError) {
 	if rerr != nil || len(body) > maxBody {
 		return nil, invalid("squall: reading the request body: bodies are limited to %d bytes", maxBody)
 	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		body = []byte("{}")
+	}
 	c.Body = io.NopCloser(bytes.NewReader(body))
 	var in instanceInput
 	if err := decodeStrict(c.Request, &in); err != nil {
+		return nil, err
+	}
+	fields, err := patchFields(c.URL.Query().Get("updateMask"), body)
+	if err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
@@ -683,10 +562,9 @@ func (s *Server) patchInstance(c *call, opFault *apiError) (any, *apiError) {
 	if err != nil {
 		return nil, err
 	}
-	if mask == "" {
-		if paths, err = unmaskedPaths(body, &inst.Instance); err != nil {
-			return nil, err
-		}
+	paths, err := changes(fields, &in, &inst.Instance)
+	if err != nil {
+		return nil, err
 	}
 	if slices.Contains(paths, "labels") {
 		if err := checkLabels(in.Labels); err != nil {
@@ -724,7 +602,6 @@ func (s *Server) patchInstance(c *call, opFault *apiError) (any, *apiError) {
 	return op.wire(c.intEnums), nil
 }
 
-// checkGrowth applies the documented limits on changing an instance's capacity.
 func checkGrowth(inst *Instance, capacity int64) *apiError {
 	t, err := tierOf(inst.PerUnitStorageThroughput, inst.DynamicTierOptions)
 	if err != nil {
@@ -785,11 +662,7 @@ func (s *Server) LookupInstance(project, location, id string) (Instance, bool) {
 	return inst.clone(), true
 }
 
-// PutInstance stores in as instance id in project and location, as if it had
-// been created, replacing any instance there, and returns it as stored. It
-// checks what a create checks, keeps in's State if it is one of the API's,
-// ACTIVE by default, and fills in the name, times, UID and mount point. Use it
-// to set up state, such as an instance left behind by an earlier run.
+// PutInstance stores in as if created, checked as a create is, with its State (ACTIVE by default) and the fields the server fills.
 func (s *Server) PutInstance(project, location, id string, in Instance) (Instance, error) {
 	if err := validInstanceID(id); err != nil {
 		return Instance{}, errors.New(err.Message)
@@ -797,7 +670,7 @@ func (s *Server) PutInstance(project, location, id string, in Instance) (Instanc
 	check := instanceInput{
 		Filesystem: in.Filesystem, Network: in.Network, Labels: in.Labels,
 		CapacityGib: int64Value(in.CapacityGib), PerUnitStorageThroughput: int64Value(in.PerUnitStorageThroughput),
-		AccessRulesOptions: in.AccessRulesOptions, DynamicTierOptions: in.DynamicTierOptions,
+		AccessRulesOptions: in.AccessRulesOptions, MaintenancePolicy: in.MaintenancePolicy, DynamicTierOptions: in.DynamicTierOptions,
 	}
 	if err := check.check(); err != nil {
 		return Instance{}, errors.New(err.Message)
@@ -832,7 +705,7 @@ func (s *Server) PutInstance(project, location, id string, in Instance) (Instanc
 	return in.clone(), nil
 }
 
-// int64Value is a 64-bit integer the API reads from a JSON string or number.
+// int64Value reads proto3 JSON, which spells an int64 as a string or a number.
 type int64Value int64
 
 func (n *int64Value) UnmarshalJSON(b []byte) error {
