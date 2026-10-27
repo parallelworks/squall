@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.0](https://github.com/parallelworks/squall/compare/v0.19.0...v0.20.0) (2026-10-27)
+
+
+### Features
+
+* **gcp:** Managed Lustre instances and operations ([#55](https://github.com/parallelworks/squall/issues/55)) ([7587611](https://github.com/parallelworks/squall/commit/75876110d3a17f22bebc0be82f807fd2c6ed0ebb))
+
 ## [0.19.0](https://github.com/parallelworks/squall/compare/v0.18.0...v0.19.0) (2026-10-27)
 
 
