@@ -276,7 +276,7 @@ func TestOptionsRejectWhatTheAPIDoesNotTake(t *testing.T) {
 		`,"accessRulesOptions":{"DefaultSquashMode":"ROOT_SQUASH"}`:                              http.StatusBadRequest,
 		`,"access_rules_options":{"default_squash_mode":"ROOT_SQUASH","default_squash_uid":"1"}`: http.StatusOK,
 		`,"Description":"x"`:                                                                     http.StatusBadRequest,
-		`,"description":"x","description":"y"`:                                                   http.StatusOK,
+		`,"description":"x","description":"y"`:                                                   http.StatusBadRequest,
 		`,"capacity_gib":"9000"`:                                                                 http.StatusBadRequest,
 		`,"state":"BOGUS"`:                                                                       http.StatusBadRequest,
 		`,"state":2`:                                                                             http.StatusOK,
@@ -605,7 +605,7 @@ func TestOperationsListPartialSuccess(t *testing.T) {
 	s := lustre.New()
 	create(t, s, "a", body(9_000, 1000, ""))
 	for q, want := range map[string]int{
-		"-/operations?returnPartialSuccess=true":             http.StatusOK,
+		"-/operations?returnPartialSuccess=true":             http.StatusNotImplemented,
 		"-/operations?return_partial_success=false":          http.StatusOK,
 		"us-central1-a/operations?returnPartialSuccess=true": http.StatusNotImplemented,
 		"-/operations?returnPartialSuccess=yes":              http.StatusBadRequest,
@@ -633,5 +633,72 @@ func TestDomainScopedProjects(t *testing.T) {
 	}
 	if code, out := do(t, s, http.MethodGet, path+"/a", ""); code != http.StatusOK {
 		t.Errorf("get = %d %v", code, out)
+	}
+}
+
+func TestMisspelledSnakeCaseNamesAreRejected(t *testing.T) {
+	const fields = `"filesystem":"lfs","network":"projects/p/global/networks/n","perUnitStorageThroughput":"1000"`
+	for _, key := range []string{"capacity__gib", "capacityGib_", "capacity_Gib", "_capacity_gib", "Capacity_gib"} {
+		if code, out := create(t, lustre.New(), "a", `{`+fields+`,"`+key+`":"9000"}`); code != http.StatusBadRequest {
+			t.Errorf("create with %s = %d %v, want 400", key, code, out)
+		}
+	}
+	if code, out := create(t, lustre.New(), "a", `{"filesystem":"lfs","network":"projects/p/global/networks/n","capacityGib":"9000","per_unitStorage_throughput":"1000"}`); code != http.StatusBadRequest {
+		t.Errorf("create with per_unitStorage_throughput = %d %v, want 400", code, out)
+	}
+	s := lustre.New()
+	create(t, s, "a", body(18_000, 1000, ""))
+	for _, q := range []string{"page__size=1", "pageSize_=1", "order__by=name", "page_Size=1"} {
+		if code, _ := do(t, s, http.MethodGet, instances+"?"+q, ""); code != http.StatusBadRequest {
+			t.Errorf("list with %s = %d, want 400", q, code)
+		}
+	}
+	for _, mask := range []string{"capacity__gib", "capacityGib_", "capacity_Gib"} {
+		if code, _ := do(t, s, http.MethodPatch, instances+"/a?updateMask="+mask, `{"capacityGib":"27000"}`); code != http.StatusBadRequest {
+			t.Errorf("patch with mask %s = %d, want 400", mask, code)
+		}
+	}
+	if got, _ := s.LookupInstance("p", "us-central1-a", "a"); got.CapacityGib != 18_000 {
+		t.Errorf("a misspelled mask changed capacity to %d", got.CapacityGib)
+	}
+}
+
+func TestDuplicateNamesAreRejectedAtAnyDepth(t *testing.T) {
+	for _, extra := range []string{
+		`,"labels":{"a":"1","a":"2"}`,
+		`,"accessRulesOptions":{"defaultSquashMode":"ROOT_SQUASH","defaultSquashMode":"NO_SQUASH"}`,
+	} {
+		if code, out := create(t, lustre.New(), "a", body(9_000, 1000, extra)); code != http.StatusBadRequest {
+			t.Errorf("create with %s = %d %v, want 400", extra, code, out)
+		}
+	}
+	s := lustre.New()
+	create(t, s, "a", body(9_000, 1000, ""))
+	if code, _ := do(t, s, http.MethodPatch, instances+"/a", `{"description":"a","description":"b"}`); code != http.StatusBadRequest {
+		t.Errorf("patch naming description twice = %d, want 400", code)
+	}
+}
+
+func TestFaultReasonsAreUpperSnakeCase(t *testing.T) {
+	faults := fault.New().Add(fault.Rule{Method: "lustre.projects.locations.instances.create", Fault: fault.RateLimited()})
+	_, out := create(t, lustre.New(lustre.WithFaults(faults)), "a", body(9_000, 1000, ""))
+	details := out["error"].(map[string]any)["details"].([]any)
+	if r := details[0].(map[string]any)["reason"]; r != "RATE_LIMIT_EXCEEDED" {
+		t.Errorf("reason = %v, want RATE_LIMIT_EXCEEDED", r)
+	}
+}
+
+func TestSettleFinishesInCreationOrder(t *testing.T) {
+	for range 20 {
+		s := lustre.New(lustre.WithSettleAfter(-1))
+		for _, id := range []string{"a", "b", "c", "d", "e"} {
+			create(t, s, id, body(9_000, 1000, ""))
+		}
+		s.Settle()
+		for i, in := range s.Instances() {
+			if want := fmt.Sprintf("10.0.0.%d@tcp:/lfs", i+2); in.MountPoint != want {
+				t.Fatalf("%s mount point = %s, want %s", in.Name, in.MountPoint, want)
+			}
+		}
 	}
 }

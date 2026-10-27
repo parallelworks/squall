@@ -4,7 +4,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"unicode"
+
+	"github.com/parallelworks/squall/internal/reason"
 )
 
 // maxOperations bounds how many operations the server keeps for get and for
@@ -122,7 +123,7 @@ func (s *Server) startOperation(r *http.Request, requestID, opType, target strin
 	case failure != nil:
 		errs := failure.opErrors
 		if errs == nil {
-			errs = []operationError{{Code: upperSnake(failure.Reason), Message: failure.Message}}
+			errs = []operationError{{Code: reason.UpperSnake(failure.Reason), Message: failure.Message}}
 		}
 		op.Error = &operationErrors{errs}
 		op.HTTPErrorStatusCode = failure.Status
@@ -246,22 +247,4 @@ func (s *Server) Settle() {
 	for op := range s.pending {
 		s.finish(op)
 	}
-}
-
-// upperSnake spells a reason as the API's error codes are: "backendError"
-// becomes "BACKEND_ERROR".
-func upperSnake(s string) string {
-	var b strings.Builder
-	prev := ' '
-	for _, c := range s {
-		switch {
-		case c == ' ' || c == '-':
-			c = '_'
-		case unicode.IsUpper(c) && (unicode.IsLower(prev) || unicode.IsDigit(prev)):
-			b.WriteByte('_')
-		}
-		b.WriteRune(unicode.ToUpper(c))
-		prev = c
-	}
-	return b.String()
 }

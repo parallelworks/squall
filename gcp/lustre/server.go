@@ -43,9 +43,9 @@
 //     them, so an enum sent by name or number reads back the same, as names
 //     or, with enum-encoding=int, numbers; an unspecified enum reads as
 //     left out. Field and parameter names match exactly, in lowerCamelCase or
-//     the proto's snake_case, and names the server does not know, at any
-//     depth, are rejected with 400, as are output-only values that do not
-//     parse.
+//     the proto's snake_case, and names the server does not know or that
+//     an object gives twice, at any depth, are rejected with 400, as are
+//     output-only values that do not parse.
 //   - A patch changes only labels, description, gkeSupportEnabled and
 //     capacityGib, which may only grow and, from the smaller step, not past
 //     its threshold. The API also changes perUnitStorageThroughput, access
@@ -61,14 +61,15 @@
 //     and labels:KEY for a label's presence, joined by AND, OR, NOT, - and
 //     parentheses, with OR binding tighter than AND. Lists are ordered by
 //     name; orderBy takes name and name desc. Anything else, such as a
-//     wildcard or a comparison with <, is rejected with 400 rather than
-//     ignored. The location - lists every location.
+//     wildcard, a comparison with < or nesting deeper than 64, is rejected
+//     with 400 rather than ignored. The location - lists every location.
 //   - Canceling an operation records the request and changes nothing else,
-//     which the API allows. operations.list takes returnPartialSuccess only
-//     for the location -, and reaches every location. The discovery document's standard parameters,
-//     such as fields or callback, are accepted and ignored: responses are
-//     always whole JSON. Other parameters a method does not take are
-//     rejected with 400. Error messages are the stand-in's own.
+//     which the API allows. operations.list answers returnPartialSuccess=true
+//     with 501, as its reference says a service without support does. The
+//     discovery document's standard parameters, such as fields or callback,
+//     are accepted and ignored: responses are always whole JSON. Other
+//     parameters a method does not take are rejected with 400. Error
+//     messages are the stand-in's own.
 //
 // Fault method names are the API's method IDs, such as
 // "lustre.projects.locations.instances.create". A call's resource is its
@@ -107,12 +108,14 @@ import (
 
 	"github.com/parallelworks/squall/access"
 	"github.com/parallelworks/squall/fault"
+	"github.com/parallelworks/squall/internal/reason"
 	"github.com/parallelworks/squall/internal/stub"
 )
 
 const (
-	maxBody = 1 << 20
-	maxList = 1000
+	maxBody  = 1 << 20
+	maxDepth = 100
+	maxList  = 1000
 )
 
 // Server is a stand-in for the Managed Lustre API, safe for concurrent use. Create one with [New].
@@ -362,6 +365,9 @@ func readBody(r *http.Request) ([]byte, *apiError) {
 
 // decodeStrict matches names exactly, where encoding/json ignores case, and returns body in lowerCamelCase.
 func decodeStrict(body []byte, v any) ([]byte, *apiError) {
+	if err := checkDuplicates(body); err != nil {
+		return nil, invalid("Invalid JSON payload received. %v", err)
+	}
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
 	var raw any
@@ -385,6 +391,48 @@ func decodeStrict(body []byte, v any) ([]byte, *apiError) {
 		return nil, invalid("Invalid JSON payload received. %v", err)
 	}
 	return body, nil
+}
+
+// checkDuplicates rejects a name given twice in one object, as protojson does, where encoding/json keeps the last.
+func checkDuplicates(body []byte) error {
+	return scanValue(json.NewDecoder(bytes.NewReader(body)), 0)
+}
+
+func scanValue(dec *json.Decoder, depth int) error {
+	if depth > maxDepth {
+		return errors.New("the value is nested too deeply")
+	}
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	switch tok {
+	case json.Delim('{'):
+		seen := map[string]bool{}
+		for dec.More() {
+			key, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			name, _ := key.(string)
+			if seen[name] {
+				return fmt.Errorf("the field %q is given twice", name)
+			}
+			seen[name] = true
+			if err := scanValue(dec, depth+1); err != nil {
+				return err
+			}
+		}
+		_, err = dec.Token()
+	case json.Delim('['):
+		for dec.More() {
+			if err := scanValue(dec, depth+1); err != nil {
+				return err
+			}
+		}
+		_, err = dec.Token()
+	}
+	return err
 }
 
 // normalize checks the names in v against the JSON names of t, at every depth.
@@ -516,7 +564,7 @@ func faultError(f fault.Fault) *apiError {
 	return &apiError{
 		Status:  cmp.Or(f.Status, http.StatusServiceUnavailable),
 		Message: fmt.Sprintf("squall: injected fault (%s)", f),
-		Reason:  f.Reason,
+		Reason:  reason.UpperSnake(f.Reason),
 		Domain:  "lustre.googleapis.com",
 	}
 }

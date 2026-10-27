@@ -2,6 +2,7 @@ package lustre
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -105,4 +106,19 @@ func FuzzParseFilter(f *testing.F) {
 		}
 		e.matches(&Instance{Labels: map[string]string{"a": "b"}})
 	})
+}
+
+func TestParseFilterBoundsNesting(t *testing.T) {
+	for _, in := range []string{
+		strings.Repeat("-", 100) + "state = A",
+		strings.Repeat("NOT ", 100) + "state = A",
+		strings.Repeat("(", 100) + "state = A" + strings.Repeat(")", 100),
+	} {
+		if _, err := parseFilter(in); !errors.Is(err, errUnsupportedFilter) {
+			t.Errorf("parseFilter of %d bytes = %v, want errUnsupportedFilter", len(in), err)
+		}
+	}
+	if _, err := parseFilter(strings.Repeat("(", 30) + "state = A" + strings.Repeat(")", 30)); err != nil {
+		t.Errorf("30 parentheses: %v", err)
+	}
 }

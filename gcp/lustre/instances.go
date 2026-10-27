@@ -463,16 +463,22 @@ var instanceFields = []string{
 	"stateReason", "availableVersion", "effectiveVersion", "upcomingMaintenanceSchedule",
 }
 
-// camel spells a snake_case mask path as the JSON field it names.
-func camel(path string) string {
-	parts := strings.Split(path, "_")
+// camel spells an exact snake_case name as its JSON name; a name with any other underscores names nothing.
+func camel(name string) string {
+	if !strings.Contains(name, "_") {
+		return name
+	}
+	if !snakeName.MatchString(name) {
+		return ""
+	}
+	parts := strings.Split(name, "_")
 	for i := 1; i < len(parts); i++ {
-		if parts[i] != "" {
-			parts[i] = strings.ToUpper(parts[i][:1]) + parts[i][1:]
-		}
+		parts[i] = strings.ToUpper(parts[i][:1]) + parts[i][1:]
 	}
 	return strings.Join(parts, "")
 }
+
+var snakeName = regexp.MustCompile(`^[a-z][a-z0-9]*(_[a-z][a-z0-9]*)+$`)
 
 func patchFields(mask string, body []byte) ([]string, *apiError) {
 	switch strings.TrimSpace(mask) {

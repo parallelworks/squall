@@ -1,6 +1,7 @@
 package lustre
 
 import (
+	"cmp"
 	"fmt"
 	"maps"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 const maxOperations = 10_000
 
 type operation struct {
+	seq                   uint64
 	name                  string
 	target                string
 	verb                  string
@@ -84,6 +86,7 @@ func (s *Server) startOperation(parent, requestKey, verb, target string, failure
 	now := s.now().UTC()
 	id := s.newID()
 	op := &operation{
+		seq:        id,
 		name:       fmt.Sprintf("%s/operations/operation-%d-%013x-%08x-%08x", parent, now.UnixMilli(), id, id*2654435761%(1<<32), id%(1<<32)),
 		target:     target,
 		verb:       verb,
@@ -162,7 +165,9 @@ func (s *Server) observe(op *operation) {
 func (s *Server) Settle() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for op := range s.pending {
+	// Creation order keeps what finishing hands out, such as mount point addresses, the same on every run.
+	ops := slices.SortedFunc(maps.Keys(s.pending), func(a, b *operation) int { return cmp.Compare(a.seq, b.seq) })
+	for _, op := range ops {
 		s.finish(op)
 	}
 }
@@ -197,9 +202,9 @@ func (s *Server) listOperations(c *call, _ *apiError) (any, *apiError) {
 		if err != nil || v != "true" && v != "false" {
 			return nil, invalid("Invalid value for return_partial_success: %q", v)
 		}
-		// The reference allows it only when reading across locations.
-		if partial && location != "-" {
-			return nil, &apiError{Status: http.StatusNotImplemented, Message: "return_partial_success is supported only when listing every location"}
+		// The reference answers UNIMPLEMENTED for a service that documents no support, as Managed Lustre does not.
+		if partial {
+			return nil, &apiError{Status: http.StatusNotImplemented, Message: "return_partial_success is not supported"}
 		}
 	}
 	s.mu.Lock()

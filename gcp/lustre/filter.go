@@ -113,9 +113,13 @@ func parseFilter(s string) (*expr, error) {
 	return e, nil
 }
 
+// maxFilterDepth bounds the nesting of NOT, - and parentheses, so a hostile filter cannot exhaust memory.
+const maxFilterDepth = 64
+
 type filterParser struct {
-	s string
-	i int
+	s     string
+	i     int
+	depth int
 }
 
 func (p *filterParser) errorf(format string, args ...any) error {
@@ -208,6 +212,10 @@ func (p *filterParser) disjunction() (*expr, error) {
 }
 
 func (p *filterParser) term() (*expr, error) {
+	if p.depth++; p.depth > maxFilterDepth {
+		return nil, p.errorf("terms are nested more than %d deep", maxFilterDepth)
+	}
+	defer func() { p.depth-- }()
 	p.skipSpace()
 	if p.keyword("NOT") || p.consume("-") {
 		if p.atEnd() {
