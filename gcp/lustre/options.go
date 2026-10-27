@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Enum names, indexed by their numbers in the API.
@@ -17,21 +18,28 @@ var (
 	daysOfWeek  = []string{"DAY_OF_WEEK_UNSPECIFIED", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"}
 )
 
-// readEnum takes a name or a number, since the client sends enums as numbers.
+// readEnum takes a name or a number, as the client sends numbers; unspecified reads as "", as proto3 JSON omits it.
 func readEnum(b []byte, names []string, into *string) error {
+	if string(b) == "null" {
+		*into = ""
+		return nil
+	}
 	var name string
 	if json.Unmarshal(b, &name) == nil {
 		if !slices.Contains(names, name) {
 			return fmt.Errorf("invalid value %s, want one of %v", b, names)
 		}
-		*into = name
-		return nil
+	} else {
+		n, err := strconv.Atoi(string(b))
+		if err != nil || n < 0 || n >= len(names) {
+			return fmt.Errorf("invalid value %s, want one of %v", b, names)
+		}
+		name = names[n]
 	}
-	n, err := strconv.Atoi(string(b))
-	if err != nil || n < 0 || n >= len(names) {
-		return fmt.Errorf("invalid value %s, want one of %v", b, names)
+	if name == names[0] {
+		name = ""
 	}
-	*into = names[n]
+	*into = name
 	return nil
 }
 
@@ -80,6 +88,10 @@ func (o *AccessRulesOptions) UnmarshalJSON(b []byte) error {
 type int32Value int32
 
 func (n *int32Value) UnmarshalJSON(b []byte) error {
+	if string(b) == "null" {
+		*n = 0
+		return nil
+	}
 	v, err := strconv.ParseInt(strings.Trim(string(b), `"`), 10, 32)
 	if err != nil {
 		return fmt.Errorf("invalid int32 value %s", b)
@@ -127,6 +139,21 @@ type TimeOfDay struct {
 	Nanos   int32 `json:"nanos,omitzero"`
 }
 
+// UnmarshalJSON reads t, taking its fields as JSON strings or numbers.
+func (t *TimeOfDay) UnmarshalJSON(b []byte) error {
+	var in struct {
+		Hours   int32Value `json:"hours"`
+		Minutes int32Value `json:"minutes"`
+		Seconds int32Value `json:"seconds"`
+		Nanos   int32Value `json:"nanos"`
+	}
+	if err := strictly(b, &in); err != nil {
+		return err
+	}
+	*t = TimeOfDay{int32(in.Hours), int32(in.Minutes), int32(in.Seconds), int32(in.Nanos)}
+	return nil
+}
+
 // Date is a google.type.Date.
 type Date struct {
 	Year  int32 `json:"year,omitzero"`
@@ -134,10 +161,24 @@ type Date struct {
 	Day   int32 `json:"day,omitzero"`
 }
 
+// UnmarshalJSON reads d, taking its fields as JSON strings or numbers.
+func (d *Date) UnmarshalJSON(b []byte) error {
+	var in struct {
+		Year  int32Value `json:"year"`
+		Month int32Value `json:"month"`
+		Day   int32Value `json:"day"`
+	}
+	if err := strictly(b, &in); err != nil {
+		return err
+	}
+	*d = Date{int32(in.Year), int32(in.Month), int32(in.Day)}
+	return nil
+}
+
 // maintenanceSchedule is output only, decoded so its unknown fields are rejected.
 type maintenanceSchedule struct {
-	StartTime string `json:"startTime"`
-	EndTime   string `json:"endTime"`
+	StartTime *time.Time `json:"startTime"`
+	EndTime   *time.Time `json:"endTime"`
 }
 
 func (o *AccessRulesOptions) check() *apiError {
@@ -200,7 +241,7 @@ func (p *MaintenancePolicy) check() *apiError {
 		return invalid("maintenance_policy.maintenance_exclusion_window is limited to 1 window.")
 	}
 	for _, w := range p.WeeklyMaintenanceWindows {
-		if w.DayOfWeek == "" || w.DayOfWeek == DayOfWeek(daysOfWeek[0]) || w.StartTime == nil {
+		if !slices.Contains(daysOfWeek[1:], string(w.DayOfWeek)) || w.StartTime == nil {
 			return invalid("A weekly maintenance window needs day_of_week and start_time.")
 		}
 		if err := w.StartTime.check(); err != nil {
@@ -216,6 +257,9 @@ func (p *MaintenancePolicy) check() *apiError {
 				return err
 			}
 		}
+		if (w.StartDate.Year == 0) != (w.EndDate.Year == 0) {
+			return invalid("A maintenance exclusion window's dates must both recur, with no year, or both have one.")
+		}
 		if err := w.Time.check(); err != nil {
 			return err
 		}
@@ -230,10 +274,15 @@ func (t *TimeOfDay) check() *apiError {
 	return nil
 }
 
-// check takes a year of 0 for a window that recurs every year.
+// check takes a year of 0 for a window that recurs every year, when February 29 is a day.
 func (d *Date) check() *apiError {
-	if d.Year < 0 || d.Year > 9999 || d.Month < 1 || d.Month > 12 || d.Day < 1 || d.Day > 31 {
-		return invalid("Invalid date %+v: it needs a month and day, and a year from 1 to 9999 unless it recurs.", *d)
+	year := int(d.Year)
+	if year == 0 {
+		year = 2000
+	}
+	if d.Year < 0 || d.Year > 9999 || d.Month < 1 || d.Month > 12 || d.Day < 1 ||
+		int(d.Day) > time.Date(year, time.Month(d.Month)+1, 0, 0, 0, 0, 0, time.UTC).Day() {
+		return invalid("Invalid date %+v: it needs a month and a day in it, and a year from 1 to 9999 unless it recurs.", *d)
 	}
 	return nil
 }
@@ -272,7 +321,11 @@ func numberAt(v any, path []string, names []string) {
 	case map[string]any:
 		if len(path) == 1 {
 			if name, ok := v[path[0]].(string); ok {
-				v[path[0]] = max(slices.Index(names, name), 0)
+				n := slices.Index(names, name)
+				if n < 0 {
+					panic("squall: stored an unknown enum value " + name)
+				}
+				v[path[0]] = n
 			}
 			return
 		}

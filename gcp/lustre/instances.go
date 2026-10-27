@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"maps"
 	"regexp"
 	"slices"
@@ -131,10 +130,10 @@ type instanceInput struct {
 	MaintenancePolicy        *MaintenancePolicy  `json:"maintenancePolicy"`
 	DynamicTierOptions       *DynamicTierOptions `json:"dynamicTierOptions"`
 
-	State                       json.RawMessage      `json:"state"`
+	State                       stateValue           `json:"state"`
 	MountPoint                  string               `json:"mountPoint"`
-	CreateTime                  json.RawMessage      `json:"createTime"`
-	UpdateTime                  json.RawMessage      `json:"updateTime"`
+	CreateTime                  *time.Time           `json:"createTime"`
+	UpdateTime                  *time.Time           `json:"updateTime"`
 	UID                         string               `json:"uid"`
 	StateReason                 string               `json:"stateReason"`
 	AvailableVersion            string               `json:"availableVersion"`
@@ -183,6 +182,9 @@ func (t tier) check(capacity, throughput int64) *apiError {
 }
 
 func tierOf(throughput int64, dynamic *DynamicTierOptions) (tier, *apiError) {
+	if dynamic != nil && !slices.Contains(tierModes[1:], string(dynamic.Mode)) {
+		return tier{}, invalid("dynamic_tier_options.mode is required and must be DISABLED or DEFAULT_CACHE.")
+	}
 	switch {
 	case dynamic.dynamic() && throughput != 0:
 		return tier{}, invalid("per_unit_storage_throughput must be 0 or unset for an instance on the Dynamic tier.")
@@ -312,8 +314,12 @@ func (s *Server) createInstance(c *call, opFault *apiError) (any, *apiError) {
 	if err != nil {
 		return nil, err
 	}
+	body, err := readBody(c.Request)
+	if err != nil {
+		return nil, err
+	}
 	var in instanceInput
-	if err := decodeStrict(c.Request, &in); err != nil {
+	if _, err := decodeStrict(body, &in); err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
@@ -446,6 +452,9 @@ var outputOnly = []string{
 	"availableVersion", "effectiveVersion", "upcomingMaintenanceSchedule",
 }
 
+// immutable fields are documented as Immutable in the Instance reference.
+var immutable = []string{"filesystem", "network", "kmsKey", "dynamicTierOptions"}
+
 // instanceFields are what a * update mask names.
 var instanceFields = []string{
 	"name", "filesystem", "capacityGib", "network", "state", "mountPoint", "createTime", "updateTime",
@@ -500,7 +509,10 @@ func changes(fields []string, in *instanceInput, stored *Instance) ([]string, *a
 			out = append(out, field)
 		case slices.Contains(outputOnly, field), bytes.Equal(proposed[field], current[field]):
 		default:
-			return nil, invalid("squall: a patch cannot change %s; only labels, description, capacityGib and gkeSupportEnabled can change", field)
+			if slices.Contains(immutable, field) {
+				return nil, invalid("Invalid update: %s is immutable.", field)
+			}
+			return nil, invalid("squall: changing %s is not supported; the stand-in changes only labels, description, capacityGib and gkeSupportEnabled", field)
 		}
 	}
 	return out, nil
@@ -537,16 +549,12 @@ func (s *Server) patchInstance(c *call, opFault *apiError) (any, *apiError) {
 	if err != nil {
 		return nil, err
 	}
-	body, rerr := io.ReadAll(io.LimitReader(c.Body, maxBody+1))
-	if rerr != nil || len(body) > maxBody {
-		return nil, invalid("squall: reading the request body: bodies are limited to %d bytes", maxBody)
+	body, err := readBody(c.Request)
+	if err != nil {
+		return nil, err
 	}
-	if len(bytes.TrimSpace(body)) == 0 {
-		body = []byte("{}")
-	}
-	c.Body = io.NopCloser(bytes.NewReader(body))
 	var in instanceInput
-	if err := decodeStrict(c.Request, &in); err != nil {
+	if body, err = decodeStrict(body, &in); err != nil {
 		return nil, err
 	}
 	fields, err := patchFields(c.URL.Query().Get("updateMask"), body)
@@ -723,3 +731,8 @@ func (n *int64Value) UnmarshalJSON(b []byte) error {
 	*n = int64Value(v)
 	return nil
 }
+
+// stateValue is an output-only state a request may carry, which must still be a state.
+type stateValue string
+
+func (v *stateValue) UnmarshalJSON(b []byte) error { return readEnum(b, states, (*string)(v)) }

@@ -91,8 +91,7 @@ func list(t *testing.T, c *glustre.Client, req *lustrepb.ListInstancesRequest) [
 	}
 }
 
-// code is the gRPC code of an API error, from a finished operation or, as the
-// client maps it, from an HTTP status (which reads 409 as Aborted).
+// code is an error's gRPC code; the client maps HTTP 409 to Aborted, so 409s are checked by status instead.
 func code(err error) codes.Code {
 	if e, ok := errors.AsType[*apierror.APIError](err); ok {
 		return e.GRPCStatus().Code()

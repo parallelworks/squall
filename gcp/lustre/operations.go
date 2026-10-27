@@ -3,7 +3,9 @@ package lustre
 import (
 	"fmt"
 	"maps"
+	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -189,10 +191,17 @@ func (s *Server) listOperations(c *call, _ *apiError) (any, *apiError) {
 	if f := q.Get("filter"); f != "" {
 		return nil, invalid("squall: operations.list does not support filter %q", f)
 	}
-	if q.Get("returnPartialSuccess") == "true" {
-		return nil, &apiError{Status: 501, Message: "returnPartialSuccess is not supported"}
-	}
 	project, location := c.PathValue("project"), c.PathValue("location")
+	if v := q.Get("returnPartialSuccess"); v != "" {
+		partial, err := strconv.ParseBool(v)
+		if err != nil || v != "true" && v != "false" {
+			return nil, invalid("Invalid value for return_partial_success: %q", v)
+		}
+		// The reference allows it only when reading across locations.
+		if partial && location != "-" {
+			return nil, &apiError{Status: http.StatusNotImplemented, Message: "return_partial_success is supported only when listing every location"}
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var ops []*operation
@@ -211,6 +220,7 @@ func (s *Server) listOperations(c *call, _ *apiError) (any, *apiError) {
 		NextPageToken string          `json:"nextPageToken,omitzero"`
 	}{NextPageToken: next}
 	for _, op := range page {
+		s.observe(op)
 		out.Operations = append(out.Operations, op.wire(c.intEnums))
 	}
 	return out, nil

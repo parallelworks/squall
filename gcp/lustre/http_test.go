@@ -260,10 +260,33 @@ func TestOptionsRejectWhatTheAPIDoesNotTake(t *testing.T) {
 	for extra, want := range map[string]int{
 		`,"dynamicTierOptions":{"mode":"DISABLED","size":1}`:                                                 http.StatusBadRequest,
 		`,"maintenancePolicy":{"weeklyMaintenanceWindows":[{"dayOfWeek":"MONDAY","startTime":{"hours":2}}]}`: http.StatusOK,
-		`,"maintenancePolicy":{"weeklyMaintenanceWindows":[{"dayOfWeek":1,"startTime":{}}],"maintenanceExclusionWindow":[{"startDate":{"year":2026,"month":1,"day":1},"endDate":{"month":12,"day":24},"time":{}}]}`: http.StatusOK,
-		`,"maintenancePolicy":{"weeklyMaintenanceWindows":[{"dayOfWeek":"MONDAY","startTime":{}},{"dayOfWeek":"TUESDAY","startTime":{}}]}`:                                                                          http.StatusBadRequest,
-		`,"maintenancePolicy":{"weeklyMaintenanceWindows":[{"dayOfWeek":"MONDAY","startTime":{"hours":24}}]}`:                                                                                                       http.StatusBadRequest,
-		`,"maintenancePolicy":{"weeklyMaintenanceWindows":[{"dayOfWeek":"MONDAY","startTime":{}}],"maintenanceExclusionWindow":[{"startDate":{"year":2026,"month":1,"day":1}}]}`:                                    http.StatusBadRequest,
+		`,"maintenancePolicy":{"weeklyMaintenanceWindows":[{"dayOfWeek":1,"startTime":{}}],"maintenanceExclusionWindow":[{"startDate":{"year":2026,"month":1,"day":1},"endDate":{"month":12,"day":24},"time":{}}]}`:                        http.StatusBadRequest,
+		`,"maintenancePolicy":{"weeklyMaintenanceWindows":[{"dayOfWeek":1,"startTime":{}}],"maintenanceExclusionWindow":[{"startDate":{"year":2026,"month":12,"day":20},"endDate":{"year":2027,"month":1,"day":2},"time":{"hours":"3"}}]}`: http.StatusOK,
+		`,"maintenancePolicy":{"weeklyMaintenanceWindows":[{"dayOfWeek":1,"startTime":{}}],"maintenanceExclusionWindow":[{"startDate":{"month":2,"day":29},"endDate":{"month":3,"day":1},"time":{}}]}`:                                     http.StatusOK,
+		`,"maintenancePolicy":{"weeklyMaintenanceWindows":[{"dayOfWeek":1,"startTime":{}}],"maintenanceExclusionWindow":[{"startDate":{"year":2026,"month":2,"day":29},"endDate":{"year":2026,"month":3,"day":1},"time":{}}]}`:             http.StatusBadRequest,
+		`,"maintenancePolicy":{"weeklyMaintenanceWindows":[{"dayOfWeek":1,"startTime":{}}],"maintenanceExclusionWindow":[{"startDate":{"month":4,"day":31},"endDate":{"month":5,"day":1},"time":{}}]}`:                                     http.StatusBadRequest,
+		`,"maintenancePolicy":{"weeklyMaintenanceWindows":[{"dayOfWeek":null,"startTime":{}}]}`:                                                                                                                                            http.StatusBadRequest,
+		`,"maintenancePolicy":{"weeklyMaintenanceWindows":[{"dayOfWeek":"MONDAY","startTime":{"hours":null,"minutes":"30"}}]}`:                                                                                                             http.StatusOK,
+		`,"dynamicTierOptions":{"mode":0}`:                                                       http.StatusBadRequest,
+		`,"dynamicTierOptions":{"mode":"MODE_UNSPECIFIED"}`:                                      http.StatusBadRequest,
+		`,"dynamicTierOptions":{}`:                                                               http.StatusBadRequest,
+		`,"dynamicTierOptions":{"mode":"DISABLED"}`:                                              http.StatusOK,
+		`,"accessRulesOptions":{"defaultSquashMode":0}`:                                          http.StatusBadRequest,
+		`,"accessRulesOptions":{"defaultSquashMode":null}`:                                       http.StatusBadRequest,
+		`,"accessRulesOptions":{"DefaultSquashMode":"ROOT_SQUASH"}`:                              http.StatusBadRequest,
+		`,"access_rules_options":{"default_squash_mode":"ROOT_SQUASH","default_squash_uid":"1"}`: http.StatusOK,
+		`,"Description":"x"`:                                                                     http.StatusBadRequest,
+		`,"description":"x","description":"y"`:                                                   http.StatusOK,
+		`,"capacity_gib":"9000"`:                                                                 http.StatusBadRequest,
+		`,"state":"BOGUS"`:                                                                       http.StatusBadRequest,
+		`,"state":2`:                                                                             http.StatusOK,
+		`,"createTime":5`:                                                                        http.StatusBadRequest,
+		`,"createTime":"yesterday"`:                                                              http.StatusBadRequest,
+		`,"createTime":"2026-01-01T00:00:00Z","update_time":"2026-01-01T00:00:00.5Z"`:            http.StatusOK,
+		`,"upcomingMaintenanceSchedule":{"startTime":"soon"}`:                                    http.StatusBadRequest,
+		`,"maintenancePolicy":{"weeklyMaintenanceWindows":[{"dayOfWeek":"MONDAY","startTime":{}},{"dayOfWeek":"TUESDAY","startTime":{}}]}`:                                       http.StatusBadRequest,
+		`,"maintenancePolicy":{"weeklyMaintenanceWindows":[{"dayOfWeek":"MONDAY","startTime":{"hours":24}}]}`:                                                                    http.StatusBadRequest,
+		`,"maintenancePolicy":{"weeklyMaintenanceWindows":[{"dayOfWeek":"MONDAY","startTime":{}}],"maintenanceExclusionWindow":[{"startDate":{"year":2026,"month":1,"day":1}}]}`: http.StatusBadRequest,
 		`,"upcomingMaintenanceSchedule":{"bogus":1}`:                                                                                             http.StatusBadRequest,
 		`,"upcomingMaintenanceSchedule":{"startTime":"2026-01-01T00:00:00Z"}`:                                                                    http.StatusOK,
 		`,"maintenancePolicy":{"weeklyMaintenanceWindows":[{"dayOfWeek":"MONDAY","duration":"1h"}]}`:                                             http.StatusBadRequest,
@@ -505,5 +528,110 @@ func TestListPagesInDescendingOrder(t *testing.T) {
 	}
 	if strings.Join(got, ",") != "c,b,a" {
 		t.Errorf("pages = %v, want c,b,a", got)
+	}
+}
+
+func TestPatchNamesMustMatchExactly(t *testing.T) {
+	s := lustre.New()
+	create(t, s, "a", body(9_000, 1000, `,"dynamicTierOptions":{"mode":"DISABLED"}`))
+	for body, want := range map[string]int{
+		`{"DESCRIPTION":"x"}`:                   http.StatusBadRequest,
+		`{"Labels":{"k":"v"}}`:                  http.StatusBadRequest,
+		`{"dynamicTierOptions":{"mode":1}}`:     http.StatusOK,
+		`{"dynamic_tier_options":{"mode":1}}`:   http.StatusOK,
+		`{"dynamicTierOptions":{"mode":2}}`:     http.StatusBadRequest,
+		`{"gke_support_enabled":true}`:          http.StatusOK,
+		`{"description":"x","Description":"y"}`: http.StatusBadRequest,
+	} {
+		if code, out := do(t, s, http.MethodPatch, instances+"/a", body); code != want {
+			t.Errorf("patch %s = %d %v, want %d", body, code, out, want)
+		}
+	}
+	if got, _ := s.LookupInstance("p", "us-central1-a", "a"); !got.GkeSupportEnabled || got.Description != "" {
+		t.Errorf("instance = %+v", got)
+	}
+}
+
+func TestPatchErrorsSayWhatIsImmutable(t *testing.T) {
+	s := lustre.New()
+	create(t, s, "a", body(9_000, 1000, ""))
+	_, out := do(t, s, http.MethodPatch, instances+"/a", `{"network":"projects/p/global/networks/other"}`)
+	if msg := out["error"].(map[string]any)["message"].(string); !strings.Contains(msg, "network is immutable") {
+		t.Errorf("network message = %q", msg)
+	}
+	_, out = do(t, s, http.MethodPatch, instances+"/a", `{"perUnitStorageThroughput":"500"}`)
+	if msg := out["error"].(map[string]any)["message"].(string); !strings.Contains(msg, "not supported") {
+		t.Errorf("throughput message = %q", msg)
+	}
+}
+
+func TestPutInstanceChecksEnumNames(t *testing.T) {
+	s := lustre.New()
+	base := lustre.Instance{Filesystem: "lfs", CapacityGib: 9_000, PerUnitStorageThroughput: 1000, Network: "projects/p/global/networks/n"}
+	bad := []func(*lustre.Instance){
+		func(in *lustre.Instance) {
+			in.MaintenancePolicy = &lustre.MaintenancePolicy{WeeklyMaintenanceWindows: []lustre.WeeklyMaintenanceWindow{{DayOfWeek: "monday", StartTime: &lustre.TimeOfDay{}}}}
+		},
+		func(in *lustre.Instance) { in.DynamicTierOptions = &lustre.DynamicTierOptions{Mode: "bogus"} },
+		func(in *lustre.Instance) {
+			in.AccessRulesOptions = &lustre.AccessRulesOptions{DefaultSquashMode: "root_squash"}
+		},
+	}
+	for i, set := range bad {
+		in := base
+		set(&in)
+		if _, err := s.PutInstance("p", "us-central1-a", "a", in); err == nil {
+			t.Errorf("PutInstance took bad enum %d", i)
+		}
+	}
+}
+
+func TestSnakeCaseParameters(t *testing.T) {
+	s := lustre.New()
+	if code, out := do(t, s, http.MethodPost, instances+"?instance_id=a&request_id=0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
+		`{"filesystem":"lfs","capacity_gib":"9000","per_unit_storage_throughput":"1000","network":"projects/p/global/networks/n"}`); code != http.StatusOK {
+		t.Fatalf("create in snake_case = %d %v", code, out)
+	}
+	create(t, s, "b", body(9_000, 1000, ""))
+	if _, out := do(t, s, http.MethodGet, instances+"?page_size=1&order_by=name", ""); len(out["instances"].([]any)) != 1 {
+		t.Errorf("list with page_size=1 = %v", out)
+	}
+	if code, _ := do(t, s, http.MethodGet, instances+"?page_size=1&pageSize=2", ""); code != http.StatusBadRequest {
+		t.Errorf("page size given twice = %d, want 400", code)
+	}
+}
+
+func TestOperationsListPartialSuccess(t *testing.T) {
+	s := lustre.New()
+	create(t, s, "a", body(9_000, 1000, ""))
+	for q, want := range map[string]int{
+		"-/operations?returnPartialSuccess=true":             http.StatusOK,
+		"-/operations?return_partial_success=false":          http.StatusOK,
+		"us-central1-a/operations?returnPartialSuccess=true": http.StatusNotImplemented,
+		"-/operations?returnPartialSuccess=yes":              http.StatusBadRequest,
+	} {
+		if code, out := do(t, s, http.MethodGet, "/v1/projects/p/locations/"+q, ""); code != want {
+			t.Errorf("list %s = %d %v, want %d", q, code, out, want)
+		}
+	}
+}
+
+func TestOperationsListCountsAsARead(t *testing.T) {
+	s := lustre.New(lustre.WithSettleAfter(1))
+	_, op := create(t, s, "a", body(9_000, 1000, ""))
+	do(t, s, http.MethodGet, "/v1/projects/p/locations/us-central1-a/operations", "")
+	if _, got := do(t, s, http.MethodGet, "/v1/"+op["name"].(string), ""); got["done"] != true {
+		t.Errorf("operation after a list and a get = %v, want done", got)
+	}
+}
+
+func TestDomainScopedProjects(t *testing.T) {
+	s := lustre.New()
+	const path = "/v1/projects/example.com:proj/locations/us-central1-a/instances"
+	if code, out := do(t, s, http.MethodPost, path+"?instanceId=a", body(9_000, 1000, "")); code != http.StatusOK {
+		t.Fatalf("create = %d %v", code, out)
+	}
+	if code, out := do(t, s, http.MethodGet, path+"/a", ""); code != http.StatusOK {
+		t.Errorf("get = %d %v", code, out)
 	}
 }

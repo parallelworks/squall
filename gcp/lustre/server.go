@@ -41,15 +41,21 @@
 //     that must not overlap, and a maintenance policy has one weekly window
 //     and at most one exclusion window. Options are stored as the API reads
 //     them, so an enum sent by name or number reads back the same, as names
-//     or, with enum-encoding=int, numbers. Fields the server does not know,
-//     at any depth, are rejected with 400.
+//     or, with enum-encoding=int, numbers; an unspecified enum reads as
+//     left out. Field and parameter names match exactly, in lowerCamelCase or
+//     the proto's snake_case, and names the server does not know, at any
+//     depth, are rejected with 400, as are output-only values that do not
+//     parse.
 //   - A patch changes only labels, description, gkeSupportEnabled and
 //     capacityGib, which may only grow and, from the smaller step, not past
-//     its threshold. The fields a patch names, by its updateMask, by * for
+//     its threshold. The API also changes perUnitStorageThroughput, access
+//     rules, maintenance windows, placementPolicy and targetVersion; the
+//     stand-in rejects a change to those with 400, as it does a change to an
+//     immutable field. The fields a patch names, by its updateMask, by * for
 //     all, or with no mask by those the body holds, may include output-only
 //     fields, which are ignored, and others whose value is unchanged, as
-//     AIP-203 directs; any other change, or a nested path, is rejected with
-//     400. A patched instance returns to the state it was in.
+//     AIP-203 directs. A nested mask path is rejected with 400. A patched
+//     instance returns to the state it was in.
 //   - List filters follow AIP-160: field = value and field != value on name,
 //     state, filesystem, network, description and labels.KEY, labels.KEY:*
 //     and labels:KEY for a label's presence, joined by AND, OR, NOT, - and
@@ -58,7 +64,8 @@
 //     wildcard or a comparison with <, is rejected with 400 rather than
 //     ignored. The location - lists every location.
 //   - Canceling an operation records the request and changes nothing else,
-//     which the API allows. The discovery document's standard parameters,
+//     which the API allows. operations.list takes returnPartialSuccess only
+//     for the location -, and reaches every location. The discovery document's standard parameters,
 //     such as fields or callback, are accepted and ignored: responses are
 //     always whole JSON. Other parameters a method does not take are
 //     rejected with 400. Error messages are the stand-in's own.
@@ -88,8 +95,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/netip"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -222,7 +231,7 @@ func (s *Server) route(pattern, method, verb string, h handler, target func(*cal
 	startsOperation := slices.Contains(operationMethods, method)
 	s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 		path, ok := strings.CutSuffix(strings.TrimPrefix(r.URL.Path, "/v1/"), verb)
-		if !ok || strings.Contains(path, ":") {
+		if !ok || strings.Contains(path[strings.LastIndex(path, "/")+1:], ":") {
 			writeError(w, unimplemented(r))
 			return
 		}
@@ -260,11 +269,23 @@ func (s *Server) route(pattern, method, verb string, h handler, target func(*cal
 // checkParams rejects an unknown parameter as the API does, rather than ignoring it.
 func (c *call) checkParams(method string, params []string) *apiError {
 	q := c.URL.Query()
-	for name := range q {
-		if !slices.Contains(params, name) && !slices.Contains(commonParams, name) {
+	for _, name := range slices.Sorted(maps.Keys(q)) {
+		if slices.Contains(commonParams, name) {
+			continue
+		}
+		field := camel(name)
+		if !slices.Contains(params, field) {
 			return invalid("Invalid JSON payload received. Unknown name %q: Cannot bind query parameter. Field %q could not be found in request message.", name, name)
 		}
+		if field != name {
+			if q.Has(field) {
+				return invalid("Invalid JSON payload received. The parameter %q is given twice, also as %q.", field, name)
+			}
+			q[field] = q[name]
+			delete(q, name)
+		}
 	}
+	c.URL.RawQuery = q.Encode()
 	for _, name := range []string{"$alt", "alt"} {
 		alt := q.Get(name)
 		format, opts, _ := strings.Cut(alt, ";")
@@ -325,29 +346,106 @@ func validUUID(id string) bool {
 	return true
 }
 
-func decodeStrict(r *http.Request, v any) *apiError {
+func readBody(r *http.Request) ([]byte, *apiError) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
 	if err != nil {
-		return invalid("reading the request body: %v", err)
+		return nil, invalid("reading the request body: %v", err)
 	}
 	if len(body) > maxBody {
-		return invalid("squall: bodies are limited to %d bytes", maxBody)
+		return nil, invalid("squall: bodies are limited to %d bytes", maxBody)
 	}
 	if len(bytes.TrimSpace(body)) == 0 {
 		body = []byte("{}")
 	}
+	return body, nil
+}
+
+// decodeStrict matches names exactly, where encoding/json ignores case, and returns body in lowerCamelCase.
+func decodeStrict(body []byte, v any) ([]byte, *apiError) {
 	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(v); err != nil {
-		if name, ok := strings.CutPrefix(err.Error(), "json: unknown field "); ok {
-			return invalid("Invalid JSON payload received. Unknown name %s: Cannot find field.", name)
-		}
-		return invalid("Invalid JSON payload received. %v", err)
+	dec.UseNumber()
+	var raw any
+	if err := dec.Decode(&raw); err != nil {
+		return nil, invalid("Invalid JSON payload received. %v", err)
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return invalid("Invalid JSON payload received. Data after the top-level value.")
+		return nil, invalid("Invalid JSON payload received. Data after the top-level value.")
 	}
-	return nil
+	raw, aerr := normalize(raw, reflect.TypeOf(v), "")
+	if aerr != nil {
+		return nil, aerr
+	}
+	body, err := json.Marshal(raw)
+	if err != nil {
+		return nil, invalid("Invalid JSON payload received. %v", err)
+	}
+	strict := json.NewDecoder(bytes.NewReader(body))
+	strict.DisallowUnknownFields()
+	if err := strict.Decode(v); err != nil {
+		return nil, invalid("Invalid JSON payload received. %v", err)
+	}
+	return body, nil
+}
+
+// normalize checks the names in v against the JSON names of t, at every depth.
+func normalize(v any, t reflect.Type, at string) (any, *apiError) {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	switch v := v.(type) {
+	case map[string]any:
+		switch t.Kind() {
+		case reflect.Map:
+			for k, x := range v {
+				var err *apiError
+				if v[k], err = normalize(x, t.Elem(), at+"."+k); err != nil {
+					return nil, err
+				}
+			}
+		case reflect.Struct:
+			fields := jsonFields(t)
+			out := make(map[string]any, len(v))
+			for _, k := range slices.Sorted(maps.Keys(v)) {
+				name := camel(k)
+				ft, ok := fields[name]
+				if !ok {
+					return nil, invalid("Invalid JSON payload received. Unknown name %q at '%s': Cannot find field.", k, strings.TrimPrefix(at, "."))
+				}
+				if _, dup := out[name]; dup {
+					return nil, invalid("Invalid JSON payload received. The field %q is given twice.", name)
+				}
+				x, err := normalize(v[k], ft, at+"."+name)
+				if err != nil {
+					return nil, err
+				}
+				out[name] = x
+			}
+			return out, nil
+		default:
+		}
+	case []any:
+		if t.Kind() == reflect.Slice {
+			for i, x := range v {
+				var err *apiError
+				if v[i], err = normalize(x, t.Elem(), at); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	return v, nil
+}
+
+// jsonFields are the JSON names of struct type t's fields, with their types.
+func jsonFields(t reflect.Type) map[string]reflect.Type {
+	fields := map[string]reflect.Type{}
+	for f := range t.Fields() {
+		name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+		if f.IsExported() && name != "" && name != "-" {
+			fields[name] = f.Type
+		}
+	}
+	return fields
 }
 
 // pageOf pages by the last key returned, so a page survives deletes between calls.
