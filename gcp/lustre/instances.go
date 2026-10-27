@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
+	"math"
+	"net/netip"
 	"regexp"
 	"slices"
 	"strconv"
@@ -165,7 +168,7 @@ func tierOf(throughput int64, dynamic json.RawMessage) (tier, *apiError) {
 		var opts struct {
 			Mode json.RawMessage `json:"mode"`
 		}
-		if err := json.Unmarshal(dynamic, &opts); err != nil {
+		if err := strictly(dynamic, &opts); err != nil {
 			return tier{}, invalid("Invalid dynamic_tier_options: %v", err)
 		}
 		mode, ok := enumName(opts.Mode, "MODE_UNSPECIFIED", "DISABLED", "DEFAULT_CACHE")
@@ -215,13 +218,16 @@ func checkAccessRules(raw json.RawMessage) *apiError {
 			SquashMode      json.RawMessage `json:"squashMode"`
 		} `json:"accessRules"`
 		DefaultSquashMode json.RawMessage `json:"defaultSquashMode"`
-		DefaultSquashUID  int32           `json:"defaultSquashUid"`
-		DefaultSquashGID  int32           `json:"defaultSquashGid"`
+		DefaultSquashUID  int64Value      `json:"defaultSquashUid"`
+		DefaultSquashGID  int64Value      `json:"defaultSquashGid"`
 	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&opts); err != nil {
+	if err := strictly(raw, &opts); err != nil {
 		return invalid("Invalid access_rules_options: %v", err)
+	}
+	for _, id := range []int64Value{opts.DefaultSquashUID, opts.DefaultSquashGID} {
+		if id < math.MinInt32 || id > math.MaxInt32 {
+			return invalid("Invalid access_rules_options: squash ID %d is out of range.", id)
+		}
 	}
 	modes := []string{"SQUASH_MODE_UNSPECIFIED", "NO_SQUASH", "ROOT_SQUASH"}
 	mode, ok := enumName(opts.DefaultSquashMode, modes...)
@@ -235,14 +241,81 @@ func checkAccessRules(raw json.RawMessage) *apiError {
 		if !ruleNamePattern.MatchString(rule.Name) {
 			return invalid("Invalid access rule name %q: it must have at most 16 letters, digits and underscores.", rule.Name)
 		}
-		if len(rule.IPAddressRanges) == 0 {
-			return invalid("Access rule %q needs ip_address_ranges.", rule.Name)
+		if err := checkRanges(rule.Name, rule.IPAddressRanges); err != nil {
+			return err
 		}
 		if mode, ok := enumName(rule.SquashMode, modes...); !ok || mode != "NO_SQUASH" {
 			return invalid("Access rule %q: squash_mode must be NO_SQUASH; ROOT_SQUASH is not supported inside an access rule.", rule.Name)
 		}
 	}
 	return nil
+}
+
+// checkRanges reads an access rule's ranges, CIDR ranges or single
+// addresses, which must not overlap.
+func checkRanges(rule string, ranges []string) *apiError {
+	if len(ranges) == 0 {
+		return invalid("Access rule %q needs ip_address_ranges.", rule)
+	}
+	var seen []netip.Prefix
+	for _, r := range ranges {
+		prefix, err := netip.ParsePrefix(r)
+		if err != nil {
+			addr, aerr := netip.ParseAddr(r)
+			if aerr != nil {
+				return invalid("Access rule %q: %q is neither a CIDR range nor an IP address.", rule, r)
+			}
+			prefix = netip.PrefixFrom(addr, addr.BitLen())
+		}
+		prefix = prefix.Masked()
+		for _, other := range seen {
+			if prefix.Overlaps(other) {
+				return invalid("Access rule %q: the ranges %s and %s overlap.", rule, other, prefix)
+			}
+		}
+		seen = append(seen, prefix)
+	}
+	return nil
+}
+
+// checkMaintenance checks that a maintenance policy has only the fields the API knows.
+func checkMaintenance(raw json.RawMessage) *apiError {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	type timeOfDay struct {
+		Hours   int32 `json:"hours"`
+		Minutes int32 `json:"minutes"`
+		Seconds int32 `json:"seconds"`
+		Nanos   int32 `json:"nanos"`
+	}
+	type date struct {
+		Year  int32 `json:"year"`
+		Month int32 `json:"month"`
+		Day   int32 `json:"day"`
+	}
+	var policy struct {
+		WeeklyMaintenanceWindows []struct {
+			DayOfWeek json.RawMessage `json:"dayOfWeek"`
+			StartTime *timeOfDay      `json:"startTime"`
+		} `json:"weeklyMaintenanceWindows"`
+		MaintenanceExclusionWindow []struct {
+			StartDate *date      `json:"startDate"`
+			EndDate   *date      `json:"endDate"`
+			Time      *timeOfDay `json:"time"`
+		} `json:"maintenanceExclusionWindow"`
+	}
+	if err := strictly(raw, &policy); err != nil {
+		return invalid("Invalid maintenance_policy: %v", err)
+	}
+	return nil
+}
+
+// strictly decodes raw into v, rejecting fields v does not have.
+func strictly(raw json.RawMessage, v any) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	return dec.Decode(v)
 }
 
 const (
@@ -298,6 +371,9 @@ func (in *instanceInput) check() *apiError {
 		return err
 	}
 	if err := checkAccessRules(in.AccessRulesOptions); err != nil {
+		return err
+	}
+	if err := checkMaintenance(in.MaintenancePolicy); err != nil {
 		return err
 	}
 	return checkLabels(in.Labels)
@@ -479,11 +555,7 @@ func (s *Server) listInstances(c *call, _ *apiError) (any, *apiError) {
 	}
 	var matched []*instance
 	for _, name := range names {
-		if !strings.HasPrefix(name, prefix) {
-			continue
-		}
-		inst, err := s.lookup(name)
-		if err == nil && filter.matches(&inst.Instance) {
+		if inst := s.instances[name]; strings.HasPrefix(name, prefix) && filter.matches(&inst.Instance) {
 			matched = append(matched, inst)
 		}
 	}
@@ -495,8 +567,11 @@ func (s *Server) listInstances(c *call, _ *apiError) (any, *apiError) {
 		Instances     []instanceJSON `json:"instances,omitzero"`
 		NextPageToken string         `json:"nextPageToken,omitzero"`
 	}{NextPageToken: next}
+	// Only the instances a page returns count as read, and one that the read finishes may no longer belong.
 	for _, inst := range page {
-		out.Instances = append(out.Instances, inst.wire(c.intEnums))
+		if inst, err := s.lookup(inst.Name); err == nil && filter.matches(&inst.Instance) {
+			out.Instances = append(out.Instances, inst.wire(c.intEnums))
+		}
 	}
 	return out, nil
 }
@@ -511,31 +586,93 @@ var updatable = map[string]string{
 	"gkeSupportEnabled":   "gkeSupportEnabled",
 }
 
+// outputOnly are the fields the API sets, which a request may carry and the
+// server ignores, as AIP-203 directs, along with the name the path gives.
+var outputOnly = []string{
+	"name", "state", "mountPoint", "createTime", "updateTime", "uid", "stateReason",
+	"availableVersion", "effectiveVersion", "upcomingMaintenanceSchedule",
+}
+
+// unmaskedPaths are the fields a patch without an update mask changes: the
+// updatable ones present in body. Any other field present must equal what
+// inst holds, since the server cannot change it.
+func unmaskedPaths(body []byte, inst *Instance) ([]string, *apiError) {
+	var present map[string]json.RawMessage
+	if err := json.Unmarshal(body, &present); err != nil {
+		return nil, invalid("Invalid JSON payload received. %v", err)
+	}
+	stored := map[string]json.RawMessage{}
+	_ = json.Unmarshal(encoded(inst), &stored)
+	var paths []string
+	for _, field := range slices.Sorted(maps.Keys(present)) {
+		if path, ok := updatable[field]; ok {
+			paths = append(paths, path)
+			continue
+		}
+		if slices.Contains(outputOnly, field) || sameJSON(present[field], stored[field]) {
+			continue
+		}
+		return nil, invalid("squall: a patch cannot change %s; only labels, description, capacityGib and gkeSupportEnabled can change", field)
+	}
+	return paths, nil
+}
+
+// sameJSON reports whether a and b hold the same value, reading an int64
+// sent as a string or a number alike.
+func sameJSON(a, b json.RawMessage) bool {
+	var x, y any
+	if json.Unmarshal(a, &x) != nil || json.Unmarshal(b, &y) != nil {
+		return false
+	}
+	return fmt.Sprint(x) == fmt.Sprint(y) || isZero(x) && b == nil
+}
+
+func isZero(v any) bool {
+	switch v := v.(type) {
+	case nil:
+		return true
+	case string:
+		return v == "" || v == "0"
+	case float64:
+		return v == 0
+	case bool:
+		return !v
+	}
+	return false
+}
+
+func encoded(v any) []byte {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic("squall: encoding a resource: " + err.Error())
+	}
+	return b
+}
+
 func (s *Server) patchInstance(c *call, opFault *apiError) (any, *apiError) {
 	mask := c.URL.Query().Get("updateMask")
-	if mask == "" {
-		return nil, invalid("squall: a patch needs an updateMask")
-	}
 	var paths []string
-	for p := range strings.SplitSeq(mask, ",") {
-		field, ok := updatable[strings.TrimSpace(p)]
-		if !ok {
-			return nil, invalid("squall: the update mask path %q is not supported; only labels, description, capacityGib and gkeSupportEnabled are", p)
+	if mask != "" {
+		for p := range strings.SplitSeq(mask, ",") {
+			field, ok := updatable[strings.TrimSpace(p)]
+			if !ok {
+				return nil, invalid("squall: the update mask path %q is not supported; only labels, description, capacityGib and gkeSupportEnabled are", p)
+			}
+			paths = append(paths, field)
 		}
-		paths = append(paths, field)
 	}
 	key, err := c.requestKey("patch")
 	if err != nil {
 		return nil, err
 	}
+	body, rerr := io.ReadAll(io.LimitReader(c.Body, maxBody+1))
+	if rerr != nil || len(body) > maxBody {
+		return nil, invalid("squall: reading the request body: bodies are limited to %d bytes", maxBody)
+	}
+	c.Body = io.NopCloser(bytes.NewReader(body))
 	var in instanceInput
 	if err := decodeStrict(c.Request, &in); err != nil {
 		return nil, err
-	}
-	if slices.Contains(paths, "labels") {
-		if err := checkLabels(in.Labels); err != nil {
-			return nil, err
-		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -546,12 +683,23 @@ func (s *Server) patchInstance(c *call, opFault *apiError) (any, *apiError) {
 	if err != nil {
 		return nil, err
 	}
+	if mask == "" {
+		if paths, err = unmaskedPaths(body, &inst.Instance); err != nil {
+			return nil, err
+		}
+	}
+	if slices.Contains(paths, "labels") {
+		if err := checkLabels(in.Labels); err != nil {
+			return nil, err
+		}
+	}
 	if slices.Contains(paths, "capacityGib") {
 		if err := checkGrowth(&inst.Instance, int64(in.CapacityGib)); err != nil {
 			return nil, err
 		}
 	}
-	op := s.change(inst, c.parent(), key, "update", StateUpdating, opFault, func() *Instance {
+	prior := inst.State
+	op := s.change(inst, c.parent(), key, "update", prior, opFault, func() *Instance {
 		for _, p := range paths {
 			switch p {
 			case "labels":
@@ -567,7 +715,10 @@ func (s *Server) patchInstance(c *call, opFault *apiError) (any, *apiError) {
 				inst.GkeSupportEnabled = in.GkeSupportEnabled
 			}
 		}
-		s.activate(&inst.Instance)
+		inst.State, inst.UpdateTime = prior, s.now().UTC()
+		if prior != StateCreating {
+			s.mount(&inst.Instance)
+		}
 		return new(inst.clone())
 	})
 	return op.wire(c.intEnums), nil

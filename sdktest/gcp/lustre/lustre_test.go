@@ -14,6 +14,7 @@ import (
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
 	"github.com/parallelworks/squall/fault"
 	"github.com/parallelworks/squall/gcp/lustre"
@@ -355,5 +356,65 @@ func TestOperationsListAndDelete(t *testing.T) {
 	}
 	if _, err := c.GetOperation(t.Context(), &longrunningpb.GetOperationRequest{Name: op.Name()}); code(err) != codes.NotFound {
 		t.Errorf("get deleted operation = %v, want NotFound", err)
+	}
+}
+
+func TestUpdateGrowsCapacityAndChangesLabels(t *testing.T) {
+	s, c := setup(t, lustre.WithSettleAfter(1))
+	op, err := c.CreateInstance(t.Context(), createRequest("grow", "a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := op.Wait(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.GetInstance(t.Context(), &lustrepb.GetInstanceRequest{Name: parent + "/instances/grow"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got.CapacityGib = 27_000
+	got.Labels = map[string]string{sessions: "b", "tier": "fast"}
+	got.Description = "not in the mask"
+	upd, err := c.UpdateInstance(t.Context(), &lustrepb.UpdateInstanceRequest{
+		Instance:   got,
+		UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"capacity_gib", "labels"}},
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if mid, err := c.GetInstance(t.Context(), &lustrepb.GetInstanceRequest{Name: got.GetName()}); err != nil || mid.GetState() != lustrepb.Instance_ACTIVE || mid.GetCapacityGib() != 18_000 {
+		t.Errorf("get while updating = %v %d, %v; want ACTIVE at the old capacity", mid.GetState(), mid.GetCapacityGib(), err)
+	}
+	inst, err := upd.Wait(t.Context())
+	if err != nil {
+		t.Fatalf("wait for update: %v", err)
+	}
+	if inst.GetCapacityGib() != 27_000 || inst.GetLabels()["tier"] != "fast" || inst.GetDescription() != "scratch space" || inst.GetState() != lustrepb.Instance_ACTIVE {
+		t.Errorf("updated = %+v", inst)
+	}
+	if meta, err := upd.Metadata(); err != nil || meta.GetVerb() != "update" {
+		t.Errorf("update metadata = %+v, %v", meta, err)
+	}
+	if stored, _ := s.LookupInstance(project, zone, "grow"); stored.CapacityGib != 27_000 {
+		t.Errorf("stored = %+v", stored)
+	}
+}
+
+func TestUpdateWithoutAMaskChangesWhatTheInstanceHolds(t *testing.T) {
+	_, c := setup(t)
+	got := create(t, c, "unmasked", "a")
+	got.Description = "renamed"
+	got.CapacityGib = 36_000
+	upd, err := c.UpdateInstance(t.Context(), &lustrepb.UpdateInstanceRequest{Instance: got})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	inst, err := upd.Wait(t.Context())
+	if err != nil || inst.GetDescription() != "renamed" || inst.GetCapacityGib() != 36_000 || inst.GetLabels()[sessions] != "a" {
+		t.Fatalf("updated = %+v, %v", inst, err)
+	}
+	got.Network = "projects/p/global/networks/other"
+	if _, err := c.UpdateInstance(t.Context(), &lustrepb.UpdateInstanceRequest{Instance: got}); sdkerr.GoogleCode(err) != http.StatusBadRequest {
+		t.Errorf("update changing the network = %v, want 400", err)
 	}
 }

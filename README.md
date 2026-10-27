@@ -138,7 +138,8 @@ For Managed Lustre:
 
 - Creates, patches and deletes finish before the call that makes them returns,
   so the SDK's `Wait` returns at once. `WithSettleAfter(n)` keeps the instance
-  `CREATING`, `UPDATING` or `DELETING`, with its operation not done, for `n`
+  `CREATING` or `DELETING` (a patched one keeps its state, since the API
+  deprecates `UPDATING`), with its operation not done, for `n`
   more reads of it or its operation, or until the test calls `Settle`. The v1
   API has no `FAILED` state: a failed create ends its operation in an error and
   leaves no instance.
@@ -150,8 +151,9 @@ For Managed Lustre:
 - List filters follow AIP-160 for `name`, `state`, `filesystem`, `network`,
   `description` and labels (`labels.KEY = value`, `labels.KEY:*`,
   `labels:KEY`), with AND, OR, NOT and parentheses; anything else is rejected
-  with 400. A patch needs an `updateMask` of labels, description,
-  gkeSupportEnabled or capacityGib. Error messages are the stand-in's own.
+  with 400. A patch changes labels, description, gkeSupportEnabled or
+  capacityGib, by `updateMask` or, without one, by the fields the body holds.
+  Error messages are the stand-in's own.
 - Fault method names are the API's method IDs, such as
   `lustre.projects.locations.instances.create`, and a rule's `Resource` is the
   path below `/v1/`, for a create the instance it makes.

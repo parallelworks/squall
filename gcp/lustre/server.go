@@ -21,9 +21,10 @@
 //     operation it answers with is already done and the SDK's Wait returns
 //     at once. [WithSettleAfter] holds them in progress, with the operation
 //     not done, for more reads of the instance or its operation, or until
-//     [Server.Settle]: a new instance is CREATING, a patched one UPDATING
-//     and a deleted one DELETING until it goes. A change to an instance
-//     with another in progress finishes that one first. The v1 API has no
+//     [Server.Settle]: a new instance is CREATING and a deleted one DELETING
+//     until it goes. A patched one keeps its state, since the API deprecates
+//     UPDATING. A change to an instance with another in progress finishes
+//     that one first. The v1 API has no
 //     FAILED state: a create that fails ends its operation in an error and
 //     leaves no instance, which [fault.FailOperation] does.
 //   - A call that repeats an earlier call's requestId in the same project,
@@ -38,10 +39,15 @@
 //     A mount point's address comes from 10.0.0.0/8 and is set once the
 //     instance is ACTIVE. Fields the server only records, such as
 //     maintenancePolicy or dynamicTierOptions, keep the JSON the caller
-//     sent; fields it does not know are rejected with 400.
-//   - A patch needs an updateMask, and changes only labels, description,
-//     gkeSupportEnabled and capacityGib, which may only grow and, from the
-//     smaller step, not past its threshold. Other paths are rejected with 400.
+//     sent; fields it does not know, at any depth, are rejected with 400.
+//     An access rule's ranges are CIDR ranges or addresses that must not
+//     overlap.
+//   - A patch changes only labels, description, gkeSupportEnabled and
+//     capacityGib, which may only grow and, from the smaller step, not past
+//     its threshold; other update mask paths are rejected with 400. Without
+//     an updateMask it changes those of them the body holds, ignores
+//     output-only fields, and rejects any other field that differs from the
+//     instance's. A patched instance returns to the state it was in.
 //   - List filters follow AIP-160: field = value and field != value on name,
 //     state, filesystem, network, description and labels.KEY, labels.KEY:*
 //     and labels:KEY for a label's presence, joined by AND, OR, NOT, - and
@@ -49,7 +55,7 @@
 //     name; orderBy takes name and name desc. Anything else, such as a
 //     wildcard or a comparison with <, is rejected with 400 rather than
 //     ignored. The location - lists every location.
-//   - Cancelling an operation records the request and changes nothing else,
+//   - Canceling an operation records the request and changes nothing else,
 //     which the API allows. The fields parameter is accepted and ignored:
 //     responses are always whole. Other parameters a method does not take are
 //     rejected with 400. Error messages are the stand-in's own.
@@ -204,6 +210,13 @@ type call struct {
 	intEnums bool
 }
 
+// operationMethods are the methods that start a long-running operation.
+var operationMethods = []string{
+	"lustre.projects.locations.instances.create",
+	"lustre.projects.locations.instances.patch",
+	"lustre.projects.locations.instances.delete",
+}
+
 // commonParams are the system parameters every method takes.
 var commonParams = []string{"$alt", "alt", "prettyPrint", "$prettyPrint", "fields", "$fields", "quotaUser", "key"}
 
@@ -211,7 +224,7 @@ var commonParams = []string{"$alt", "alt", "prettyPrint", "$prettyPrint", "field
 // as ":cancel", must end the path. A non-nil target names the call's
 // resource in place of its path.
 func (s *Server) route(pattern, method, verb string, h handler, target func(*call) string, params ...string) {
-	startsOperation := !strings.HasPrefix(pattern, http.MethodGet+" ") && verb == ""
+	startsOperation := slices.Contains(operationMethods, method)
 	s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 		path, ok := strings.CutSuffix(strings.TrimPrefix(r.URL.Path, "/v1/"), verb)
 		if !ok || strings.Contains(path, ":") {

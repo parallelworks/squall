@@ -204,12 +204,117 @@ func TestPatchGrowsCapacityWithinItsStep(t *testing.T) {
 	if code := patch("network", `{"network":"projects/p/global/networks/other"}`); code != http.StatusBadRequest {
 		t.Errorf("network = %d, want 400", code)
 	}
-	if code := patch("", `{"description":"d"}`); code != http.StatusBadRequest {
-		t.Errorf("no mask = %d, want 400", code)
-	}
 	got, _ := s.LookupInstance("p", "us-central1-a", "a")
 	if got.CapacityGib != 27_000 || got.Labels["k"] != "v" || got.Description != "d" || got.State != lustre.StateActive {
 		t.Errorf("instance = %+v", got)
+	}
+}
+
+func TestPatchWithoutAMaskChangesTheFieldsTheBodyHolds(t *testing.T) {
+	s := lustre.New()
+	create(t, s, "a", body(18_000, 1000, `,"labels":{"k":"v"}`))
+	_, current := do(t, s, http.MethodGet, instances+"/a", "")
+	current["description"] = "new"
+	current["capacityGib"] = "27000"
+	sent, _ := json.Marshal(current)
+	if code, out := do(t, s, http.MethodPatch, instances+"/a", string(sent)); code != http.StatusOK {
+		t.Fatalf("patch of the instance as read, output-only fields and all = %d %v", code, out)
+	}
+	got, _ := s.LookupInstance("p", "us-central1-a", "a")
+	if got.Description != "new" || got.CapacityGib != 27_000 || got.Labels["k"] != "v" {
+		t.Errorf("instance = %+v", got)
+	}
+	for _, body := range []string{
+		`{"network":"projects/p/global/networks/other"}`,
+		`{"filesystem":"other"}`,
+		`{"perUnitStorageThroughput":"500"}`,
+	} {
+		if code, _ := do(t, s, http.MethodPatch, instances+"/a", body); code != http.StatusBadRequest {
+			t.Errorf("patch %s = %d, want 400", body, code)
+		}
+	}
+	if code, out := do(t, s, http.MethodPatch, instances+"/a", `{"network":"projects/p/global/networks/default","perUnitStorageThroughput":1000,"gkeSupportEnabled":true}`); code != http.StatusOK {
+		t.Errorf("patch repeating immutable fields = %d %v", code, out)
+	}
+}
+
+func TestPatchKeepsTheInstancesState(t *testing.T) {
+	s := lustre.New()
+	in := lustre.Instance{Filesystem: "lfs", CapacityGib: 9_000, PerUnitStorageThroughput: 1000, Network: "projects/p/global/networks/n"}
+	for id, state := range map[string]string{"stopped": lustre.StateStopped, "creating": lustre.StateCreating} {
+		in.State = state
+		if _, err := s.PutInstance("p", "us-central1-a", id, in); err != nil {
+			t.Fatal(err)
+		}
+		if code, out := do(t, s, http.MethodPatch, instances+"/"+id+"?updateMask=description", `{"description":"d"}`); code != http.StatusOK {
+			t.Fatalf("patch %s = %d %v", id, code, out)
+		}
+		got, _ := s.LookupInstance("p", "us-central1-a", id)
+		if got.State != state || got.Description != "d" || state == lustre.StateCreating && got.MountPoint != "" {
+			t.Errorf("patched %s = %+v, want %s", id, got, state)
+		}
+	}
+}
+
+func TestOptionsRejectWhatTheAPIDoesNotTake(t *testing.T) {
+	for extra, want := range map[string]int{
+		`,"dynamicTierOptions":{"mode":"DISABLED","size":1}`:                                                                                     http.StatusBadRequest,
+		`,"maintenancePolicy":{"weeklyMaintenanceWindows":[{"dayOfWeek":"MONDAY","startTime":{"hours":2}}]}`:                                     http.StatusOK,
+		`,"maintenancePolicy":{"weeklyMaintenanceWindows":[{"dayOfWeek":"MONDAY","duration":"1h"}]}`:                                             http.StatusBadRequest,
+		`,"maintenancePolicy":{"maintenanceExclusionWindow":[{"startDate":{"year":2026,"month":1,"day":1},"time":{}}]}`:                          http.StatusOK,
+		`,"accessRulesOptions":{"defaultSquashMode":"ROOT_SQUASH","defaultSquashUid":"65534","defaultSquashGid":"65534"}`:                        http.StatusOK,
+		`,"accessRulesOptions":{"defaultSquashMode":"ROOT_SQUASH","defaultSquashUid":"4294967296"}`:                                              http.StatusBadRequest,
+		`,"accessRulesOptions":{"defaultSquashMode":2,"accessRules":[{"name":"a","ipAddressRanges":["10.0.0.0/24","10.1.0.1"],"squashMode":1}]}`: http.StatusOK,
+		`,"accessRulesOptions":{"defaultSquashMode":2,"accessRules":[{"name":"a","ipAddressRanges":["not-an-ip"],"squashMode":1}]}`:              http.StatusBadRequest,
+		`,"accessRulesOptions":{"defaultSquashMode":2,"accessRules":[{"name":"a","ipAddressRanges":["10.0.0.0/16","10.0.3.4"],"squashMode":1}]}`: http.StatusBadRequest,
+	} {
+		if code, out := create(t, lustre.New(), "a", body(9_000, 1000, extra)); code != want {
+			t.Errorf("create with %s = %d %v, want %d", extra, code, out, want)
+		}
+	}
+}
+
+func TestListCountsReadsOnlyOfWhatItReturns(t *testing.T) {
+	s := lustre.New(lustre.WithSettleAfter(1))
+	create(t, s, "a", body(9_000, 1000, ""))
+	create(t, s, "b", body(9_000, 1000, ""))
+	do(t, s, http.MethodGet, instances+"?pageSize=1", "")
+	do(t, s, http.MethodGet, instances+"?filter=labels.none%3Dx", "")
+	// Each first get is the instance's one read in progress, unless a list spent it.
+	for _, id := range []string{"a", "b"} {
+		want := "CREATING"
+		if id == "a" {
+			want = "ACTIVE"
+		}
+		if _, got := do(t, s, http.MethodGet, instances+"/"+id, ""); got["state"] != want {
+			t.Errorf("%s after the lists = %v, want %s", id, got["state"], want)
+		}
+	}
+}
+
+func TestListDropsAnInstanceItsReadFinishesDeleting(t *testing.T) {
+	s := lustre.New(lustre.WithSettleAfter(1))
+	create(t, s, "a", body(9_000, 1000, ""))
+	s.Settle()
+	do(t, s, http.MethodDelete, instances+"/a", "")
+	if _, got := do(t, s, http.MethodGet, instances, ""); got["instances"] == nil {
+		t.Fatalf("first list = %v, want the instance DELETING", got)
+	}
+	if _, got := do(t, s, http.MethodGet, instances, ""); got["instances"] != nil {
+		t.Errorf("second list = %v, want none", got)
+	}
+}
+
+func TestFailOperationOnAnOperationDeleteRejectsIt(t *testing.T) {
+	faults := fault.New().Add(fault.Rule{Method: "lustre.projects.locations.operations.delete", Fault: fault.FailOperation(http.StatusInternalServerError)})
+	s := lustre.New(lustre.WithFaults(faults))
+	_, op := create(t, s, "a", body(9_000, 1000, ""))
+	name := "/v1/" + op["name"].(string)
+	if code, _ := do(t, s, http.MethodDelete, name, ""); code != http.StatusInternalServerError {
+		t.Errorf("delete operation = %d, want 500", code)
+	}
+	if code, _ := do(t, s, http.MethodGet, name, ""); code != http.StatusOK {
+		t.Errorf("get operation after a failed delete = %d, want 200", code)
 	}
 }
 
@@ -228,7 +333,7 @@ func TestOperationsListDeleteAndCancel(t *testing.T) {
 	}
 	_, got := do(t, s, http.MethodGet, "/v1/"+name, "")
 	if meta := got["metadata"].(map[string]any); meta["requestedCancellation"] != true || got["done"] == true {
-		t.Errorf("cancelled operation = %v, want requestedCancellation and still running", got)
+		t.Errorf("canceled operation = %v, want requestedCancellation and still running", got)
 	}
 	if code, _ := do(t, s, http.MethodDelete, "/v1/"+name, ""); code != http.StatusOK {
 		t.Fatalf("delete operation = %d", code)
