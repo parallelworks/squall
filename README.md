@@ -24,7 +24,7 @@ failure replays from its seed.
 | [`access`](https://pkg.go.dev/github.com/parallelworks/squall/access) | Grants a set of permissions (Google Cloud IAM permissions, AWS IAM actions or Azure RBAC actions) and refuses calls that need one it lacks, with the error the cloud answers, including those a request's fields add and Azure's linked checks. Reports which permissions were needed but missing and which were granted but never used. |
 | [`aws/ec2`](https://pkg.go.dev/github.com/parallelworks/squall/aws/ec2) | Amazon EC2: instances (run with client tokens, describe with filters and pages, start, stop, terminate, change type), images (describe, register from snapshots, deregister), instance types, EBS volumes (create, describe, attach, detach, delete), EBS snapshots (create, describe with filters and pages, delete), placement groups, tags, Elastic IP addresses (allocate, describe, release, associate with an interface or instance, disassociate) and network interfaces (create with client tokens, describe, delete). |
 | [`aws/s3`](https://pkg.go.dev/github.com/parallelworks/squall/aws/s3) | Amazon S3: general purpose buckets (create, head, list with pages and filters, delete), their tags, versioning, policy and CORS rules, and objects (put, delete one or many, list versions and delete markers). |
-| [`azure/arm`](https://pkg.go.dev/github.com/parallelworks/squall/azure/arm) | Azure Resource Manager: resource groups (get, create or update, list with tag filters, delete with everything in them that nothing outside uses), virtual machines (create or update, get, list, instance view, deallocate, start, delete) and their extensions (create or update, get, list, delete), Uniform scale sets (create or update, update, get, list, delete, delete instances) and their VMs, managed disks (VM OS disks included) and snapshots, with cross-region incremental snapshot copies whose completionPercent climbs to 100, Azure Compute Gallery galleries, image definitions and image versions with their replication status, virtual networks and their subnets, NAT gateways, public load balancers with backend pools and outbound rules, network security groups, network interfaces and public IP addresses, the IP configurations of scale set VMs, private DNS zones, virtual network links and A record sets, and long-running operations to poll. |
+| [`azure/arm`](https://pkg.go.dev/github.com/parallelworks/squall/azure/arm) | Azure Resource Manager: resource groups (get, create or update, list with tag filters, delete with everything in them that nothing outside uses), virtual machines (create or update, get, list, instance view, deallocate, start, delete) and their extensions (create or update, get, list, delete), Uniform scale sets (create or update, update, get, list, delete, delete instances) and their VMs, managed disks (VM OS disks included) and snapshots, with cross-region incremental snapshot copies whose completionPercent climbs to 100, Azure Compute Gallery galleries, image definitions and image versions with their replication status, virtual networks and their subnets, NAT gateways, public load balancers with backend pools and outbound rules, network security groups, network interfaces and public IP addresses, the IP configurations of scale set VMs, private DNS zones, virtual network links and A record sets, resource provider registration, Cost Management exports at a subscription's scope, and long-running operations to poll. |
 | [`azure/graph`](https://pkg.go.dev/github.com/parallelworks/squall/azure/graph) | Microsoft Graph: a directory's domains (list) and users (create with Microsoft Entra's name and password rules, get by ID or user principal name, delete), with application permissions checked as Graph documents them. |
 | [`gcp/compute`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/compute) | Compute Engine: instances (bulkInsert, insert, get, list, aggregatedList, delete, stop, start, setLabels, setMachineType, addAccessConfig, attachDisk, detachDisk), disks (get, list, aggregatedList, insert, delete), snapshots (insert, get, list, delete), zones, regional addresses (get, list, insert, delete, setLabels), resource policies, instance templates, routes, and zone, region and global operations (get, wait). |
 | [`gcp/lustre`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/lustre) | Managed Lustre: instances (create with the API's capacity, tier, ID, filesystem, root squash and maintenance rules, get, list with filters on name, state, filesystem, network, description and labels, patch labels, description, gkeSupportEnabled and capacity, delete) and their long-running operations (get, list, delete, cancel). |
@@ -366,6 +366,40 @@ For Azure Resource Manager:
   created without a capacity starts with no VMs, as a Flexible one does in
   Azure; for Uniform, both are inferred.
 - Resource SKUs list none, so availability checks see no restrictions.
+- Every resource provider namespace is `Registered` unless
+  `WithUnregisteredProviders` names it; Azure registers only some by default,
+  such as `Microsoft.Resources` and `Microsoft.CostManagement` but not
+  `Microsoft.CostManagementExports`, as Microsoft documents. A call to a
+  `NotRegistered` namespace fails with 409 `MissingSubscriptionRegistration`,
+  naming it as the detail's target, as an Azure CLI recording shows.
+  Registering answers 200 with the provider `Registering` and no operation to
+  poll, as Azure answers; it becomes `Registered` after the reads
+  `WithSettleAfter` sets (gets of the provider, and export writes it turns
+  away) or on `Settle`, and at once by default. A namespace being registered
+  takes calls, as Microsoft documents that callers need not wait for it.
+  `ProviderState` and `ProviderRegistrations` show the states and how many
+  register calls each got. Registering a `Registered` namespace leaves it
+  `Registered`, which is inferred. A provider lists no resource types and
+  unregistering is not served.
+- A Cost Management export create answers 201 and an update 200, each with a
+  new eTag, as Azure CLI recordings show. An update needs the current eTag in
+  the body: without one it fails with 400 "Etag value required for update
+  operation of report: {name}.Please get the latest to avoid overwrite.", as
+  Azure answers; with a stale one, 412, which is inferred, as is its message.
+  Cost Management errors carry the HTTP status as their code, such as `404`,
+  and end in a request ID, as Azure answers. A missing export answers 404 "No
+  export found for {name}, Subscription: {subscription}.", as Azure answers a
+  get; that a delete of one answers the same is inferred (the SDK accepts only
+  200 from a delete). An export write while `Microsoft.CostManagementExports`
+  is `Registering` fails with 503, as Microsoft documents; the message is
+  inferred. One while it is `NotRegistered` is not refused, since no source
+  shows how Azure answers it. The destination storage account and container
+  are recorded, not checked. The answer leaves out the destination's `type`,
+  shows a null `rootFolderPath` when none was given, and writes recurrence
+  dates in RFC 3339 UTC, as Azure does. Exports live at a subscription's scope,
+  so deleting a resource group, even the destination's, leaves them. Runs,
+  run history, `$expand` and other scopes are not served. `Exports` shows
+  each export's definition, destination, schedule and eTag.
 - Fault method names are the Azure RBAC action, such as
   `Microsoft.Compute/virtualMachines/write`, and a rule's `Resource` is the
   resource ID in the call's path.
