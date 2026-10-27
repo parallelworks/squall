@@ -28,6 +28,10 @@ type Snapshot struct {
 	State     string
 	StartTime time.Time
 	Tags      map[string]string
+	// SourceRegion and SourceSnapshotID name the snapshot a copy was made
+	// from, and are empty for a snapshot of a volume.
+	SourceRegion     string
+	SourceSnapshotID string
 
 	wait int
 }
@@ -170,6 +174,65 @@ func (s *Server) createSnapshot(c *call) (response, *apiError) {
 	}
 	rs.snapshots[id] = snap
 	return &createSnapshotResponse{snapshotXML: snap.xml()}, nil
+}
+
+// copyVolumeID is the volume ID a copy reports, as EC2 gives copies an
+// arbitrary one.
+const copyVolumeID = "vol-ffffffff"
+
+type copySnapshotResponse struct {
+	meta
+	SnapshotID string   `xml:"snapshotId"`
+	Tags       []tagXML `xml:"tagSet>item,omitempty"`
+}
+
+func (s *Server) copySnapshot(c *call) (response, *apiError) {
+	sourceRegion, err := c.p.required("SourceRegion")
+	if err != nil {
+		return nil, err
+	}
+	sourceID, err := c.p.required("SourceSnapshotId")
+	if err != nil {
+		return nil, err
+	}
+	desc := c.p.get("Description")
+	encrypted, err := c.p.bool("Encrypted", false)
+	if err != nil {
+		return nil, err
+	}
+	tags, err := c.p.tags("snapshot")
+	if err != nil {
+		return nil, err
+	}
+	// The SDKs fill in the deprecated PresignedUrl and DestinationRegion
+	// themselves, and the key only matters to encryption, which is not modeled.
+	for _, k := range []string{"PresignedUrl", "DestinationRegion", "KmsKeyId"} {
+		c.p.get(k)
+	}
+	if err := c.p.done(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	src, err := s.lookupRegion(sourceRegion).snapshot(sourceID)
+	if err != nil {
+		return nil, err
+	}
+	if src.State != snapshotCompleted {
+		return nil, clientError("IncorrectState", "Snapshot %s is in invalid state - %s", sourceID, src.State)
+	}
+	rs := s.region(c.region)
+	id := c.id
+	if id == "" {
+		id = unusedID(s, "snap", rs.snapshots)
+	}
+	snap := &Snapshot{
+		Region: c.region, SnapshotID: id, VolumeID: copyVolumeID, VolumeSize: src.VolumeSize, Description: desc,
+		Encrypted: src.Encrypted || encrypted, State: snapshotPending, StartTime: time.Now(), Tags: maps.Clone(tags),
+		SourceRegion: sourceRegion, SourceSnapshotID: sourceID, wait: max(s.settleAfter, 0),
+	}
+	rs.snapshots[id] = snap
+	return &copySnapshotResponse{SnapshotID: id, Tags: tagSet(snap.Tags)}, nil
 }
 
 type describeSnapshotsResponse struct {

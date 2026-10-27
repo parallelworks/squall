@@ -17,7 +17,7 @@
 // (DescribeImages, RegisterImage, DeregisterImage), instance types
 // (DescribeInstanceTypes), EBS volumes (CreateVolume, DescribeVolumes,
 // DeleteVolume, AttachVolume, DetachVolume), EBS snapshots (CreateSnapshot,
-// DescribeSnapshots, DeleteSnapshot), placement groups (CreatePlacementGroup, DescribePlacementGroups,
+// CopySnapshot, DescribeSnapshots, DeleteSnapshot), placement groups (CreatePlacementGroup, DescribePlacementGroups,
 // DeletePlacementGroup) and tags (CreateTags, DeleteTags), with the real API's
 // error codes. Other actions answer 404 with the code InvalidAction. Where it
 // differs from EC2:
@@ -118,6 +118,17 @@
 //     DescribeSnapshots with an owner other than "self" lists none, and
 //     snapshots report no owner ID. CreatePlacementGroup needs a GroupName
 //     and a Strategy, which EC2 makes optional.
+//   - CopySnapshot, called in the destination region, copies a completed
+//     snapshot from SourceRegion, which may be the same region, into a new
+//     snapshot that starts pending and completes as a new snapshot does. It
+//     fails with InvalidSnapshot.NotFound when SourceRegion does not hold the
+//     snapshot and with IncorrectState while the source is pending. The copy
+//     has the source's size, the request's Description and tags, and the
+//     volume ID vol-ffffffff, and it is independent of its source: deleting
+//     either leaves the other. It is encrypted if the source is or Encrypted
+//     is set; KmsKeyId, PresignedUrl and DestinationRegion are accepted and
+//     ignored, and Outpost, Local Zone and time-based copies are not
+//     supported.
 //   - CreateTags and DeleteTags work on instances, volumes, snapshots,
 //     images, placement groups (by group ID), network interfaces and Elastic
 //     IP addresses, and change nothing unless every resource exists.
@@ -270,6 +281,7 @@ func New(opts ...Option) *Server {
 		"CreateSnapshot":            {s.createSnapshotTarget, s.createSnapshot},
 		"DescribeSnapshots":         {collection("snapshots"), s.describeSnapshots},
 		"DeleteSnapshot":            {named("SnapshotId"), s.deleteSnapshot},
+		"CopySnapshot":              {s.createSnapshotTarget, s.copySnapshot},
 		"CreatePlacementGroup":      {named("GroupName"), s.createPlacementGroup},
 		"DescribePlacementGroups":   {collection("placement-groups"), s.describePlacementGroups},
 		"DeletePlacementGroup":      {named("GroupName"), s.deletePlacementGroup},
