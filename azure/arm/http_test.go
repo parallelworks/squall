@@ -348,3 +348,64 @@ func TestOutboundRulesAreChecked(t *testing.T) {
 		t.Fatalf("default allocation for an empty pool = %v, want 1024", got)
 	}
 }
+
+// A disk change in progress answers 202 with the disk, showing Updating even
+// as it is created, and both polling URLs on one DiskOperations path, the
+// Location URL adding monitor=true; the operation's status carries the disk
+// as its output once done, and the Location URL answers 200 with the disk.
+func TestDiskShapes(t *testing.T) {
+	s := arm.New(arm.WithSettleAfter(-1))
+	newGroup(t, s)
+	const disk = groupPath + "/providers/Microsoft.Compute/disks/d"
+	rec, body := do(t, s, http.MethodPut, disk, `{"location":"eastus","sku":{"name":"Premium_LRS"},"properties":{"creationData":{"createOption":"Empty"},"diskSizeGB":10}}`)
+	status, location := rec.Header().Get("Azure-AsyncOperation"), rec.Header().Get("Location")
+	if rec.Code != http.StatusAccepted || !strings.HasPrefix(status, "http://example.com/subscriptions/s/providers/Microsoft.Compute/locations/eastus/DiskOperations/") ||
+		location != status+"&monitor=true" || body["properties"].(map[string]any)["provisioningState"] != "Updating" {
+		t.Fatalf("create = %d %v %v", rec.Code, rec.Header(), body)
+	}
+	u, _ := url.Parse(status)
+	if _, op := do(t, s, http.MethodGet, u.RequestURI(), ""); op["status"] != "InProgress" || op["properties"] != nil {
+		t.Fatalf("operation in progress = %v", op)
+	}
+	s.Settle()
+	_, op := do(t, s, http.MethodGet, u.RequestURI(), "")
+	output, _ := op["properties"].(map[string]any)["output"].(map[string]any)
+	if op["status"] != "Succeeded" || output["name"] != "d" || output["sku"].(map[string]any)["tier"] != "Premium" {
+		t.Fatalf("operation done = %v", op)
+	}
+	u, _ = url.Parse(location)
+	if rec, got := do(t, s, http.MethodGet, u.RequestURI(), ""); rec.Code != http.StatusOK || got["name"] != "d" ||
+		got["properties"].(map[string]any)["diskState"] != "Unattached" {
+		t.Fatalf("Location poll = %d %v", rec.Code, got)
+	}
+	rec, _ = do(t, s, http.MethodDelete, disk, "")
+	if rec.Code != http.StatusAccepted || !strings.Contains(rec.Header().Get("Location"), "/DiskOperations/") {
+		t.Fatalf("delete = %d %v", rec.Code, rec.Header())
+	}
+}
+
+// A gallery create answers 201 with only an Azure-AsyncOperation URL under
+// capsOperations, and its deletion 202 with a Location URL on the same path
+// adding monitor=true, which answers 200 with no body once done.
+func TestGalleryShapes(t *testing.T) {
+	s := arm.New(arm.WithSettleAfter(-1))
+	newGroup(t, s)
+	const gallery = groupPath + "/providers/Microsoft.Compute/galleries/g"
+	rec, body := do(t, s, http.MethodPut, gallery, `{"location":"eastus"}`)
+	props, _ := body["properties"].(map[string]any)
+	if rec.Code != http.StatusCreated || !strings.Contains(rec.Header().Get("Azure-AsyncOperation"), "/providers/Microsoft.Compute/locations/eastus/capsOperations/") ||
+		rec.Header().Get("Location") != "" || props["provisioningState"] != "Creating" || fmt.Sprint(props["identifier"]) != "map[uniqueName:s-G]" {
+		t.Fatalf("create = %d %v %v", rec.Code, rec.Header(), body)
+	}
+	s.Settle()
+	rec, _ = do(t, s, http.MethodDelete, gallery, "")
+	location := rec.Header().Get("Location")
+	if rec.Code != http.StatusAccepted || location != rec.Header().Get("Azure-AsyncOperation")+"&monitor=true" {
+		t.Fatalf("delete = %d %v", rec.Code, rec.Header())
+	}
+	s.Settle()
+	u, _ := url.Parse(location)
+	if rec, _ := do(t, s, http.MethodGet, u.RequestURI(), ""); rec.Code != http.StatusOK || rec.Body.Len() != 0 {
+		t.Fatalf("Location poll = %d %q", rec.Code, rec.Body)
+	}
+}

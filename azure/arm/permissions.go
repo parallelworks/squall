@@ -79,10 +79,25 @@ var linkedActions = map[string][]link{
 			"properties.virtualMachineProfile.networkProfile.networkInterfaceConfigurations.[].properties.ipConfigurations.[].properties.loadBalancerBackendAddressPools.[].id"),
 		linkAt(imageRead, "properties.virtualMachineProfile.storageProfile.imageReference.id"),
 	},
+	"Microsoft.Compute/snapshots/write": {
+		linkAt(diskAccess, "properties.creationData.sourceResourceId"),
+	},
 }
 
 // imageRead stands for the read action on an image ID, which depends on whether it names a managed image or a gallery image version.
 const imageRead = "image read"
+
+// diskAccess stands for the action a snapshot's source needs: a source disk
+// needs Microsoft.Compute/disks/beginGetAccess/action, and a source snapshot
+// nothing the server checks.
+const diskAccess = "disk access"
+
+func diskAccessAction(id string) string {
+	if strings.Contains(strings.ToLower(id), "/providers/microsoft.compute/disks/") {
+		return "Microsoft.Compute/disks/beginGetAccess/action"
+	}
+	return ""
+}
 
 func imageAction(id string) string {
 	if strings.Contains(strings.ToLower(id), "/providers/microsoft.compute/galleries/") {
@@ -123,6 +138,11 @@ func needs(rt *route, r *http.Request) (string, []scoped) {
 				a = imageAction(id)
 			case approvalAction:
 				a = connectionApproval(id)
+			case diskAccess:
+				a = diskAccessAction(id)
+			}
+			if a == "" {
+				continue
 			}
 			if !slices.Contains(linked, scoped{a, id}) {
 				linked = append(linked, scoped{a, id})

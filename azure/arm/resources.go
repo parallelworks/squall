@@ -66,6 +66,9 @@ type resource struct {
 	vnet    *vnetState
 	subnet  *subnetState
 	lb      *lbState
+	disk    *diskState
+	snap    *snapState
+	version *versionState
 	// held is the subnet address of a resource that takes one of its own,
 	// such as a NetApp volume.
 	held *heldAddress
@@ -315,12 +318,24 @@ func envelope(res *resource) (map[string]any, map[string]any) {
 // finishes, then Succeeded; done, when set, applies the rest of the effect.
 // The caller holds s.mu.
 func (s *Server) change(c *call, res *resource, paths opPaths, resultStatus int, state string, done func()) *operation {
-	op := s.begin(c, paths, resultStatus, func() *apiError {
-		res.state, res.pending = stateSucceeded, nil
+	return s.changeOr(c, res, paths, resultStatus, state, func() *apiError {
 		if done != nil {
 			done()
 		}
 		return nil
+	})
+}
+
+// changeOr is change whose done returns the error the operation ends in, if
+// any, which leaves res Failed. The caller holds s.mu.
+func (s *Server) changeOr(c *call, res *resource, paths opPaths, resultStatus int, state string, done func() *apiError) *operation {
+	op := s.begin(c, paths, resultStatus, func() *apiError {
+		res.state, res.pending = stateSucceeded, nil
+		err := done()
+		if err != nil {
+			res.state = stateFailed
+		}
+		return err
 	})
 	op.target, op.state = res.id, state
 	if op.status == opInProgress {
@@ -356,6 +371,9 @@ func (s *Server) remove(res *resource) {
 		delete(s.publicIPs, res.pip.address)
 	case res.vm != nil:
 		s.detachNICs(res, true)
+		s.releaseOSDisk(res)
+	case res.snap != nil:
+		s.failCopiesOf(res)
 	case res.scale != nil:
 		for _, inst := range res.scale.instances {
 			s.releaseInstance(inst)

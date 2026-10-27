@@ -189,9 +189,10 @@ func (s *Server) deleteNetApp(l *netappLevel) handler {
 	}
 }
 
-// netappInUse fails the deletion of a NetApp account or capacity pool that
-// still holds pools or volumes. The caller holds s.mu.
-func (s *Server) netappInUse(res *resource) *apiError {
+// nestedInUse fails the deletion of a resource that still holds others, such
+// as a NetApp account or capacity pool that holds pools or volumes, or a
+// gallery that holds image definitions. The caller holds s.mu.
+func (s *Server) nestedInUse(res *resource) *apiError {
 	prefix := key(res.id) + "/"
 	for k := range s.resources {
 		if strings.HasPrefix(k, prefix) {

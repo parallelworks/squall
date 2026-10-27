@@ -181,12 +181,24 @@ func (s *Server) observer() func(*operation) {
 }
 
 // Settle finishes every operation in progress, with the effects finishing
-// has, such as a VM reaching running or a deleted resource group going away.
+// has, such as a VM reaching running or a deleted resource group going away,
+// and takes one step of each snapshot copy that was already running.
 func (s *Server) Settle() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var copies []*resource
+	for _, res := range s.resources {
+		if copying(res) {
+			copies = append(copies, res)
+		}
+	}
 	for op := range s.pending {
 		s.finish(op)
+	}
+	for _, res := range copies {
+		if copying(res) {
+			s.stepCopy(res)
+		}
 	}
 }
 

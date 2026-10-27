@@ -24,7 +24,7 @@ failure replays from its seed.
 | [`access`](https://pkg.go.dev/github.com/parallelworks/squall/access) | Grants a set of permissions (Google Cloud IAM permissions, AWS IAM actions or Azure RBAC actions) and refuses calls that need one it lacks, with the error the cloud answers, including those a request's fields add and Azure's linked checks. Reports which permissions were needed but missing and which were granted but never used. |
 | [`aws/ec2`](https://pkg.go.dev/github.com/parallelworks/squall/aws/ec2) | Amazon EC2: instances (run with client tokens, describe with filters and pages, start, stop, terminate, change type), images (describe, register from snapshots, deregister), instance types, EBS volumes (create, describe, attach, detach, delete), EBS snapshots (create, describe with filters and pages, delete), placement groups, tags, Elastic IP addresses (allocate, describe, release, associate with an interface or instance, disassociate) and network interfaces (create with client tokens, describe, delete). |
 | [`aws/s3`](https://pkg.go.dev/github.com/parallelworks/squall/aws/s3) | Amazon S3: general purpose buckets (create, head, list with pages and filters, delete), their tags, versioning, policy and CORS rules, and objects (put, delete one or many, list versions and delete markers). |
-| [`azure/arm`](https://pkg.go.dev/github.com/parallelworks/squall/azure/arm) | Azure Resource Manager: resource groups (get, create or update, list with tag filters, delete with everything in them that nothing outside uses), virtual machines (create or update, get, list, instance view, deallocate, start, delete), Uniform scale sets (create or update, update, get, list, delete, delete instances) and their VMs, virtual networks and their subnets, NAT gateways, public load balancers with backend pools and outbound rules, network security groups, network interfaces and public IP addresses, the IP configurations of scale set VMs, private DNS zones, virtual network links and A record sets, and long-running operations to poll. |
+| [`azure/arm`](https://pkg.go.dev/github.com/parallelworks/squall/azure/arm) | Azure Resource Manager: resource groups (get, create or update, list with tag filters, delete with everything in them that nothing outside uses), virtual machines (create or update, get, list, instance view, deallocate, start, delete), Uniform scale sets (create or update, update, get, list, delete, delete instances) and their VMs, managed disks (VM OS disks included) and snapshots, with cross-region incremental snapshot copies whose completionPercent climbs to 100, Azure Compute Gallery galleries, image definitions and image versions with their replication status, virtual networks and their subnets, NAT gateways, public load balancers with backend pools and outbound rules, network security groups, network interfaces and public IP addresses, the IP configurations of scale set VMs, private DNS zones, virtual network links and A record sets, and long-running operations to poll. |
 | [`azure/graph`](https://pkg.go.dev/github.com/parallelworks/squall/azure/graph) | Microsoft Graph: a directory's domains (list) and users (create with Microsoft Entra's name and password rules, get by ID or user principal name, delete), with application permissions checked as Graph documents them. |
 | [`gcp/compute`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/compute) | Compute Engine: instances (bulkInsert, insert, get, list, aggregatedList, delete, stop, start, setLabels, setMachineType, addAccessConfig, attachDisk, detachDisk), disks (get, list, aggregatedList, insert, delete), snapshots (insert, get, list, delete), zones, regional addresses (get, list, insert, delete, setLabels), resource policies, instance templates, routes, and zone, region and global operations (get, wait). |
 | [`gcp/storage`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/storage) | Cloud Storage: buckets (insert, get, list, patch labels, versioning and CORS, delete) and objects (multipart and media uploads, list with versions, delete by generation). |
@@ -264,7 +264,7 @@ For Azure Resource Manager:
   within the subnet ID, and public ones from 100.64.0.0/10, assigned when
   created; `WithPrivateRange` and `WithPublicRange` change the ranges. Once a
   range is used up, a change that needs an address fails with `SubnetIsFull` or
-  `PublicIPCountLimitReached`. OS disks get names and IDs but are not served.
+  `PublicIPCountLimitReached`.
 - A public load balancer's outbound rule gives SNAT ports in multiples of 8
   (`SpecifiedAllocatedOutboundPortsForOutboundRuleIsNotAMultipleOfEight`), and
   the write that would ask more of its frontends than 64,000 ports per public
@@ -275,6 +275,43 @@ For Azure Resource Manager:
   pool. A load balancer whose pool a scale set uses cannot be deleted
   (`LoadBalancerInUseByVirtualMachineScaleSet`). Load balancing rules, probes
   and inbound NAT rules are not modeled.
+- A disk or snapshot change in progress answers 202 with the resource, showing
+  `Updating` even while it is created, and polling URLs under
+  `locations/{location}/DiskOperations`, the Location URL adding
+  `monitor=true`; once done, the status carries the resource as
+  `properties.output`. That a delete is polled the same way is inferred.
+- A VM made from an image makes its OS disk a served disk, `Attached` and
+  managed by the VM, `Reserved` while the VM is deallocated. Deleting the VM
+  deletes the disk when its `deleteOption` is `Delete` and detaches it
+  otherwise. Its default SKU and size, `Standard_LRS` and 30 GB, are inferred.
+  An attached disk cannot be deleted (409 `OperationNotAllowed`). Data disks
+  and scale set VM disks are not modeled.
+- A copy from a disk or snapshot that is missing or in another location fails
+  with 404 `NotFound`. An in-region `Copy` snapshot shows no
+  `completionPercent`. An incremental `CopyStart` copy, in any location,
+  succeeds while its background copy goes on: `completionPercent` climbs from
+  0 to 100 in `WithCopySteps` steps (2 by default: 50, then 100), one per get
+  of the snapshot (unless `WithSettleAfter` is negative) or per `Settle`, a
+  pace the stand-in sets. Using it as a source
+  before then fails with 409 `Conflict` "Source incremental snapshot {name}
+  copy is still in progress", as Azure answers a disk; for a snapshot or image
+  version it is inferred. One copy of a disk's snapshots runs at a time (409
+  `Conflict`, message inferred). Deleting the source mid-copy succeeds and the
+  copy shows `copyCompletionError` `CopySourceNotFound`; its message is
+  inferred. Copy order and the ZRS default for incremental snapshots are not
+  modeled.
+- Galleries, image definitions and image versions are polled under
+  `locations/{location}/capsOperations`. A version is `Creating`, then
+  `Succeeded`; `$expand=ReplicationStatus` shows each target region's state.
+  A version from a copy still in progress is accepted and ends `Failed`, its
+  operation and replication status giving the copy's `Conflict`, which is
+  inferred. A missing source fails with 400 `InvalidParameter`, the code
+  inferred. Deleting a gallery or image definition that holds others fails
+  with 409 `CannotDeleteResource`, the code inferred. Replication, sharing and
+  soft deletion are not modeled.
+- A snapshot of a disk needs `Microsoft.Compute/disks/beginGetAccess/action`
+  on the disk, or fails with `LinkedAuthorizationFailed`; linked checks on
+  other disk, snapshot and gallery sources are not modeled.
 - Scale set VMs are numbered from 0 without reuse; raising `sku.capacity`
   creates them with their interfaces and addresses, and lowering it deletes the
   newest. A PUT to an existing scale set that leaves out `sku` keeps the

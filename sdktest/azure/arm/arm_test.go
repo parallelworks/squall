@@ -55,6 +55,11 @@ type clients struct {
 	sets        *armcompute.VirtualMachineScaleSetsClient
 	setVMs      *armcompute.VirtualMachineScaleSetVMsClient
 	skus        *armcompute.ResourceSKUsClient
+	disks       *armcompute.DisksClient
+	snapshots   *armcompute.SnapshotsClient
+	galleries   *armcompute.GalleriesClient
+	images      *armcompute.GalleryImagesClient
+	versions    *armcompute.GalleryImageVersionsClient
 	nics        *armnetwork.InterfacesClient
 	pips        *armnetwork.PublicIPAddressesClient
 	nsgs        *armnetwork.SecurityGroupsClient
@@ -175,6 +180,8 @@ func setupWith(t *testing.T, retry policy.RetryOptions, opts ...arm.Option) *cli
 		server: s, groups: resources.NewResourceGroupsClient(),
 		vms: compute.NewVirtualMachinesClient(), sets: compute.NewVirtualMachineScaleSetsClient(),
 		setVMs: compute.NewVirtualMachineScaleSetVMsClient(), skus: compute.NewResourceSKUsClient(),
+		disks: compute.NewDisksClient(), snapshots: compute.NewSnapshotsClient(), galleries: compute.NewGalleriesClient(),
+		images: compute.NewGalleryImagesClient(), versions: compute.NewGalleryImageVersionsClient(),
 		nics: network.NewInterfacesClient(), pips: network.NewPublicIPAddressesClient(), nsgs: network.NewSecurityGroupsClient(),
 		vnets: network.NewVirtualNetworksClient(), subnets: network.NewSubnetsClient(), nats: network.NewNatGatewaysClient(),
 		lbs:   network.NewLoadBalancersClient(),
@@ -202,7 +209,7 @@ func (r recorder) Do(req *policy.Request) (*http.Response, error) {
 func (c *clients) polls() int {
 	n := 0
 	for _, r := range *c.requests {
-		if r := strings.ToLower(r); strings.Contains(r, "/operations/") || strings.Contains(r, "operationresults/") ||
+		if r := strings.ToLower(r); strings.Contains(r, "operations/") || strings.Contains(r, "operationresults/") ||
 			strings.Contains(r, "operationstatuses/") {
 			n++
 		}

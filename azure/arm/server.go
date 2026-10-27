@@ -30,6 +30,11 @@
 //     or update, update, get, list in a group, delete and delete instances,
 //     and their VMs (list, get);
 //   - Microsoft.Compute resource SKUs: list, which lists none;
+//   - Microsoft.Compute managed disks and snapshots: create or update, get,
+//     list in a group and delete;
+//   - Microsoft.Compute galleries, their image definitions and image
+//     versions: create or update, get, list in their group, gallery or image
+//     definition, and delete;
 //   - Microsoft.Storage: storage accounts (create, get, list in a group or
 //     subscription, list keys and delete), name availability checks, the
 //     blob and file services' properties (set and get), and blob containers
@@ -199,9 +204,96 @@
 //     its subnet's prefix. Network security groups list no default rules.
 //   - A virtual machine takes existing network interfaces only, not
 //     networkInterfaceConfigurations. Its OS disk gets a name and a managed
-//     disk ID, with the group's name upper-cased as Azure writes it, but disks
-//     are not served. Deleting it deletes the interfaces whose deleteOption is
-//     Delete and detaches the rest.
+//     disk ID, with the group's name upper-cased as Azure writes it. Deleting
+//     it deletes the interfaces whose deleteOption is Delete and detaches the
+//     rest.
+//   - A VM made from an image makes its OS disk a managed disk, Attached and
+//     managed by the VM, and Reserved while the VM is deallocated, as Azure
+//     documents those states. Its SKU is the OS disk's storageAccountType and
+//     its size the OS disk's diskSizeGB, or Standard_LRS and 30 GB, which are
+//     inferred. Deleting the VM deletes the disk when the OS disk's
+//     deleteOption is Delete and detaches it otherwise. A VM that attaches an
+//     OS disk the server holds (createOption Attach) attaches it, and fails
+//     with 409 OperationNotAllowed when another VM has it, inferred from how
+//     Azure refuses to delete an attached disk; one the server does not hold
+//     is recorded, not checked. Deleting an attached disk fails with 409
+//     OperationNotAllowed, naming the VM. Data disks, and the OS disks of
+//     scale set VMs, are not modeled.
+//   - A disk or snapshot change in progress answers 202 with the resource,
+//     which shows Updating even while it is created, and an
+//     Azure-AsyncOperation URL under
+//     Microsoft.Compute/locations/{location}/DiskOperations with a Location
+//     URL, the same path with monitor=true; one that finishes at once answers
+//     200. Once a change succeeds its status carries the resource as
+//     properties.output and the Location URL answers 200 with it, as Azure
+//     answers. That a delete is polled the same way is inferred. A disk takes
+//     createOption Empty, which needs diskSizeGB, Copy from a disk or
+//     snapshot, or FromImage, which is recorded, not checked; a snapshot takes
+//     Copy from a disk or snapshot, or CopyStart. A copy takes its source's
+//     diskSizeGB, as Azure shows, and osType, hyperVGeneration and
+//     supportedCapabilities, which is inferred, unless it gives them. A source
+//     that does not exist or is in another location fails with 404 NotFound,
+//     as Azure answers a copy from another region. Disks take the SKUs the API
+//     lists and snapshots Standard_LRS, Premium_LRS and Standard_ZRS; another
+//     fails with InvalidParameter, and none gives Standard_LRS, both inferred.
+//     Azure gives an incremental snapshot Standard_ZRS in a region that offers
+//     it; that, and which regions offer ZRS, are not modeled. The SKU's tier
+//     is its first part, such as Premium for Premium_LRS. An update that
+//     changes creationData fails with PropertyChangeNotAllowed, which is
+//     inferred. Incremental snapshots of one disk share an
+//     incrementalSnapshotFamilyId, and a CopyStart copy has its own.
+//   - A CopyStart snapshot copies an incremental snapshot, in its location or
+//     another, as Microsoft documents. It is incremental: leaving incremental
+//     out makes it so, as Microsoft's example of the call leaves it out, and
+//     false, or a full snapshot as the source, fails with InvalidParameter,
+//     which is inferred. Its operation succeeds while its background copy
+//     goes on: completionPercent reads 0, then 50, then 100, and
+//     snapshotAccessState Pending, then Available at 100. The copy takes a
+//     step on each get of the snapshot once its operation is done, unless
+//     [WithSettleAfter] is negative, and on each [Server.Settle] that finds it
+//     copying, so it completes two Settle calls after its operation; the
+//     steps are inferred. A disk or snapshot copied from it before then fails
+//     with 409 Conflict, "Source incremental snapshot {name} copy is still in
+//     progress", as Azure answers a disk; for a snapshot it is inferred. A
+//     second CopyStart of a snapshot of the same disk while one copies fails
+//     with 409 Conflict, as Microsoft documents copying one at a time; its
+//     message is inferred. That copies must follow the order the snapshots
+//     were made in is not modeled. Deleting the source while it copies
+//     succeeds and ends the copy with copyCompletionError CopySourceNotFound,
+//     the code the API defines for it; the error message is inferred.
+//   - A gallery, image definition or image version create answers 201, and an
+//     update 200, with an Azure-AsyncOperation URL under
+//     Microsoft.Compute/locations/{location}/capsOperations; a delete in
+//     progress answers 202 with a Location URL as well, the same path with
+//     monitor=true, which answers 200 with no body once it is done. A
+//     gallery's identifier.uniqueName is {subscription}-{NAME}. An image
+//     definition needs osType, osState and identifier, and its architecture
+//     is x64 unless set; changing its osType, osState, hyperVGeneration or
+//     identifier fails with 409 PropertyChangeNotAllowed, naming
+//     galleryImage.properties.{name} as Microsoft documents. Deleting a
+//     gallery or image definition that holds others fails with 409
+//     CannotDeleteResource, with the message Microsoft documents; the code is
+//     inferred.
+//   - An image version's name must be Major.Minor.Patch. It takes either
+//     storageProfile.source.id, a VM or another version that must exist, or a
+//     managed image, recorded, not checked, or disks and snapshots in its
+//     location as the sources of osDiskImage and dataDiskImages; its
+//     targetRegions must include its location. Breaking these fails with 400
+//     InvalidParameter and the messages Microsoft documents; the code is
+//     inferred. A version is Creating until its operation is done, then
+//     Succeeded, its osDiskImage showing its source's size. One whose source
+//     snapshot's copy has not completed is accepted and ends Failed, its
+//     operation failing with the Conflict a disk would get; with
+//     $expand=ReplicationStatus each target region shows Failed with "Replication
+//     failed in this region due to '{message}'.", as Microsoft documents
+//     replication failures. That it is accepted rather than refused is
+//     inferred. Its publishingProfile shows replicaCount 1, storageAccountType
+//     Standard_LRS and excludeFromLatest false unless set, and each target
+//     region regionalReplicaCount and storageAccountType from it, as Azure
+//     shows them; target regions keep the names the caller sent, where Azure
+//     shows display names such as West US. Replication between regions,
+//     sharing, soft deletion, checking a version's source against its image
+//     definition, and VMs made from a version are not modeled.
 //   - A scale set's VMs are numbered from 0 and never reuse a number. Raising
 //     sku.capacity creates VMs, each with the network interfaces and public
 //     IP addresses its profile describes; lowering it deletes the newest,
@@ -362,9 +454,15 @@
 // Microsoft.Storage/storageAccounts/privateEndpointConnectionsApproval/action,
 // which Azure documents as needed for automatic approval; that it refuses
 // the create without it, rather than leaving the connection pending, is
-// inferred from the LinkedAuthorizationFailed it reports for other services. Polling a Microsoft.Compute
+// inferred from the LinkedAuthorizationFailed it reports for other services. A
+// snapshot whose source is a disk needs
+// Microsoft.Compute/disks/beginGetAccess/action on the disk, as Azure reports
+// it; the linked checks of a disk copied from a snapshot, a CopyStart and an
+// image version's sources are not modeled. Polling a Microsoft.Compute
 // operation result needs Microsoft.Compute/locations/operations/read, as
-// Microsoft.Compute defines no operationResults action, and polling a
+// Microsoft.Compute defines no operationResults action, a disk operation
+// Microsoft.Compute/locations/diskOperations/read and a gallery operation
+// Microsoft.Compute/locations/capsOperations/read, and polling a
 // Microsoft.Storage operation needs Microsoft.Storage/operations/read, and
 // polling a Microsoft.NetApp one needs
 // Microsoft.NetApp/locations/operationresults/read, a Microsoft.StorageCache
@@ -409,6 +507,7 @@ const (
 	stateCreating  = "Creating"
 	stateUpdating  = "Updating"
 	stateDeleting  = "Deleting"
+	stateFailed    = "Failed"
 )
 
 // Server is a stand-in for Azure Resource Manager. Create one with [New]. It
@@ -418,6 +517,7 @@ type Server struct {
 	policy      *access.Policy
 	now         func() time.Time
 	settleAfter int
+	copySteps   int
 	routes      []route
 
 	mu         sync.Mutex
@@ -458,10 +558,19 @@ func WithSettleAfter(n int) Option {
 	return func(s *Server) { s.settleAfter = n }
 }
 
+// WithCopySteps sets how many steps a CopyStart snapshot's background copy
+// takes to reach a completionPercent of 100. It takes a step on each read of
+// the snapshot once its operation is done, and on each [Server.Settle]. The
+// default is 2.
+func WithCopySteps(n int) Option {
+	return func(s *Server) { s.copySteps = max(n, 1) }
+}
+
 // New returns an empty server.
 func New(opts ...Option) *Server {
 	s := &Server{
 		now:        time.Now,
+		copySteps:  2,
 		groups:     map[string]*group{},
 		resources:  map[string]*resource{},
 		ops:        map[string]*operation{},
@@ -591,6 +700,8 @@ func (s *Server) registerRoutes() {
 	s.add("GET", ipConfig+"/publicIPAddresses/{pip}", vmssKind.action("virtualMachines/networkInterfaces/ipConfigurations/publicIPAddresses/read"), false, s.getInstancePublicIP)
 
 	s.add("GET", sub+"/providers/Microsoft.Compute/skus", "Microsoft.Compute/skus/read", false, s.listSKUs)
+	s.registerDiskRoutes()
+	s.registerGalleryRoutes()
 	s.registerStorageRoutes()
 	s.registerNetAppRoutes()
 	s.registerStorageCacheRoutes()
