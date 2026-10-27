@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.0](https://github.com/parallelworks/squall/compare/v0.18.0...v0.19.0) (2026-10-27)
+
+
+### Features
+
+* **azure:** VM extensions ([#54](https://github.com/parallelworks/squall/issues/54)) ([551befc](https://github.com/parallelworks/squall/commit/551befc4881a9e604b46301b0e02b8b73585afda))
+
 ## [0.18.0](https://github.com/parallelworks/squall/compare/v0.17.0...v0.18.0) (2026-10-27)
 
 
