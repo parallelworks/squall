@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.0](https://github.com/parallelworks/squall/compare/v0.17.0...v0.18.0) (2026-10-27)
+
+
+### Features
+
+* **azure:** managed disks, snapshots with cross-region copies, and Azure Compute Gallery images ([#48](https://github.com/parallelworks/squall/issues/48)) ([8cf70f3](https://github.com/parallelworks/squall/commit/8cf70f382a70c9b8b624192728be32bba7f673fa))
+
 ## [0.17.0](https://github.com/parallelworks/squall/compare/v0.16.0...v0.17.0) (2026-10-26)
 
 
