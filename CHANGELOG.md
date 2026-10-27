@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.0](https://github.com/parallelworks/squall/compare/v0.20.0...v0.21.0) (2026-10-27)
+
+
+### Features
+
+* **azure:** resource providers and Cost Management exports ([#60](https://github.com/parallelworks/squall/issues/60)) ([1733687](https://github.com/parallelworks/squall/commit/173368705b0cc9f1ebaa885a678752a4e7f98937))
+
 ## [0.20.0](https://github.com/parallelworks/squall/compare/v0.19.0...v0.20.0) (2026-10-27)
 
 
