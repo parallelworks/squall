@@ -212,6 +212,11 @@ func (s *Server) putVM(c *call) (*reply, *apiError) {
 			return nil, nicInUse(target.name, vm)
 		}
 	}
+	if status == http.StatusCreated {
+		if d := s.settled(refID(b.osDisk, "managedDisk")); d != nil && d.disk != nil && d.disk.vm != "" {
+			return nil, diskAttached(d.name, d.disk.vm)
+		}
+	}
 	render := func() []byte { return encode(s.renderVM(res, "")) }
 	paths := computeOps(c, b.location)
 	if c.opFault != nil {
@@ -322,7 +327,8 @@ func diskID(sub, group, name string) string {
 // applyVM records b as the body of res and attaches its interfaces. The caller holds s.mu.
 func (s *Server) applyVM(res *resource, b *vmBody) {
 	s.fillVM(res, b)
-	if res.vm == nil {
+	created := res.vm == nil
+	if created {
 		res.vm = &vmState{power: powerRunning, changed: s.now()}
 	}
 	s.detachNICs(res, false)
@@ -331,6 +337,9 @@ func (s *Server) applyVM(res *resource, b *vmBody) {
 		s.resources[key(n.id)].nic.vm = res.id
 	}
 	s.update(res, b.parsed)
+	if created {
+		s.attachOSDisk(res)
+	}
 }
 
 // detachNICs detaches the interfaces of the VM res, deleting those whose

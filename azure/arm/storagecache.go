@@ -17,7 +17,8 @@ var amlfsKind = &kind{
 
 const amlfs = rg + "/providers/Microsoft.StorageCache/amlFilesystems"
 
-// cacheMonitor is the query a StorageCache operation's Location URL adds to its path.
+// cacheMonitor is the query the Location URL of a StorageCache operation, or
+// of a Microsoft.Compute disk or gallery operation, adds to its path.
 const cacheMonitor = "monitor=true"
 
 func amlfsID(c *call) string { return resourceID(c, amlfsKind.typ, c.val("name")) }

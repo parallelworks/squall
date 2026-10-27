@@ -91,8 +91,16 @@ type putSpec struct {
 	// acceptedBody, when set, answers a change in progress with 202, this
 	// body and a Location URL as well, as private DNS and Storage do.
 	acceptedBody func() []byte
+	// acceptedRender answers a change in progress with 202, the resource and a
+	// Location URL as well, as Microsoft.Compute disks and snapshots do.
+	acceptedRender bool
 	// createdStatus answers a create that finishes at once, if not 201.
 	createdStatus int
+	// createState is the state a create in progress shows, if not Creating.
+	createState string
+	// finish, when set, ends the change once it is done, failing its
+	// operation with the error it returns, which leaves the resource Failed.
+	finish func(res *resource) *apiError
 	// bodyPolled answers a change in progress with no polling header, so the
 	// SDK polls the resource itself until its provisioningState ends, as
 	// Cognitive Services deployments and Search services are; paths is unused.
@@ -160,7 +168,7 @@ func (s *Server) put(spec putSpec) handler {
 		}
 		res, status, state := existing, http.StatusOK, stateUpdating
 		if res == nil {
-			res, status, state = s.newResource(c, spec.kind, id, p), cmp.Or(spec.createdStatus, http.StatusCreated), stateCreating
+			res, status, state = s.newResource(c, spec.kind, id, p), cmp.Or(spec.createdStatus, http.StatusCreated), cmp.Or(spec.createState, stateCreating)
 		}
 		commit := func() { s.update(res, p) }
 		if spec.prepare != nil {
@@ -179,6 +187,9 @@ func (s *Server) put(spec putSpec) handler {
 			if spec.acceptedBody != nil && op.status != opSucceeded {
 				return accepted(c, op, status, http.StatusAccepted, true, spec.acceptedBody)
 			}
+			if spec.acceptedRender {
+				return accepted(c, op, status, http.StatusAccepted, true, render)
+			}
 			return accepted(c, op, status, status, false, render)
 		}
 		var paths opPaths
@@ -195,7 +206,12 @@ func (s *Server) put(spec putSpec) handler {
 		if spec.sync {
 			return &reply{status: status, body: render()}, nil
 		}
-		op := s.change(c, res, paths, 0, state, nil)
+		op := s.changeOr(c, res, paths, 0, state, func() *apiError {
+			if spec.finish != nil {
+				return spec.finish(res)
+			}
+			return nil
+		})
 		op.result = render
 		return answer(op, render), nil
 	}
@@ -503,8 +519,12 @@ func (s *Server) checkUnused(res *resource) *apiError {
 		}
 	case lbKind:
 		return s.lbInUse(res)
-	case netappAccountKind, poolKind:
-		return s.netappInUse(res)
+	case netappAccountKind, poolKind, galleryKind, galleryImageKind:
+		return s.nestedInUse(res)
+	case diskKind:
+		if res.disk.vm != "" {
+			return diskAttached(res.name, res.disk.vm)
+		}
 	}
 	return nil
 }
