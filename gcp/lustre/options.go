@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
+	"math/big"
 	"net/netip"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -92,12 +95,41 @@ func (n *int32Value) UnmarshalJSON(b []byte) error {
 		*n = 0
 		return nil
 	}
-	v, err := strconv.ParseInt(strings.Trim(string(b), `"`), 10, 32)
+	v, err := parseInt(b)
 	if err != nil {
-		return fmt.Errorf("invalid int32 value %s", b)
+		return err
+	}
+	if v < math.MinInt32 || v > math.MaxInt32 {
+		return fmt.Errorf("integer %s is out of range", b)
 	}
 	*n = int32Value(v)
 	return nil
+}
+
+// jsonNumber is a JSON number, which protojson takes for an integer, quoted or not, when its value is whole.
+var jsonNumber = regexp.MustCompile(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]{1,3})?$`)
+
+// parseInt reads an int64 as protojson does, so 9e3 and "9000.0" are 9000 and +9000 is not a number.
+func parseInt(b []byte) (int64, error) {
+	s := string(b)
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		s = s[1 : len(s)-1]
+	}
+	if len(s) > 64 || !jsonNumber.MatchString(s) {
+		return 0, fmt.Errorf("invalid integer %s", b)
+	}
+	if !strings.ContainsAny(s, ".eE") {
+		v, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid integer %s", b)
+		}
+		return v, nil
+	}
+	r, ok := new(big.Rat).SetString(s)
+	if !ok || !r.IsInt() || !r.Num().IsInt64() {
+		return 0, fmt.Errorf("invalid integer %s", b)
+	}
+	return r.Num().Int64(), nil
 }
 
 // AccessRule is a group of client addresses with their own squash mode.

@@ -702,3 +702,62 @@ func TestSettleFinishesInCreationOrder(t *testing.T) {
 		}
 	}
 }
+
+func TestIntegersReadAsProtojsonReadsThem(t *testing.T) {
+	const fields = `"filesystem":"lfs","network":"projects/p/global/networks/n","perUnitStorageThroughput":1000,"capacityGib":`
+	for value, want := range map[string]int{
+		`9000`:     http.StatusOK,
+		`"9000"`:   http.StatusOK,
+		`9000.0`:   http.StatusOK,
+		`9e3`:      http.StatusOK,
+		`"9e3"`:    http.StatusOK,
+		`9.000E+3`: http.StatusOK,
+		`"+9000"`:  http.StatusBadRequest,
+		`"09000"`:  http.StatusBadRequest,
+		`9000.5`:   http.StatusBadRequest,
+		`" 9000"`:  http.StatusBadRequest,
+		`9e999`:    http.StatusBadRequest,
+		`"0x2328"`: http.StatusBadRequest,
+	} {
+		if code, out := create(t, lustre.New(), "a", `{`+fields+value+`}`); code != want {
+			t.Errorf("capacityGib %s = %d %v, want %d", value, code, out, want)
+		}
+	}
+	for value, want := range map[string]int{
+		`6.5534e4`:   http.StatusOK,
+		`"6.5534e4"`: http.StatusOK,
+		`2147483648`: http.StatusBadRequest,
+		`"+1"`:       http.StatusBadRequest,
+		`-0.5`:       http.StatusBadRequest,
+	} {
+		extra := `,"accessRulesOptions":{"defaultSquashMode":"ROOT_SQUASH","defaultSquashUid":` + value + `}`
+		if code, out := create(t, lustre.New(), "a", body(9_000, 1000, extra)); code != want {
+			t.Errorf("defaultSquashUid %s = %d %v, want %d", value, code, out, want)
+		}
+	}
+}
+
+func TestOldestOperationIsForgottenWithItsRequestID(t *testing.T) {
+	s := lustre.New()
+	const id = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
+	_, first := create(t, s, "a&requestId="+id, body(9_000, 1000, ""))
+	for i := range 10_000 {
+		if code, out := do(t, s, http.MethodPatch, instances+"/a?updateMask=description", fmt.Sprintf(`{"description":"%d"}`, i)); code != http.StatusOK {
+			t.Fatalf("patch %d = %d %v", i, code, out)
+		}
+	}
+	if code, _ := do(t, s, http.MethodGet, "/v1/"+first["name"].(string), ""); code != http.StatusNotFound {
+		t.Errorf("the oldest operation = %d, want 404 once 10,000 newer ones exist", code)
+	}
+	if code, out := create(t, s, "a&requestId="+id, body(9_000, 1000, "")); code != http.StatusConflict {
+		t.Errorf("create repeating the forgotten request ID = %d %v, want 409 rather than a replay", code, out)
+	}
+}
+
+func TestBodiesNestedTooDeeplyAreRejected(t *testing.T) {
+	deep := strings.Repeat("[", 101) + strings.Repeat("]", 101)
+	code, out := create(t, lustre.New(), "a", body(9_000, 1000, `,"labels":{"a":`+deep+`}`))
+	if msg, _ := out["error"].(map[string]any)["message"].(string); code != http.StatusBadRequest || !strings.Contains(msg, "nested too deeply") {
+		t.Errorf("create = %d %v, want 400 nested too deeply", code, out)
+	}
+}

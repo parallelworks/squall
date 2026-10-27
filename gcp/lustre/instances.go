@@ -8,7 +8,6 @@ import (
 	"maps"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -726,13 +725,9 @@ func (n *int64Value) UnmarshalJSON(b []byte) error {
 	if string(b) == "null" {
 		return nil
 	}
-	digits := b
-	if len(b) >= 2 && b[0] == '"' && b[len(b)-1] == '"' {
-		digits = b[1 : len(b)-1]
-	}
-	v, err := strconv.ParseInt(string(digits), 10, 64)
-	if err != nil || bytes.ContainsAny(digits, `"\`) {
-		return fmt.Errorf("invalid int64 value %s", b)
+	v, err := parseInt(b)
+	if err != nil {
+		return err
 	}
 	*n = int64Value(v)
 	return nil
