@@ -80,7 +80,9 @@ type putSpec struct {
 	id   func(c *call) string
 	// parent, when set, is the ID of the resource that must hold the new one.
 	parent func(c *call) string
-	paths  func(c *call, location string) opPaths
+	// parentMissing is the error a write answers when parent does not exist, if not parentNotFound.
+	parentMissing func(c *call) *apiError
+	paths         func(c *call, location string) opPaths
 	// precondition checks the If-Match and If-None-Match headers against the
 	// resource, which is nil when it does not exist. Nil is checkPrecondition.
 	precondition func(r *http.Request, existing *resource) *apiError
@@ -146,6 +148,9 @@ func (s *Server) put(spec putSpec) handler {
 		}
 		if spec.parent != nil {
 			if parent := spec.parent(c); s.settled(parent) == nil {
+				if spec.parentMissing != nil {
+					return nil, spec.parentMissing(c)
+				}
 				return nil, parentNotFound(spec.kind, parent)
 			}
 		}

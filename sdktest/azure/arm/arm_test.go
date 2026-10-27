@@ -52,6 +52,7 @@ type clients struct {
 	server      *arm.Server
 	groups      *armresources.ResourceGroupsClient
 	vms         *armcompute.VirtualMachinesClient
+	extensions  *armcompute.VirtualMachineExtensionsClient
 	sets        *armcompute.VirtualMachineScaleSetsClient
 	setVMs      *armcompute.VirtualMachineScaleSetVMsClient
 	skus        *armcompute.ResourceSKUsClient
@@ -178,7 +179,7 @@ func setupWith(t *testing.T, retry policy.RetryOptions, opts ...arm.Option) *cli
 	}
 	return &clients{
 		server: s, groups: resources.NewResourceGroupsClient(),
-		vms: compute.NewVirtualMachinesClient(), sets: compute.NewVirtualMachineScaleSetsClient(),
+		vms: compute.NewVirtualMachinesClient(), extensions: compute.NewVirtualMachineExtensionsClient(), sets: compute.NewVirtualMachineScaleSetsClient(),
 		setVMs: compute.NewVirtualMachineScaleSetVMsClient(), skus: compute.NewResourceSKUsClient(),
 		disks: compute.NewDisksClient(), snapshots: compute.NewSnapshotsClient(), galleries: compute.NewGalleriesClient(),
 		images: compute.NewGalleryImagesClient(), versions: compute.NewGalleryImageVersionsClient(),
