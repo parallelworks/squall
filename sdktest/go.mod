@@ -6,6 +6,8 @@ toolchain go1.27.3
 
 require (
 	cloud.google.com/go/compute v1.71.0
+	cloud.google.com/go/longrunning v1.2.0
+	cloud.google.com/go/lustre v1.3.0
 	cloud.google.com/go/storage v1.69.0
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.23.3
 	github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/applicationinsights/armapplicationinsights v1.2.0
@@ -32,6 +34,7 @@ require (
 	github.com/microsoftgraph/msgraph-sdk-go v1.104.0
 	github.com/parallelworks/squall v0.0.0
 	google.golang.org/api v0.301.0
+	google.golang.org/grpc v1.84.0
 )
 
 require (
@@ -100,7 +103,6 @@ require (
 	google.golang.org/genproto v0.0.0-20260715232425-e75dac1f907d // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260715232425-e75dac1f907d // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260928230214-8a89bd6388cc // indirect
-	google.golang.org/grpc v1.84.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
 )
 

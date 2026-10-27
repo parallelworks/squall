@@ -27,6 +27,7 @@ failure replays from its seed.
 | [`azure/arm`](https://pkg.go.dev/github.com/parallelworks/squall/azure/arm) | Azure Resource Manager: resource groups (get, create or update, list with tag filters, delete with everything in them that nothing outside uses), virtual machines (create or update, get, list, instance view, deallocate, start, delete), Uniform scale sets (create or update, update, get, list, delete, delete instances) and their VMs, managed disks (VM OS disks included) and snapshots, with cross-region incremental snapshot copies whose completionPercent climbs to 100, Azure Compute Gallery galleries, image definitions and image versions with their replication status, virtual networks and their subnets, NAT gateways, public load balancers with backend pools and outbound rules, network security groups, network interfaces and public IP addresses, the IP configurations of scale set VMs, private DNS zones, virtual network links and A record sets, and long-running operations to poll. |
 | [`azure/graph`](https://pkg.go.dev/github.com/parallelworks/squall/azure/graph) | Microsoft Graph: a directory's domains (list) and users (create with Microsoft Entra's name and password rules, get by ID or user principal name, delete), with application permissions checked as Graph documents them. |
 | [`gcp/compute`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/compute) | Compute Engine: instances (bulkInsert, insert, get, list, aggregatedList, delete, stop, start, setLabels, setMachineType, addAccessConfig, attachDisk, detachDisk), disks (get, list, aggregatedList, insert, delete), snapshots (insert, get, list, delete), zones, regional addresses (get, list, insert, delete, setLabels), resource policies, instance templates, routes, and zone, region and global operations (get, wait). |
+| [`gcp/lustre`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/lustre) | Managed Lustre: instances (create with the API's capacity, tier, ID and filesystem rules, get, list with label and state filters, patch labels and capacity, delete) and their long-running operations (get, list, delete, cancel). |
 | [`gcp/storage`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/storage) | Cloud Storage: buckets (insert, get, list, patch labels, versioning and CORS, delete) and objects (multipart and media uploads, list with versions, delete by generation). |
 
 Coverage grows with use: each stand-in implements the methods someone needed,
@@ -132,6 +133,28 @@ it simplifies, the package documentation says so. For Compute Engine:
 - A fault rule's `Resource` for an insert is the resource being created, so a
   rule can target the insert of one name; for a `bulkInsert`, the first
   instance it names.
+
+For Managed Lustre:
+
+- Creates, patches and deletes finish before the call that makes them returns,
+  so the SDK's `Wait` returns at once. `WithSettleAfter(n)` keeps the instance
+  `CREATING`, `UPDATING` or `DELETING`, with its operation not done, for `n`
+  more reads of it or its operation, or until the test calls `Settle`. The v1
+  API has no `FAILED` state: a failed create ends its operation in an error and
+  leaves no instance.
+- Instance IDs, filesystem names, networks, labels and root squash options are
+  checked as the API documents them, and `capacityGib` against its throughput
+  tier's minimum, maximum and step, the step growing above the tier's
+  threshold. Locations are not checked, and networks, KMS keys and quotas are
+  not looked up. A mount point's address comes from 10.0.0.0/8.
+- List filters follow AIP-160 for `name`, `state`, `filesystem`, `network`,
+  `description` and labels (`labels.KEY = value`, `labels.KEY:*`,
+  `labels:KEY`), with AND, OR, NOT and parentheses; anything else is rejected
+  with 400. A patch needs an `updateMask` of labels, description,
+  gkeSupportEnabled or capacityGib. Error messages are the stand-in's own.
+- Fault method names are the API's method IDs, such as
+  `lustre.projects.locations.instances.create`, and a rule's `Resource` is the
+  path below `/v1/`, for a create the instance it makes.
 
 For Amazon EC2:
 

@@ -38,8 +38,9 @@ bench: ## Run benchmarks
 	go test -run '^$$' -bench . -benchmem ./...
 
 .PHONY: fuzz
-fuzz: ## Fuzz the filter parser and the bucket servers for a minute each
+fuzz: ## Fuzz the filter parsers and the bucket servers for a minute each
 	go test -run '^$$' -fuzz '^FuzzParseFilter$$' -fuzztime 60s ./gcp/compute/
+	go test -run '^$$' -fuzz '^FuzzParseFilter$$' -fuzztime 60s ./gcp/lustre/
 	go test -run '^$$' -fuzz '^FuzzServeHTTP$$' -fuzztime 60s ./aws/s3/
 	go test -run '^$$' -fuzz '^FuzzServeHTTP$$' -fuzztime 60s ./gcp/storage/
 
