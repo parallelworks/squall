@@ -420,6 +420,27 @@ func (s *Server) listed(c *call, k *kind) []*resource {
 	return out
 }
 
+// listedInSubscription returns the resources of kind k in the call's
+// subscription, ordered by ID, counting the read toward changes in progress.
+// The caller holds s.mu.
+func (s *Server) listedInSubscription(c *call, k *kind) []*resource {
+	sub := key(c.val("sub"))
+	observe := s.observer()
+	for _, res := range s.resources {
+		if res.kind == k && key(res.sub) == sub {
+			observe(res.pending)
+		}
+	}
+	var out []*resource
+	for _, res := range s.resources {
+		if res.kind == k && key(res.sub) == sub {
+			out = append(out, res)
+		}
+	}
+	slices.SortFunc(out, func(a, b *resource) int { return cmp.Compare(key(a.id), key(b.id)) })
+	return out
+}
+
 // listBody renders a list response.
 func listBody[T any](items []T, render func(T) any) []byte {
 	value := make([]any, 0, len(items))

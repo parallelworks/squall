@@ -345,3 +345,37 @@ func TestAddressRangesRunOut(t *testing.T) {
 		t.Fatalf("public addresses = %+v", got)
 	}
 }
+
+func TestNetworkListsInSubscription(t *testing.T) {
+	c := setup(t)
+	c.createGroup(t, group, nil)
+	c.createGroup(t, "rg-2", nil)
+	pip := c.createPIP(t, "pip")
+	attached := c.createNIC(t, group, "nic", nil)
+	c.createNIC(t, "rg-2", "nic", nil)
+	vm := c.createVM(t, "vm", attached)
+
+	var nics []*armnetwork.Interface
+	for pager := c.nics.NewListAllPager(nil); pager.More(); {
+		page, err := pager.NextPage(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		nics = append(nics, page.Value...)
+	}
+	if len(nics) != 2 || *nics[0].ID != *attached.ID || !strings.Contains(*nics[1].ID, "/resourceGroups/rg-2/") {
+		t.Fatalf("network interfaces = %+v", nics)
+	}
+	if got := nics[0].Properties.VirtualMachine; got == nil || *got.ID != *vm.ID || nics[1].Properties.VirtualMachine != nil {
+		t.Fatalf("virtualMachine = %+v, %+v", got, nics[1].Properties.VirtualMachine)
+	}
+
+	page, err := c.pips.NewListAllPager(nil).NextPage(t.Context())
+	if err != nil || len(page.Value) != 1 || *page.Value[0].ID != *pip.ID {
+		t.Fatalf("public IP addresses = %+v, %v", page.Value, err)
+	}
+	nsgs, err := c.nsgs.NewListAllPager(nil).NextPage(t.Context())
+	if err != nil || len(nsgs.Value) != 0 {
+		t.Fatalf("network security groups = %+v, %v", nsgs.Value, err)
+	}
+}

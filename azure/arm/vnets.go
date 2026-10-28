@@ -518,6 +518,16 @@ func (s *Server) listNetwork(k *kind) handler {
 	}
 }
 
+// listNetworkInSubscription lists the network resources of kind k in the
+// call's subscription.
+func (s *Server) listNetworkInSubscription(k *kind) handler {
+	return func(c *call) (*reply, *apiError) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return ok(listBody(s.listedInSubscription(c, k), func(res *resource) any { return s.renderNetwork(res) })), nil
+	}
+}
+
 // listSubnets lists the subnets of the call's virtual network.
 func (s *Server) listSubnets(c *call) (*reply, *apiError) {
 	s.mu.Lock()
