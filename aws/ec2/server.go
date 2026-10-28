@@ -13,11 +13,12 @@
 // ReleaseAddress, AssociateAddress, DisassociateAddress), network interfaces
 // (CreateNetworkInterface, DescribeNetworkInterfaces, DeleteNetworkInterface),
 // instances (RunInstances, DescribeInstances, StartInstances, StopInstances,
-// TerminateInstances, ModifyInstanceAttribute for the instance type), images
+// TerminateInstances, ModifyInstanceAttribute for the instance type and
+// DeleteOnTermination of attached volumes), images
 // (DescribeImages, RegisterImage, DeregisterImage), instance types
 // (DescribeInstanceTypes), EBS volumes (CreateVolume, DescribeVolumes,
 // DeleteVolume, AttachVolume, DetachVolume), EBS snapshots (CreateSnapshot,
-// DescribeSnapshots, DeleteSnapshot), placement groups (CreatePlacementGroup, DescribePlacementGroups,
+// CopySnapshot, DescribeSnapshots, DeleteSnapshot), placement groups (CreatePlacementGroup, DescribePlacementGroups,
 // DeletePlacementGroup) and tags (CreateTags, DeleteTags), with the real API's
 // error codes. Other actions answer 404 with the code InvalidAction. Where it
 // differs from EC2:
@@ -77,6 +78,14 @@
 //     is accepted, where EC2 accepts only the counts it lists for each type.
 //     A type change resets the core count and threads to the new type's
 //     defaults.
+//   - ModifyInstanceAttribute changes one attribute per call: the instance
+//     type, only while the instance is stopped, or the DeleteOnTermination
+//     of volumes attached to it, in any state, which defaults to true when a
+//     mapping leaves it out. A mapping's device must have a volume of the
+//     instance attached, and its VolumeId, if set, must be that volume;
+//     otherwise the call fails with InvalidBlockDeviceMapping and changes
+//     nothing. Both attributes in one call fail with
+//     InvalidParameterCombination.
 //   - An instance's image must be registered with [Server.PutImage], and its
 //     type must be one [Server.PutInstanceType] added or one of a small
 //     built-in set, which DescribeInstanceTypes lists, that runs the image's
@@ -118,6 +127,17 @@
 //     DescribeSnapshots with an owner other than "self" lists none, and
 //     snapshots report no owner ID. CreatePlacementGroup needs a GroupName
 //     and a Strategy, which EC2 makes optional.
+//   - CopySnapshot, called in the destination region, copies a completed
+//     snapshot from SourceRegion, which may be the same region, into a new
+//     snapshot that starts pending and completes as a new snapshot does. It
+//     fails with InvalidSnapshot.NotFound when SourceRegion does not hold the
+//     snapshot and with IncorrectState while the source is pending. The copy
+//     has the source's size, the request's Description and tags, and the
+//     volume ID vol-ffffffff, and it is independent of its source: deleting
+//     either leaves the other. It is encrypted if the source is or Encrypted
+//     is set; KmsKeyId, PresignedUrl and DestinationRegion are accepted and
+//     ignored, and Outpost, Local Zone and time-based copies are not
+//     supported.
 //   - CreateTags and DeleteTags work on instances, volumes, snapshots,
 //     images, placement groups (by group ID), network interfaces and Elastic
 //     IP addresses, and change nothing unless every resource exists.
@@ -270,6 +290,7 @@ func New(opts ...Option) *Server {
 		"CreateSnapshot":            {s.createSnapshotTarget, s.createSnapshot},
 		"DescribeSnapshots":         {collection("snapshots"), s.describeSnapshots},
 		"DeleteSnapshot":            {named("SnapshotId"), s.deleteSnapshot},
+		"CopySnapshot":              {s.createSnapshotTarget, s.copySnapshot},
 		"CreatePlacementGroup":      {named("GroupName"), s.createPlacementGroup},
 		"DescribePlacementGroups":   {collection("placement-groups"), s.describePlacementGroups},
 		"DeletePlacementGroup":      {named("GroupName"), s.deletePlacementGroup},
