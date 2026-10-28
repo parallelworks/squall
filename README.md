@@ -188,6 +188,8 @@ For Amazon EC2:
   copies being full copies with their own ID). It is encrypted if its source
   is or `Encrypted` is set; KMS keys are accepted and not modeled, and Outpost,
   Local Zone and time-based copies are rejected as unknown parameters.
+  `Encrypted=false`, and a `KmsKeyId` without `Encrypted=true`, are accepted,
+  though the API reference allows neither.
 - `ModifyInstanceAttribute` changes the instance type of a stopped instance,
   or, with `BlockDeviceMapping`, the `DeleteOnTermination` of volumes
   attached to the instance in any state, `true` when a mapping leaves it
