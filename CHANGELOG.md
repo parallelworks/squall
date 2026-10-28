@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.22.0](https://github.com/parallelworks/squall/compare/v0.21.0...v0.22.0) (2026-10-28)
+
+
+### Features
+
+* **azure:** Graph deleted items and organization, Log Analytics workspaces ([#63](https://github.com/parallelworks/squall/issues/63)) ([aa26041](https://github.com/parallelworks/squall/commit/aa26041c371c53adc37cc195925fe2e5861bb4b8))
+* **ec2:** CopySnapshot across regions and DeleteOnTermination of attached volumes ([#62](https://github.com/parallelworks/squall/issues/62)) ([bbef0c5](https://github.com/parallelworks/squall/commit/bbef0c538d30e2077984b12b4cfb4ca41a6fe87c))
+
 ## [0.21.0](https://github.com/parallelworks/squall/compare/v0.20.0...v0.21.0) (2026-10-27)
 
 
