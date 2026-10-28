@@ -72,6 +72,8 @@ type resource struct {
 	// held is the subnet address of a resource that takes one of its own,
 	// such as a NetApp volume.
 	held *heldAddress
+	// restoring marks a Log Analytics workspace a create recovers.
+	restoring bool
 }
 
 // inGroup reports whether r is in the group with key gk.
@@ -383,6 +385,8 @@ func (s *Server) remove(res *resource) {
 		s.removeAccountChildren(res)
 	case res.held != nil:
 		s.releasePrivate(res.held.subnet, res.held.address)
+	case res.kind == logWorkspaceKind:
+		s.softDeleteLogWorkspace(res)
 	case res.kind == cognitiveAccountKind:
 		s.softDelete(res)
 	case res.pe != nil:

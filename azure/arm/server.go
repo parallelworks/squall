@@ -53,6 +53,8 @@
 //   - Microsoft.KeyVault: vaults (create or update, get and list in a group);
 //   - Microsoft.Insights: Application Insights components (create or update,
 //     get and list in a group);
+//   - Microsoft.OperationalInsights: Log Analytics workspaces (create or
+//     update, which recovers a deleted one, get, list in a group and delete);
 //   - Microsoft.MachineLearningServices: workspaces (create or update, get and
 //     delete);
 //   - Microsoft.Authorization: role assignments at a resource group's scope
@@ -420,8 +422,34 @@
 //     Insights answers. The component's type, and the namespace in its ID,
 //     are in lower case, as Application Insights writes them. It needs kind
 //     and Application_Type, and its instrumentation key and connection string
-//     are derived from it and never change. A component without a
-//     WorkspaceResourceId is accepted.
+//     are derived from it and never change. Its WorkspaceResourceId is
+//     echoed as sent, not checked, with IngestionMode LogAnalytics unless
+//     set, as the API's example shows. A component created without one is
+//     linked to a workspace made for it, as Microsoft documents: the
+//     workspace DefaultWorkspace-{subscription}-{code} in the group
+//     DefaultResourceGroup-{code}, in the component's location, where {code}
+//     is the location's Log Analytics region code, the names the Azure CLI
+//     uses; that Application Insights makes them, where, and the code for a
+//     location without one, the location itself, are inferred. Later
+//     components reuse them, an update that leaves out the link keeps it, and
+//     they stay when the component's group is deleted.
+//   - A Log Analytics workspace create answers 201 and an update 200 with an
+//     Azure-AsyncOperation URL under
+//     Microsoft.OperationalInsights/locations/{location}/operationstatuses,
+//     and a delete 200, or 202 with a Location URL under the workspace's
+//     operationresults, as Azure answers; a missing one answers 204. A
+//     workspace shows a customerId, and the PerGB2018 SKU and 30 days of
+//     retention unless set, as Microsoft documents its defaults. Deleting it,
+//     or its group, keeps it as deleted for 14 days unless force=true, as
+//     Microsoft documents, and a create with its group, name and location
+//     recovers it, showing Restoring while in progress and keeping its
+//     customerId and the properties the create leaves out, which is inferred.
+//     A create in another location while it is deleted fails with 409
+//     Conflict, which is inferred.
+//   - A Cognitive Services deployment records modelProviderData (industry,
+//     organizationName and countryCode), which clients send for partner
+//     models; its values are not checked, and a partner model without it is
+//     not failed.
 //   - A Machine Learning workspace change in progress answers 202 with no
 //     body and an Azure-AsyncOperation URL under
 //     Microsoft.MachineLearningServices/locations/{location}/workspaceOperationsStatus,
@@ -527,7 +555,11 @@
 // Microsoft.CognitiveServices one
 // Microsoft.CognitiveServices/locations/operationresults/read, and a
 // Microsoft.MachineLearningServices one
-// Microsoft.MachineLearningServices/locations/workspaceOperationsStatus/read. Getting a
+// Microsoft.MachineLearningServices/locations/workspaceOperationsStatus/read,
+// and a Microsoft.OperationalInsights one
+// Microsoft.OperationalInsights/locations/operationstatuses/read, or
+// Microsoft.OperationalInsights/workspaces/operationresults/read for a
+// delete's Location URL, which is inferred. Getting a
 // resource provider needs Microsoft.Resources/subscriptions/providers/read and
 // registering one {namespace}/register/action, such as
 // Microsoft.CostManagementExports/register/action. Actions are not
@@ -598,6 +630,8 @@ type Server struct {
 	unregistered map[string]string
 	providers    map[string]*provider
 	exports      map[string]*export
+	// logWorkspacesDeleted are the deleted Log Analytics workspaces, by their IDs' keys.
+	logWorkspacesDeleted map[string]*softDeleted
 }
 
 // Option configures a [Server].
@@ -645,6 +679,8 @@ func New(opts ...Option) *Server {
 		unregistered: map[string]string{},
 		providers:    map[string]*provider{},
 		exports:      map[string]*export{},
+
+		logWorkspacesDeleted: map[string]*softDeleted{},
 		// Neither range is routable on the internet, so a test cannot reach a real host by mistake.
 		private: newPool(netip.MustParsePrefix("10.0.0.0/8"), 4, 1),
 		public:  newPool(netip.MustParsePrefix("100.64.0.0/10"), 1, 0),
@@ -783,6 +819,7 @@ func (s *Server) registerRoutes() {
 	s.registerAuthorizationRoutes()
 	s.registerProviderRoutes()
 	s.registerExportRoutes()
+	s.registerLogAnalyticsRoutes()
 }
 
 func (s *Server) add(method, pattern, action string, lro bool, h handler) {

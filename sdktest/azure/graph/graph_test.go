@@ -116,6 +116,96 @@ func TestUserLifecycle(t *testing.T) {
 	}
 }
 
+func TestPurgeDeletedUser(t *testing.T) {
+	s, client := setup(t)
+	created, err := client.Users().Post(t.Context(), newUser("user1@squall.onmicrosoft.com", "Passw0rd!"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := *created.GetId()
+	err = client.Directory().DeletedItems().ByDirectoryObjectId(id).Delete(t.Context(), nil)
+	if status, code, _ := odata(err); status != 404 || code != "Request_ResourceNotFound" {
+		t.Fatalf("purging a user that is not deleted = %v", err)
+	}
+	if err := client.Users().ByUserId(id).Delete(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Directory().DeletedItems().ByDirectoryObjectId(id).Delete(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if purged := s.PurgedUsers(); len(purged) != 1 || purged[0].ID != id || purged[0].Purged.IsZero() || len(s.DeletedUsers()) != 0 {
+		t.Fatalf("purged users = %+v, deleted users = %+v", purged, s.DeletedUsers())
+	}
+	err = client.Directory().DeletedItems().ByDirectoryObjectId(id).Delete(t.Context(), nil)
+	if status, code, _ := odata(err); status != 404 || code != "Request_ResourceNotFound" {
+		t.Fatalf("purging a purged user = %v", err)
+	}
+}
+
+func TestPurgeNeedsDeleteRestore(t *testing.T) {
+	policy := access.Allow("User.Create", "User.ReadWrite.All", "Directory.ReadWrite.All")
+	s, client := setup(t, graph.WithPolicy(policy))
+	created, err := client.Users().Post(t.Context(), newUser("user1@squall.onmicrosoft.com", "Passw0rd!"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := *created.GetId()
+	if err := client.Users().ByUserId(id).Delete(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	err = client.Directory().DeletedItems().ByDirectoryObjectId(id).Delete(t.Context(), nil)
+	if status, code, msg := odata(err); status != 403 || code != "Authorization_RequestDenied" || msg != "Insufficient privileges to complete the operation." {
+		t.Fatalf("purging without User.DeleteRestore.All = %d %s %s", status, code, msg)
+	}
+	if denials := policy.Denials(); len(denials) != 1 || denials[0].Missing[0] != "User.DeleteRestore.All" {
+		t.Fatalf("denials = %+v", denials)
+	}
+	if len(s.DeletedUsers()) != 1 || len(s.PurgedUsers()) != 0 {
+		t.Fatalf("a denied purge changed the directory: deleted %+v, purged %+v", s.DeletedUsers(), s.PurgedUsers())
+	}
+}
+
+func TestOrganization(t *testing.T) {
+	_, client := setup(t)
+	resp, err := client.Organization().Get(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.GetValue()) != 1 {
+		t.Fatalf("organizations = %d", len(resp.GetValue()))
+	}
+	org := resp.GetValue()[0]
+	if *org.GetId() != "00000000-0000-0000-0000-000000000001" || *org.GetCountryLetterCode() != "US" || *org.GetDefaultUsageLocation() != "US" ||
+		len(org.GetVerifiedDomains()) != 1 || *org.GetVerifiedDomains()[0].GetName() != "squall.onmicrosoft.com" {
+		t.Fatalf("default organization = %s %s %s %d", *org.GetId(), *org.GetCountryLetterCode(), *org.GetDefaultUsageLocation(), len(org.GetVerifiedDomains()))
+	}
+
+	policy := access.Allow("Organization.Read.All")
+	_, client = setup(t, graph.WithPolicy(policy), graph.WithOrganization(graph.Organization{
+		ID: "11111111-1111-1111-1111-111111111111", DisplayName: "Contoso", CountryLetterCode: "NL", DefaultUsageLocation: "DE",
+	}), graph.WithDomains(
+		graph.Domain{ID: "contoso.onmicrosoft.com", IsVerified: true},
+		graph.Domain{ID: "contoso.com", IsDefault: true, IsVerified: true},
+		graph.Domain{ID: "pending.contoso.com"},
+	))
+	if resp, err = client.Organization().Get(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	org = resp.GetValue()[0]
+	if *org.GetId() != "11111111-1111-1111-1111-111111111111" || *org.GetDisplayName() != "Contoso" || *org.GetCountryLetterCode() != "NL" ||
+		*org.GetDefaultUsageLocation() != "DE" || len(org.GetVerifiedDomains()) != 2 {
+		t.Fatalf("organization = %s %s %s %s %d", *org.GetId(), *org.GetDisplayName(), *org.GetCountryLetterCode(), *org.GetDefaultUsageLocation(),
+			len(org.GetVerifiedDomains()))
+	}
+	if used := policy.Used(); len(used) != 1 || used[0] != "Organization.Read.All" {
+		t.Fatalf("used = %v", used)
+	}
+	_, client = setup(t, graph.WithPolicy(access.Allow("User.Read.All")))
+	if _, err := client.Organization().Get(t.Context(), nil); func() bool { status, _, _ := odata(err); return status != 403 }() {
+		t.Fatalf("reading the organization without a permission = %v", err)
+	}
+}
+
 func TestNewUsersAreChecked(t *testing.T) {
 	_, client := setup(t)
 	for _, tc := range []struct{ upn, password, message string }{
