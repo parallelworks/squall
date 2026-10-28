@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.1](https://github.com/parallelworks/squall/compare/v0.22.0...v0.22.1) (2026-10-28)
+
+
+### Bug fixes
+
+* **graph:** domains and the organization mark the default domain as the initial one ([#65](https://github.com/parallelworks/squall/issues/65)) ([92e413f](https://github.com/parallelworks/squall/commit/92e413f996c34ebc019c90e14b02af190bf256d9))
+
 ## [0.22.0](https://github.com/parallelworks/squall/compare/v0.21.0...v0.22.0) (2026-10-28)
 
 
