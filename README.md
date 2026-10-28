@@ -492,6 +492,10 @@ For Microsoft Graph:
   `Organization.Read.All`, `Directory.Read.All`,
   `Organization.ReadWrite.All` or `Directory.ReadWrite.All`, as Graph
   documents. Each verified domain's capabilities and type are inferred.
+- The initial domain, which domains and the organization's verified domains
+  mark with `isInitial`, is the directory's `onmicrosoft.com` domain,
+  whichever domain is the default, as Microsoft Entra documents; that it is
+  the first such domain `WithDomains` sets is inferred.
 
 ## Requirements
 
