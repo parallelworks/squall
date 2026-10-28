@@ -160,3 +160,37 @@ func TestComponentWithoutAWorkspaceGetsTheDefault(t *testing.T) {
 		t.Fatalf("resources left = %+v", c.server.Resources())
 	}
 }
+
+func TestDeletedDefaultWorkspaceIsRecovered(t *testing.T) {
+	c := setup(t)
+	c.createGroup(t, group, nil)
+	component := armapplicationinsights.Component{
+		Location: new(location), Kind: new("web"),
+		Properties: &armapplicationinsights.ComponentProperties{ApplicationType: new(armapplicationinsights.ApplicationTypeWeb)},
+	}
+	if _, err := c.components.CreateOrUpdate(t.Context(), group, "ai", component, nil); err != nil {
+		t.Fatal(err)
+	}
+	const defaultGroup, name = "DefaultResourceGroup-EUS", "DefaultWorkspace-" + subscription + "-EUS"
+	first, err := c.logs.Get(t.Context(), defaultGroup, name, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := c.groups.BeginDelete(t.Context(), defaultGroup, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.PollUntilDone(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if deleted := c.server.DeletedLogAnalyticsWorkspaces(); len(deleted) != 1 || !strings.HasSuffix(deleted[0], "/"+name) {
+		t.Fatalf("deleted workspaces = %v", deleted)
+	}
+	if _, err := c.components.CreateOrUpdate(t.Context(), group, "ai2", component, nil); err != nil {
+		t.Fatal(err)
+	}
+	again, err := c.logs.Get(t.Context(), defaultGroup, name, nil)
+	if err != nil || *again.Properties.CustomerID != *first.Properties.CustomerID || len(c.server.DeletedLogAnalyticsWorkspaces()) != 0 {
+		t.Fatalf("the default workspace after its group was deleted = %+v, %v; deleted %v", again.Properties, err, c.server.DeletedLogAnalyticsWorkspaces())
+	}
+}

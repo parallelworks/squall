@@ -137,7 +137,8 @@
 //     either leaves the other. It is encrypted if the source is or Encrypted
 //     is set; KmsKeyId, PresignedUrl and DestinationRegion are accepted and
 //     ignored, and Outpost, Local Zone and time-based copies are not
-//     supported.
+//     supported. Encrypted=false, and a KmsKeyId without Encrypted=true, are
+//     accepted, where EC2 documents neither as allowed.
 //   - CreateTags and DeleteTags work on instances, volumes, snapshots,
 //     images, placement groups (by group ID), network interfaces and Elastic
 //     IP addresses, and change nothing unless every resource exists.

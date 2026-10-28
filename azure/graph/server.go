@@ -44,6 +44,10 @@
 //     message is the one Graph answers for a missing user, which for this
 //     call is inferred. Deleted users are not purged on their own after 30
 //     days, and other deleted object types are not served.
+//   - A directory's initial domain, which domains and the organization's
+//     verified domains show with isInitial, is its onmicrosoft.com domain, as
+//     Microsoft Entra documents, whichever domain is the default; that it is
+//     the first such domain [WithDomains] sets is inferred.
 //   - The organization is the one [WithOrganization] describes, with the
 //     verified domains [WithDomains] sets. It shows the members Graph's
 //     example of the call shows, with empty plans and notification lists;
@@ -283,13 +287,25 @@ func (s *Server) listDomains(c *call) (*reply, *apiError) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	value := make([]map[string]any, 0, len(s.domains))
+	initial := s.initialDomain()
 	for _, d := range s.domains {
 		value = append(value, map[string]any{
-			"id": d.ID, "isDefault": d.IsDefault, "isVerified": d.IsVerified, "isInitial": d.IsDefault, "isRoot": true,
+			"id": d.ID, "isDefault": d.IsDefault, "isVerified": d.IsVerified, "isInitial": d.ID == initial, "isRoot": true,
 			"isAdminManaged": true, "authenticationType": "Managed", "availabilityStatus": nil, "supportedServices": []string{},
 		})
 	}
 	return &reply{status: http.StatusOK, body: map[string]any{"@odata.context": context(c, "domains"), "value": value}}, nil
+}
+
+// initialDomain returns the directory's initial domain, its first
+// onmicrosoft.com domain, or "" when it has none. The caller holds s.mu.
+func (s *Server) initialDomain() string {
+	for _, d := range s.domains {
+		if strings.HasSuffix(strings.ToLower(d.ID), ".onmicrosoft.com") {
+			return d.ID
+		}
+	}
+	return ""
 }
 
 // userMembers are the user members a create may set: those it needs, and the
@@ -477,10 +493,11 @@ func (s *Server) listOrganization(c *call) (*reply, *apiError) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	domains := []map[string]any{}
+	initial := s.initialDomain()
 	for _, d := range s.domains {
 		if d.IsVerified {
 			domains = append(domains, map[string]any{
-				"capabilities": "Email, OfficeCommunicationsOnline", "isDefault": d.IsDefault, "isInitial": d.IsDefault, "name": d.ID, "type": "Managed",
+				"capabilities": "Email, OfficeCommunicationsOnline", "isDefault": d.IsDefault, "isInitial": d.ID == initial, "name": d.ID, "type": "Managed",
 			})
 		}
 	}

@@ -591,6 +591,12 @@ func TestLogAnalyticsWorkspaceShapes(t *testing.T) {
 		t.Fatalf("create = %d %v %v", rec.Code, rec.Header(), body)
 	}
 	s.Settle()
+	rec, body = do(t, s, http.MethodPut, logWorkspacePath, `{"location":"eastus","properties":{"retentionInDays":60}}`)
+	if props, _ := body["properties"].(map[string]any); rec.Code != http.StatusOK || props["retentionInDays"] != 60.0 ||
+		!strings.Contains(rec.Header().Get("Azure-AsyncOperation"), "/operationstatuses/") {
+		t.Fatalf("update = %d %v %v", rec.Code, rec.Header(), body)
+	}
+	s.Settle()
 	rec, body = do(t, s, http.MethodDelete, logWorkspacePath, "")
 	location := rec.Header().Get("Location")
 	if rec.Code != http.StatusAccepted || !strings.Contains(location, "/workspaces/law/operationresults/") || rec.Header().Get("Azure-AsyncOperation") == "" {
@@ -623,6 +629,10 @@ func TestLogAnalyticsWorkspaceRecovery(t *testing.T) {
 	}
 	if rec, body := do(t, s, http.MethodPut, logWorkspacePath, `{"location":"westus"}`); rec.Code != http.StatusConflict {
 		t.Fatalf("a create in another location = %d %v", rec.Code, body)
+	}
+	if rec, _ := do(t, s, http.MethodDelete, logWorkspacePath+"?api-version=2025-07-01&force=true", ""); rec.Code != http.StatusNoContent ||
+		len(s.DeletedLogAnalyticsWorkspaces()) != 1 {
+		t.Fatalf("a forced delete of a deleted workspace = %d, deleted %v", rec.Code, s.DeletedLogAnalyticsWorkspaces())
 	}
 
 	settling := arm.New(arm.WithSettleAfter(-1))

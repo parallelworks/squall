@@ -188,6 +188,8 @@ For Amazon EC2:
   copies being full copies with their own ID). It is encrypted if its source
   is or `Encrypted` is set; KMS keys are accepted and not modeled, and Outpost,
   Local Zone and time-based copies are rejected as unknown parameters.
+  `Encrypted=false`, and a `KmsKeyId` without `Encrypted=true`, are accepted,
+  though the API reference allows neither.
 - `ModifyInstanceAttribute` changes the instance type of a stopped instance,
   or, with `BlockDeviceMapping`, the `DeleteOnTermination` of volumes
   attached to the instance in any state, `true` when a mapping leaves it
@@ -435,11 +437,13 @@ For Azure Resource Manager:
   default when a create names no SKU is inferred. Deleting a workspace, or
   its group, keeps it as deleted for 14 days, as Microsoft documents, unless
   the delete passes `force=true`; `DeletedLogAnalyticsWorkspaces` lists them.
+  A forced delete of a workspace that is already deleted answers 204 and
+  leaves it deleted, as Microsoft documents that it must be recovered first.
   A create with the deleted workspace's group, name and location recovers
   it, keeping its `customerId`, showing `Restoring` while in progress (201,
-  as a recording of `az monitor log-analytics workspace recover` shows); that
-  it keeps the properties the create leaves out is inferred from that
-  recording. A create in another location while the name is held fails with
+  as a recording of `az monitor log-analytics workspace recover` shows), and
+  keeping the properties the create leaves out, as Microsoft documents that
+  recovery brings back its configuration. A create in another location while the name is held fails with
   409 `Conflict`; the code and message are inferred. The polling action for
   `operationresults`,
   `Microsoft.OperationalInsights/workspaces/operationresults/read`, is
@@ -459,8 +463,9 @@ For Azure Resource Manager:
   than the client, their location, and using the location's name as the code
   for one the mapping gives none are inferred. Later components reuse them,
   an update that leaves out the link keeps it (inferred), and they outlive
-  the component's group, as `Resources` and `ResourceGroups` show. No RBAC
-  action is checked on them.
+  the component's group, as `Resources` and `ResourceGroups` show. A deleted
+  default workspace is recovered by the next component that needs it, as a
+  create recovers one (inferred). No RBAC action is checked on them.
 - A Cognitive Services deployment records and echoes
   `properties.modelProviderData` (`industry`, `organizationName`,
   `countryCode`), which clients send for partner models such as Anthropic's
@@ -492,6 +497,10 @@ For Microsoft Graph:
   `Organization.Read.All`, `Directory.Read.All`,
   `Organization.ReadWrite.All` or `Directory.ReadWrite.All`, as Graph
   documents. Each verified domain's capabilities and type are inferred.
+- The initial domain, which domains and the organization's verified domains
+  mark with `isInitial`, is the directory's `onmicrosoft.com` domain,
+  whichever domain is the default, as Microsoft Entra documents; that it is
+  the first such domain `WithDomains` sets is inferred.
 
 ## Requirements
 

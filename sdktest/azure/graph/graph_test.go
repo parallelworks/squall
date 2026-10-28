@@ -67,14 +67,20 @@ func TestDomains(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var defaults []string
+	var defaults, initial []string
 	for _, d := range resp.GetValue() {
 		if *d.GetIsDefault() {
 			defaults = append(defaults, *d.GetId())
 		}
+		if *d.GetIsInitial() {
+			initial = append(initial, *d.GetId())
+		}
 	}
 	if len(resp.GetValue()) != 2 || len(defaults) != 1 || defaults[0] != "contoso.com" {
 		t.Fatalf("default domains = %v of %d", defaults, len(resp.GetValue()))
+	}
+	if len(initial) != 1 || initial[0] != "contoso.onmicrosoft.com" {
+		t.Fatalf("initial domains = %v", initial)
 	}
 }
 
@@ -196,6 +202,11 @@ func TestOrganization(t *testing.T) {
 		*org.GetDefaultUsageLocation() != "DE" || len(org.GetVerifiedDomains()) != 2 {
 		t.Fatalf("organization = %s %s %s %s %d", *org.GetId(), *org.GetDisplayName(), *org.GetCountryLetterCode(), *org.GetDefaultUsageLocation(),
 			len(org.GetVerifiedDomains()))
+	}
+	for _, d := range org.GetVerifiedDomains() {
+		if initial := *d.GetName() == "contoso.onmicrosoft.com"; *d.GetIsInitial() != initial || *d.GetIsDefault() == initial {
+			t.Errorf("verified domain %s: isInitial %v, isDefault %v", *d.GetName(), *d.GetIsInitial(), *d.GetIsDefault())
+		}
 	}
 	if used := policy.Used(); len(used) != 1 || used[0] != "Organization.Read.All" {
 		t.Fatalf("used = %v", used)
