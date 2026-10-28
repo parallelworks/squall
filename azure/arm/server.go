@@ -438,14 +438,16 @@
 //     Microsoft.OperationalInsights/locations/{location}/operationstatuses,
 //     and a delete 200, or 202 with a Location URL under the workspace's
 //     operationresults, as Azure answers; a missing one answers 204. A
-//     workspace shows a customerId, and the PerGB2018 SKU and 30 days of
-//     retention unless set, as Microsoft documents its defaults. Deleting it,
-//     or its group, keeps it as deleted for 14 days unless force=true, as
-//     Microsoft documents, and a create with its group, name and location
+//     workspace shows a customerId, and 30 days of retention unless set, as
+//     Microsoft documents, and the PerGB2018 SKU unless set, which is
+//     inferred. Deleting it, or its group, keeps it as deleted for 14 days
+//     unless force=true, as Microsoft documents; a forced delete of a deleted
+//     one answers 204 and leaves it deleted, as Microsoft documents it must
+//     be recovered first. A create with its group, name and location
 //     recovers it, showing Restoring while in progress and keeping its
-//     customerId and the properties the create leaves out, which is inferred.
-//     A create in another location while it is deleted fails with 409
-//     Conflict, which is inferred.
+//     customerId and the properties the create leaves out, as Microsoft
+//     documents. A create in another location while it is deleted fails with
+//     409 Conflict, which is inferred.
 //   - A Cognitive Services deployment records modelProviderData (industry,
 //     organizationName and countryCode), which clients send for partner
 //     models; its values are not checked, and a partner model without it is
