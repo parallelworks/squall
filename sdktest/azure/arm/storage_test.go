@@ -174,3 +174,23 @@ func TestStorageOperationPollNeedsOperationsRead(t *testing.T) {
 		t.Fatalf("polling without Microsoft.Storage/operations/read = %v", err)
 	}
 }
+
+func TestStorageAccountLists(t *testing.T) {
+	c := setup(t)
+	c.createGroup(t, group, nil)
+	c.createGroup(t, "rg-0", nil)
+	b := c.createAccount(t, group, "bbb1")
+	a := c.createAccount(t, group, "aaa1")
+	other := c.createAccount(t, "rg-0", "ccc1")
+	inSubscription := pageIDs(t, c.accounts.NewListPager(nil), func(r armstorage.AccountsClientListResponse) []*armstorage.Account { return r.Value },
+		func(v *armstorage.Account) *string { return v.ID })
+	if want := []string{*other.ID, *a.ID, *b.ID}; !slices.Equal(inSubscription, want) {
+		t.Fatalf("accounts in the subscription = %v, want %v", inSubscription, want)
+	}
+	inGroup := pageIDs(t, c.accounts.NewListByResourceGroupPager(group, nil),
+		func(r armstorage.AccountsClientListByResourceGroupResponse) []*armstorage.Account { return r.Value },
+		func(v *armstorage.Account) *string { return v.ID })
+	if want := []string{*a.ID, *b.ID}; !slices.Equal(inGroup, want) {
+		t.Fatalf("accounts in the group = %v, want %v", inGroup, want)
+	}
+}
