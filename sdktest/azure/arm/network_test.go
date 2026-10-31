@@ -7,7 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v9"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources/v3"
 
 	"github.com/parallelworks/squall/azure/arm"
 	"github.com/parallelworks/squall/fault"
@@ -344,4 +346,137 @@ func TestAddressRangesRunOut(t *testing.T) {
 	if got := c.server.PublicIPAddresses(); len(got) != 3 || got[2].IPAddress != "100.64.0.3" {
 		t.Fatalf("public addresses = %+v", got)
 	}
+}
+
+func TestNetworkListsInSubscription(t *testing.T) {
+	c := setup(t)
+	c.createGroup(t, group, nil)
+	c.createGroup(t, "rg-2", nil)
+	pip := c.createPIP(t, "pip")
+	attached := c.createNIC(t, group, "nic", nil)
+	c.createNIC(t, "rg-2", "nic", nil)
+	vm := c.createVM(t, "vm", attached)
+
+	var nics []*armnetwork.Interface
+	for pager := c.nics.NewListAllPager(nil); pager.More(); {
+		page, err := pager.NextPage(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		nics = append(nics, page.Value...)
+	}
+	if len(nics) != 2 || *nics[0].ID != *attached.ID || !strings.Contains(*nics[1].ID, "/resourceGroups/rg-2/") {
+		t.Fatalf("network interfaces = %+v", nics)
+	}
+	if got := nics[0].Properties.VirtualMachine; got == nil || *got.ID != *vm.ID || nics[1].Properties.VirtualMachine != nil {
+		t.Fatalf("virtualMachine = %+v, %+v", got, nics[1].Properties.VirtualMachine)
+	}
+
+	page, err := c.pips.NewListAllPager(nil).NextPage(t.Context())
+	if err != nil || len(page.Value) != 1 || *page.Value[0].ID != *pip.ID {
+		t.Fatalf("public IP addresses = %+v, %v", page.Value, err)
+	}
+	nsgs, err := c.nsgs.NewListAllPager(nil).NextPage(t.Context())
+	if err != nil || len(nsgs.Value) != 0 {
+		t.Fatalf("network security groups = %+v, %v", nsgs.Value, err)
+	}
+}
+
+func TestNetworkListsInSubscriptionOmitOtherSubscriptions(t *testing.T) {
+	const other = "abcdef00-0000-0000-0000-000000000002"
+	c := setup(t)
+	c.createGroup(t, group, nil)
+	nsg := c.createNSG(t, "nsg")
+	factory := func(sub string) (*armresources.ResourceGroupsClient, *armnetwork.SecurityGroupsClient) {
+		resources, err := armresources.NewClientFactory(sub, credential{}, c.options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		network, err := armnetwork.NewClientFactory(sub, credential{}, c.options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resources.NewResourceGroupsClient(), network.NewSecurityGroupsClient()
+	}
+	groups, nsgs := factory(other)
+	if _, err := groups.CreateOrUpdate(t.Context(), group, armresources.ResourceGroup{Location: new(location)}, nil); err != nil {
+		t.Fatal(err)
+	}
+	p, err := nsgs.BeginCreateOrUpdate(t.Context(), group, "nsg-other", armnetwork.SecurityGroup{Location: new(location)}, nil)
+	theirs, err := wait(t, p, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := func(client *armnetwork.SecurityGroupsClient) []string {
+		return pageIDs(t, client.NewListAllPager(nil),
+			func(r armnetwork.SecurityGroupsClientListAllResponse) []*armnetwork.SecurityGroup { return r.Value },
+			func(v *armnetwork.SecurityGroup) *string { return v.ID })
+	}
+	if got := list(c.nsgs); !slices.Equal(got, []string{*nsg.ID}) {
+		t.Fatalf("this subscription's security groups = %v", got)
+	}
+	_, upper := factory(strings.ToUpper(other))
+	if got := list(upper); !slices.Equal(got, []string{*theirs.ID}) {
+		t.Fatalf("the other subscription's security groups, in another case = %v", got)
+	}
+}
+
+func TestNetworkListsInSubscriptionOfEveryKind(t *testing.T) {
+	c := setup(t)
+	c.createGroup(t, group, nil)
+	acct := c.createAccount(t, group, "files1")
+	pe, err := c.createPrivateEndpoint(t, *acct.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vnet := c.createVNet(t, "vnet", map[string]string{"default": "10.1.0.0/24"})
+	pip := c.createPIP(t, "pip")
+	nat, err := c.createNAT(t, "nat", pip.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lbPIP := c.createPIP(t, "lb-pip")
+	lb, err := c.putLB(t, lbBody(1024, lbPIP.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name      string
+		got, want []string
+	}{
+		{"private endpoints", pageIDs(t, c.endpoints.NewListBySubscriptionPager(nil),
+			func(r armnetwork.PrivateEndpointsClientListBySubscriptionResponse) []*armnetwork.PrivateEndpoint {
+				return r.Value
+			},
+			func(v *armnetwork.PrivateEndpoint) *string { return v.ID }), []string{*pe.ID}},
+		{"virtual networks", pageIDs(t, c.vnets.NewListAllPager(nil),
+			func(r armnetwork.VirtualNetworksClientListAllResponse) []*armnetwork.VirtualNetwork { return r.Value },
+			func(v *armnetwork.VirtualNetwork) *string { return v.ID }), []string{*vnet.ID}},
+		{"NAT gateways", pageIDs(t, c.nats.NewListAllPager(nil),
+			func(r armnetwork.NatGatewaysClientListAllResponse) []*armnetwork.NatGateway { return r.Value },
+			func(v *armnetwork.NatGateway) *string { return v.ID }), []string{*nat.ID}},
+		{"load balancers", pageIDs(t, c.lbs.NewListAllPager(nil),
+			func(r armnetwork.LoadBalancersClientListAllResponse) []*armnetwork.LoadBalancer { return r.Value },
+			func(v *armnetwork.LoadBalancer) *string { return v.ID }), []string{*lb.ID}},
+	} {
+		if !slices.Equal(tc.got, tc.want) {
+			t.Errorf("%s = %v, want %v", tc.name, tc.got, tc.want)
+		}
+	}
+}
+
+// pageIDs reads every page of pager and returns the ids of its items.
+func pageIDs[R, T any](t *testing.T, pager *runtime.Pager[R], items func(R) []*T, id func(*T) *string) []string {
+	t.Helper()
+	var ids []string
+	for pager.More() {
+		page, err := pager.NextPage(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, v := range items(page) {
+			ids = append(ids, *id(v))
+		}
+	}
+	return ids
 }

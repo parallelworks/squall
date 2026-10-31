@@ -16,8 +16,9 @@
 //     nothing outside it uses;
 //   - Microsoft.Network: virtual networks, NAT gateways, load balancers,
 //     network security groups, network interfaces, public IP addresses and
-//     private endpoints (create or update, update tags, get, delete; virtual
-//     networks, NAT gateways and load balancers also list in a group), subnets (create or update, get, list
+//     private endpoints (create or update, update tags, get, delete and list
+//     in a subscription; virtual networks, NAT gateways and load balancers
+//     also list in a group), subnets (create or update, get, list
 //     and delete), and the IP configurations and public IP addresses of scale
 //     set VMs (get);
 //   - Microsoft.Network private DNS: zones and virtual network links in the
@@ -765,6 +766,7 @@ func (s *Server) registerRoutes() {
 		s.add("PATCH", item, k.action("write"), false, s.patchTags(k))
 		s.add("GET", item, k.action("read"), false, s.getResource(k))
 		s.add("DELETE", item, k.action("delete"), true, s.deleteNetwork(k))
+		s.add("GET", sub+"/providers/Microsoft.Network/"+k.plural, k.action("read"), false, s.listNetworkInSubscription(k))
 	}
 	for _, k := range []*kind{vnetKind, natKind, lbKind} {
 		s.add("GET", network+"/"+k.plural, k.action("read"), false, s.listNetwork(k))

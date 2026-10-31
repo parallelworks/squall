@@ -224,18 +224,7 @@ func (s *Server) listAccounts(inGroup bool) handler {
 			}
 			items = s.listed(c, accountKind)
 		} else {
-			observe := s.observer()
-			for _, res := range s.resources {
-				if res.kind == accountKind && key(res.sub) == key(c.val("sub")) {
-					observe(res.pending)
-				}
-			}
-			for _, res := range s.resources {
-				if res.kind == accountKind && key(res.sub) == key(c.val("sub")) {
-					items = append(items, res)
-				}
-			}
-			slices.SortFunc(items, func(a, b *resource) int { return cmp.Compare(key(a.id), key(b.id)) })
+			items = s.listedInSubscription(c, accountKind)
 		}
 		return ok(listBody(items, func(res *resource) any { return s.accountBody(res) })), nil
 	}

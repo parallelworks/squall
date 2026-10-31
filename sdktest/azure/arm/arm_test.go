@@ -98,6 +98,7 @@ type clients struct {
 	providers   *armresources.ProvidersClient
 	exports     *armcostmanagement.ExportsClient
 	requests    *[]string
+	options     *azarm.ClientOptions
 }
 
 // setup serves a new server and returns clients for it that do not retry,
@@ -208,7 +209,7 @@ func setupWith(t *testing.T, retry policy.RetryOptions, opts ...arm.Option) *cli
 		capacities: cog.NewModelCapacitiesClient(), search: search.NewServicesClient(), searchKeys: search.NewAdminKeysClient(),
 		vaults: keyvault.NewVaultsClient(), components: insights.NewComponentsClient(), workspaces: ml.NewWorkspacesClient(),
 		logs: logs.NewWorkspacesClient(), roles: authorization.NewRoleAssignmentsClient(), providers: resources.NewProvidersClient(), exports: cost.NewExportsClient(),
-		requests: requests,
+		requests: requests, options: options,
 	}
 }
 
