@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.0](https://github.com/parallelworks/squall/compare/v0.22.1...v0.23.0) (2026-10-31)
+
+
+### Features
+
+* **arm:** list network resources in a subscription ([#67](https://github.com/parallelworks/squall/issues/67)) ([207bf08](https://github.com/parallelworks/squall/commit/207bf082ad857086627d032475140c37315f26a0))
+
 ## [0.22.1](https://github.com/parallelworks/squall/compare/v0.22.0...v0.22.1) (2026-10-28)
 
 
