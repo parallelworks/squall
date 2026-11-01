@@ -165,6 +165,7 @@ func (s *Server) createVPC(c *call) (response, *apiError) {
 	}
 	rs.vpcs[v.VPCID] = v
 	s.newMainRouteTable(rs, v)
+	s.newDefaultSecurityGroup(rs, v)
 	return &createVPCResponse{VPC: v.xml(statePending)}, nil
 }
 
@@ -285,13 +286,15 @@ func (s *Server) deleteVPC(c *call) (response, *apiError) {
 			delete(rs.routeTables, rtbID)
 		}
 	}
+	delete(rs.securityGroups, rs.defaultGroup(id))
 	delete(rs.vpcs, id)
 	return &returnResponse{Return: true}, nil
 }
 
 // vpcInUse reports whether anything EC2 does not delete with the VPC with id
-// is in it: a subnet, an attached internet gateway or a route table other
-// than the main one. The caller holds s.mu.
+// is in it: a subnet, an attached internet gateway, a route table other
+// than the main one or a security group other than the default one. The
+// caller holds s.mu.
 func (rs *regionState) vpcInUse(id string) bool {
 	for _, sub := range rs.subnets {
 		if sub.VPCID == id {
@@ -305,6 +308,11 @@ func (rs *regionState) vpcInUse(id string) bool {
 	}
 	for _, rt := range rs.routeTables {
 		if rt.VPCID == id && !rt.main() {
+			return true
+		}
+	}
+	for _, g := range rs.securityGroups {
+		if g.VPCID == id && !g.isDefault() {
 			return true
 		}
 	}

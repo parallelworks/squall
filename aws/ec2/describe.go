@@ -19,6 +19,9 @@ type lister[V any] struct {
 	// advance, if set, counts a describe of a resource the call names or
 	// that it covers by naming none.
 	advance func(*regionState, V)
+	// byName, if set, returns the IDs of the resources the call names
+	// another way, such as by name.
+	byName func(*regionState) ([]string, *apiError)
 }
 
 // describe answers a describe call for l's resources: the ones it names, or
@@ -33,7 +36,7 @@ func describe[V, T any](s *Server, c *call, l lister[V], render func(*regionStat
 	if !strings.HasSuffix(plural, "s") {
 		plural += "s"
 	}
-	limit, after, err := c.p.page(plural, len(ids) > 0, maxResults, l.prefix)
+	limit, after, err := c.p.page(plural, len(ids) > 0 || l.byName != nil, maxResults, l.prefix)
 	if err != nil {
 		return nil, "", err
 	}
@@ -44,6 +47,13 @@ func describe[V, T any](s *Server, c *call, l lister[V], render func(*regionStat
 	defer s.mu.Unlock()
 	rs := s.lookupRegion(c.region)
 	held := l.of(rs)
+	if l.byName != nil {
+		named, err := l.byName(rs)
+		if err != nil {
+			return nil, "", err
+		}
+		ids = append(ids, named...)
+	}
 	for _, id := range ids {
 		if _, ok := held[id]; !ok {
 			return nil, "", l.notFound(id)
@@ -111,6 +121,8 @@ func routeTablesOf(rs *regionState) map[string]*RouteTable { return rs.routeTabl
 func dhcpOptionsOf(rs *regionState) map[string]*DHCPOptions { return rs.dhcpOptions }
 
 func transitGatewaysOf(rs *regionState) map[string]*TransitGateway { return rs.transitGateways }
+
+func securityGroupsOf(rs *regionState) map[string]*SecurityGroup { return rs.securityGroups }
 
 func attachmentsOf(rs *regionState) map[string]*TransitGatewayAttachment {
 	return rs.transitGatewayAttachments

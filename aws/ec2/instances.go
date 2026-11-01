@@ -824,6 +824,11 @@ func (s *Server) checkLaunch(rs *regionState, region string, l *launch) (*Image,
 			return nil, nil, nil, clientError("InvalidIPAddress.InUse", "Address %s is in use.", l.privateIP)
 		}
 	}
+	if ni == nil {
+		if l.groups, err = rs.groupsFor(l.subnet, l.groups); err != nil {
+			return nil, nil, nil, err
+		}
+	}
 	if sub, ok := rs.subnets[l.subnet]; ok && ni == nil {
 		if l.zone != "" && l.zone != sub.AvailabilityZone {
 			return nil, nil, nil, invalidValue("The subnet '%s' is in %s, not %s.", sub.SubnetID, sub.AvailabilityZone, l.zone)

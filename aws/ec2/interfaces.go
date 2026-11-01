@@ -335,6 +335,9 @@ func (s *Server) createNetworkInterface(c *call) (response, *apiError) {
 		created := t.created.(NetworkInterface)
 		return &createNetworkInterfaceResponse{NetworkInterface: created.xml(nil), ClientToken: token}, nil
 	}
+	if want.SecurityGroupIDs, err = s.lookupRegion(c.region).groupsFor(subnet, want.SecurityGroupIDs); err != nil {
+		return nil, err
+	}
 	ni, err := s.storeInterface(c.region, want)
 	if err != nil {
 		return nil, err
