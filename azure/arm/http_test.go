@@ -6,10 +6,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/parallelworks/squall/access"
 	"github.com/parallelworks/squall/azure/arm"
 	"github.com/parallelworks/squall/fault"
 )
@@ -609,6 +611,35 @@ func TestLogAnalyticsWorkspaceShapes(t *testing.T) {
 	}
 	if rec, _ := do(t, s, http.MethodDelete, logWorkspacePath, ""); rec.Code != http.StatusNoContent {
 		t.Fatalf("deleting a deleted workspace = %d", rec.Code)
+	}
+}
+
+// Polling a workspace delete's Location URL needs workspaces/operations/read,
+// since Azure defines no workspaces/operationresults action.
+func TestLogAnalyticsDeleteResultNeedsOperationsRead(t *testing.T) {
+	const poll = "Microsoft.OperationalInsights/workspaces/operations/read"
+	allowed := []string{
+		"Microsoft.Resources/subscriptions/resourceGroups/write", "Microsoft.OperationalInsights/workspaces/write",
+		"Microsoft.OperationalInsights/workspaces/delete",
+	}
+	for _, granted := range []bool{false, true} {
+		grants := allowed
+		if granted {
+			grants = append(slices.Clone(allowed), poll)
+		}
+		s := arm.New(arm.WithSettleAfter(-1), arm.WithPolicy(access.Allow(grants...)))
+		newGroup(t, s)
+		do(t, s, http.MethodPut, logWorkspacePath, `{"location":"eastus"}`)
+		s.Settle()
+		rec, _ := do(t, s, http.MethodDelete, logWorkspacePath, "")
+		u, _ := url.Parse(rec.Header().Get("Location"))
+		rec, body := do(t, s, http.MethodGet, u.RequestURI(), "")
+		if granted && rec.Code != http.StatusAccepted {
+			t.Fatalf("delete result with %s = %d %v", poll, rec.Code, body)
+		}
+		if !granted && (rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), poll)) {
+			t.Fatalf("delete result without %s = %d %v", poll, rec.Code, body)
+		}
 	}
 }
 
