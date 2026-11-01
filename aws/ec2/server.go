@@ -19,22 +19,27 @@
 // (DescribeInstanceTypes), EBS volumes (CreateVolume, DescribeVolumes,
 // DeleteVolume, AttachVolume, DetachVolume), EBS snapshots (CreateSnapshot,
 // CopySnapshot, DescribeSnapshots, DeleteSnapshot), placement groups (CreatePlacementGroup, DescribePlacementGroups,
-// DeletePlacementGroup) and tags (CreateTags, DeleteTags), with the real API's
-// error codes. Other actions answer 404 with the code InvalidAction. Where it
-// differs from EC2:
+// DeletePlacementGroup), VPC networking (see below) and tags (CreateTags,
+// DeleteTags), with the real API's error codes. Other actions answer 404 with
+// the code InvalidAction. Where it differs from EC2:
 //
 //   - Signatures are not checked. The region comes from the credential scope
 //     of the SigV4 Authorization header (or the X-Amz-Credential query
 //     parameter), and each region keeps its own resources. There is one
 //     account: the server keeps no owner IDs.
-//   - Subnet and security group IDs and key pair names are not validated, and
-//     there are no VPCs: interfaces report no VPC ID, and their availability
-//     zone is the region with "a" appended unless an instance launched in
-//     another. ReleaseAddress fails with
+//   - Security group IDs and key pair names are not validated, and there is
+//     no default VPC. A subnet ID the server does not hold is accepted where
+//     an interface or instance names one, so code that never creates a VPC
+//     keeps working: such an interface reports no VPC ID, and its
+//     availability zone is the region with "a" appended unless an instance
+//     launched in another. In a subnet the server holds, an interface takes
+//     the subnet's VPC and zone and an address from its CIDR block, as EC2
+//     assigns them. ReleaseAddress fails with
 //     InvalidIPAddress.InUse for an associated address, as in a nondefault
 //     VPC, rather than disassociating it. Private IP addresses are unique
-//     within a subnet and come from 10.0.0.0/8; public ones are unique across
-//     every region and come from 100.64.0.0/10, never from routable ranges.
+//     within a subnet and, outside subnets the server holds, come from
+//     10.0.0.0/8; public ones are unique across every region and come from
+//     100.64.0.0/10, never from routable ranges.
 //   - There is no quota on addresses unless [WithAddressLimit] sets one, and
 //     no capacity or instance limit: a fault rule with a code such as
 //     InsufficientInstanceCapacity stands in for one.
@@ -140,8 +145,64 @@
 //     supported. Encrypted=false, and a KmsKeyId without Encrypted=true, are
 //     accepted, where EC2 documents neither as allowed.
 //   - CreateTags and DeleteTags work on instances, volumes, snapshots,
-//     images, placement groups (by group ID), network interfaces and Elastic
-//     IP addresses, and change nothing unless every resource exists.
+//     images, placement groups (by group ID), network interfaces, Elastic
+//     IP addresses and the VPC resources below, and change nothing unless
+//     every resource exists.
+//
+// VPC networking:
+//
+//   - It covers VPCs (CreateVpc, DescribeVpcs, ModifyVpcAttribute and
+//     DescribeVpcAttribute for enableDnsSupport and enableDnsHostnames,
+//     DeleteVpc), subnets (CreateSubnet, DescribeSubnets, DeleteSubnet),
+//     availability zones (DescribeAvailabilityZones), internet gateways
+//     (CreateInternetGateway, AttachInternetGateway, DetachInternetGateway,
+//     DescribeInternetGateways, DeleteInternetGateway), NAT gateways
+//     (CreateNatGateway, DescribeNatGateways, DeleteNatGateway), route tables
+//     (CreateRouteTable, DescribeRouteTables, AssociateRouteTable with a
+//     subnet, DisassociateRouteTable, CreateRoute to an internet gateway, NAT
+//     gateway or transit gateway, DeleteRouteTable), DHCP options
+//     (CreateDhcpOptions, DescribeDhcpOptions, AssociateDhcpOptions,
+//     DeleteDhcpOptions) and transit gateway VPC attachments
+//     (CreateTransitGatewayVpcAttachment, DescribeTransitGatewayVpcAttachments,
+//     DescribeTransitGatewayAttachments, DeleteTransitGatewayVpcAttachment).
+//     IPv6, secondary CIDR blocks, IPAM pools and Outposts are not supported.
+//   - VPCs and subnets take IPv4 CIDR blocks from /16 to /28. A subnet must
+//     lie within its VPC (else InvalidSubnet.Range) and not overlap another
+//     (InvalidSubnet.Conflict). A VPC answers pending to CreateVpc and is
+//     available from then on. Each VPC gets a main route table with the local
+//     route, deleted with it, and the region's default DHCP options set,
+//     which the server creates with the region's first VPC.
+//   - A region has the zones [WithAvailabilityZones] sets, or by default the
+//     region with "a", "b" and "c" appended. Zone IDs are numbered in that
+//     order, such as use1-az1. CreateSubnet without a zone uses the first.
+//   - Deletes that EC2 refuses while something depends on the resource fail
+//     with DependencyViolation: a VPC with subnets, an attached internet
+//     gateway or route tables other than the main one; a subnet with network
+//     interfaces (a NAT gateway's until it is deleted, an instance's until
+//     termination releases it) or a transit gateway attachment that is not
+//     deleted; an attached internet gateway; a route table that is main or
+//     associated with a subnet; a DHCP options set a VPC uses. Detaching an
+//     internet gateway while an interface in the VPC has a public address
+//     also fails with DependencyViolation, and AssociateAddress fails with
+//     Gateway.NotAttached in a VPC with no internet gateway.
+//   - A NAT gateway goes from pending to available, and from deleting to
+//     deleted, as describes see it, the way instances move. A public one
+//     takes an Elastic IP address, which is associated with the gateway's
+//     requester-managed interface in the subnet until the gateway is deleted.
+//     It fails, with the failure code EC2 reports, when the address is already
+//     associated (Resource.AlreadyAssociated) or the VPC has no internet
+//     gateway (Gateway.NotAttached). Deleted and failed gateways stay
+//     visible, and deleting one that is deleting or deleted succeeds.
+//   - A route's state is blackhole once its internet gateway is detached, its
+//     NAT gateway is deleting, deleted or failed, or its VPC's attachment to
+//     the transit gateway is deleting or deleted. A route to a transit
+//     gateway is not checked for an attachment when it is created.
+//   - Transit gateways are not created through the API:
+//     [Server.PutTransitGateway] sets one up, and other IDs fail with
+//     InvalidTransitGatewayID.NotFound. Attachments go from pending to
+//     available and from deleting to deleted like NAT gateways, take one
+//     subnet per zone, and take their tags from TagSpecifications, as the API
+//     names it for that action.
 //
 // [WithPolicy] grants the caller a set of IAM actions and refuses a call that
 // needs one it lacks with 403 UnauthorizedOperation, before any fault. A call
@@ -154,7 +215,9 @@
 // "us-east-1/eipalloc-00000000000000001", or the first of them for a call
 // that takes several; a create call names the resource it creates (the first
 // instance, for RunInstances), placement group calls name the group by name,
-// and a describe call names the collection, such as "us-east-1/addresses".
+// AssociateRouteTable and CreateRoute name the route table, AssociateDhcpOptions
+// names the options set, and a describe call names the collection, such as
+// "us-east-1/addresses" or "us-east-1/nat-gateways".
 // EC2 has no long-running operations, so [fault.ModeFailOperation] fails a
 // call as [fault.ModeReject] does. A fault's
 // Reason is the error code, except that the fault package's generic reasons
@@ -197,6 +260,7 @@ type Server struct {
 	policy       *access.Policy
 	addressLimit int
 	settleAfter  int
+	zones        map[string][]string
 	actions      map[string]action
 	requests     atomic.Uint64
 
@@ -221,6 +285,17 @@ type regionState struct {
 	volumes         map[string]*Volume
 	snapshots       map[string]*Snapshot
 	placementGroups map[string]*PlacementGroup
+
+	vpcs                      map[string]*VPC
+	subnets                   map[string]*Subnet
+	internetGateways          map[string]*InternetGateway
+	natGateways               map[string]*NATGateway
+	routeTables               map[string]*RouteTable
+	dhcpOptions               map[string]*DHCPOptions
+	transitGateways           map[string]*TransitGateway
+	transitGatewayAttachments map[string]*TransitGatewayAttachment
+	// defaultDHCP is the ID of the region's default DHCP options set.
+	defaultDHCP string
 }
 
 // Option configures a [Server].
@@ -295,8 +370,41 @@ func New(opts ...Option) *Server {
 		"CreatePlacementGroup":      {named("GroupName"), s.createPlacementGroup},
 		"DescribePlacementGroups":   {collection("placement-groups"), s.describePlacementGroups},
 		"DeletePlacementGroup":      {named("GroupName"), s.deletePlacementGroup},
-		"CreateTags":                {named("ResourceId.1"), s.createTags},
-		"DeleteTags":                {named("ResourceId.1"), s.deleteTags},
+		"CreateVpc":                 {createTarget(s, "vpc", "", vpcsOf), s.createVPC},
+		"DescribeVpcs":              {collection("vpcs"), s.describeVPCs},
+		"ModifyVpcAttribute":        {named("VpcId"), s.modifyVPCAttribute},
+		"DescribeVpcAttribute":      {named("VpcId"), s.describeVPCAttribute},
+		"DeleteVpc":                 {named("VpcId"), s.deleteVPC},
+		"CreateSubnet":              {createTarget(s, "subnet", "", subnetsOf), s.createSubnet},
+		"DescribeSubnets":           {collection("subnets"), s.describeSubnets},
+		"DeleteSubnet":              {named("SubnetId"), s.deleteSubnet},
+		"DescribeAvailabilityZones": {collection("availability-zones"), s.describeAvailabilityZones},
+		"CreateInternetGateway":     {createTarget(s, "igw", "", internetGatewaysOf), s.createInternetGateway},
+		"AttachInternetGateway":     {named("InternetGatewayId"), s.attachInternetGateway},
+		"DetachInternetGateway":     {named("InternetGatewayId"), s.detachInternetGateway},
+		"DescribeInternetGateways":  {collection("internet-gateways"), s.describeInternetGateways},
+		"DeleteInternetGateway":     {named("InternetGatewayId"), s.deleteInternetGateway},
+		"CreateNatGateway":          {createTarget(s, "nat", "natgateways", natGatewaysOf), s.createNATGateway},
+		"DescribeNatGateways":       {collection("nat-gateways"), s.describeNATGateways},
+		"DeleteNatGateway":          {named("NatGatewayId"), s.deleteNATGateway},
+		"CreateRouteTable":          {createTarget(s, "rtb", "routetables", routeTablesOf), s.createRouteTable},
+		"DescribeRouteTables":       {collection("route-tables"), s.describeRouteTables},
+		"AssociateRouteTable":       {named("RouteTableId"), s.associateRouteTable},
+		"DisassociateRouteTable":    {named("AssociationId"), s.disassociateRouteTable},
+		"CreateRoute":               {named("RouteTableId"), s.createRoute},
+		"DeleteRouteTable":          {named("RouteTableId"), s.deleteRouteTable},
+		"CreateDhcpOptions":         {createTarget(s, "dopt", "", dhcpOptionsOf), s.createDHCPOptions},
+		"DescribeDhcpOptions":       {collection("dhcp-options"), s.describeDHCPOptions},
+		"AssociateDhcpOptions":      {named("DhcpOptionsId"), s.associateDHCPOptions},
+		"DeleteDhcpOptions":         {named("DhcpOptionsId"), s.deleteDHCPOptions},
+
+		"CreateTransitGatewayVpcAttachment":    {createTarget(s, "tgw-attach", "", attachmentsOf), s.createTransitGatewayVPCAttachment},
+		"DescribeTransitGatewayVpcAttachments": {collection("transit-gateway-vpc-attachments"), s.describeTransitGatewayVPCAttachments},
+		"DescribeTransitGatewayAttachments":    {collection("transit-gateway-attachments"), s.describeTransitGatewayAttachments},
+		"DeleteTransitGatewayVpcAttachment":    {named("TransitGatewayAttachmentId"), s.deleteTransitGatewayVPCAttachment},
+
+		"CreateTags": {named("ResourceId.1"), s.createTags},
+		"DeleteTags": {named("ResourceId.1"), s.deleteTags},
 	}
 	return s
 }
@@ -453,6 +561,9 @@ func (s *Server) region(region string) *regionState {
 			addresses: map[string]*Address{}, interfaces: map[string]*NetworkInterface{}, instances: map[string]*Instance{},
 			images: map[string]*Image{}, volumes: map[string]*Volume{}, snapshots: map[string]*Snapshot{},
 			placementGroups: map[string]*PlacementGroup{},
+			vpcs:            map[string]*VPC{}, subnets: map[string]*Subnet{}, internetGateways: map[string]*InternetGateway{},
+			natGateways: map[string]*NATGateway{}, routeTables: map[string]*RouteTable{}, dhcpOptions: map[string]*DHCPOptions{},
+			transitGateways: map[string]*TransitGateway{}, transitGatewayAttachments: map[string]*TransitGatewayAttachment{},
 		}
 		s.regions[region] = rs
 	}
