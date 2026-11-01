@@ -39,6 +39,11 @@ type clients struct {
 	templates  *gcompute.InstanceTemplatesClient
 	managers   *gcompute.InstanceGroupManagersClient
 	policies   *gcomputebeta.ResourcePoliciesClient
+	networks   *gcompute.NetworksClient
+	subnets    *gcompute.SubnetworksClient
+	routers    *gcompute.RoutersClient
+	firewalls  *gcompute.FirewallsClient
+	globalIPs  *gcompute.GlobalAddressesClient
 	httpClient *http.Client
 	url        string
 }
@@ -66,6 +71,11 @@ func setup(t *testing.T, opts ...compute.Option) *clients {
 		func() error { c.templates, err = gcompute.NewInstanceTemplatesRESTClient(ctx, o...); return err },
 		func() error { c.managers, err = gcompute.NewInstanceGroupManagersRESTClient(ctx, o...); return err },
 		func() error { c.policies, err = gcomputebeta.NewResourcePoliciesRESTClient(ctx, o...); return err },
+		func() error { c.networks, err = gcompute.NewNetworksRESTClient(ctx, o...); return err },
+		func() error { c.subnets, err = gcompute.NewSubnetworksRESTClient(ctx, o...); return err },
+		func() error { c.routers, err = gcompute.NewRoutersRESTClient(ctx, o...); return err },
+		func() error { c.firewalls, err = gcompute.NewFirewallsRESTClient(ctx, o...); return err },
+		func() error { c.globalIPs, err = gcompute.NewGlobalAddressesRESTClient(ctx, o...); return err },
 	} {
 		if err := open(); err != nil {
 			t.Fatal(err)

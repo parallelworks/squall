@@ -7,7 +7,8 @@ import (
 )
 
 // Route is a static route of a VPC network, in the API's JSON shape. Its
-// network and next hop are recorded, not checked.
+// network and next hop are recorded, not checked; a route on a network the
+// server holds keeps the network from being deleted.
 type Route struct {
 	Kind              string   `json:"kind"`
 	ID                uint64   `json:"id,string"`
@@ -23,6 +24,9 @@ type Route struct {
 	NextHopGateway    string   `json:"nextHopGateway,omitzero"`
 	RouteType         string   `json:"routeType,omitzero"`
 	SelfLink          string   `json:"selfLink"`
+
+	// auto is set for a route the API made with its network, which goes with it.
+	auto bool
 }
 
 var routeFields = fieldSet{names: []string{"name", "description", "id", "network", "destRange"}}

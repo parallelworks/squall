@@ -21,6 +21,12 @@
 //   - instance templates: list, get, insert, delete;
 //   - instance group managers: aggregatedList, which is always empty;
 //   - routes: list, get, insert, delete;
+//   - networks: list, get, insert, delete;
+//   - subnetworks: list, aggregatedList, get, insert, delete;
+//   - routers, with their Cloud NAT gateways: list, aggregatedList, get,
+//     insert, patch, delete;
+//   - firewalls: list, get, insert, delete;
+//   - global addresses: list, get, insert, delete, setLabels;
 //   - zone, region and global operations: get and wait.
 //
 // Other methods answer 404. Where it differs from Compute Engine:
@@ -50,8 +56,37 @@
 //     checks that they exist or fit together.
 //   - Zones come from a fixed set per region, which [WithZones] changes.
 //     Regional calls take any region.
-//   - Networks, subnetworks, service accounts, accelerators and other
-//     referenced resources are not checked, and fields the server only
+//   - Networks are custom mode only: an insert must set autoCreateSubnetworks
+//     to false, and legacy and auto mode networks are rejected with 400. Each
+//     network gets the default route to 0.0.0.0/0 the API creates with it,
+//     which goes when the network does; routes for subnetworks are not
+//     listed. A network's get and delete also take its ID. A subnetwork, router, firewall or global
+//     address must name a network that exists, or its insert fails with 404.
+//     Deleting a network that a subnetwork, router, firewall, static route,
+//     global address, instance or peering still uses fails with 400
+//     resourceInUseByAnotherResource, naming the first such user, as does
+//     deleting a subnetwork an instance or address uses. A peering is added
+//     by another stand-in, such as a private services access connection, or
+//     with [Server.AddPeering].
+//   - A subnetwork's primary and secondary ranges are IPv4 CIDR ranges from
+//     /8 to /29 with no host bits set, which must not overlap each other, any
+//     other subnetwork's in the network in any region, or a range allocated
+//     on the network for private services access. Its gateway is the range's
+//     first address. Only PRIVATE, IPV4_ONLY subnetworks are supported.
+//   - A router patch is a JSON merge patch: the nats it sends replace the
+//     router's. A NAT must say which subnetwork ranges it serves and how its
+//     IPs are allocated; MANUAL_ONLY takes regional addresses that exist and
+//     AUTO_ONLY none. Only PUBLIC NATs are supported. BGP settings, peers and
+//     interfaces keep the JSON the caller sent.
+//   - Global addresses are external, from the same pool as regional ones, or
+//     internal with purpose VPC_PEERING, a range for private services access
+//     with a network and a prefixLength from 8 to 29. Without an address, such
+//     a range is the first free one of its size in 10.0.0.0/8 that overlaps
+//     no subnetwork or other range on its network.
+//   - Instances, routes and regional addresses may name networks and
+//     subnetworks the server does not hold, which are not checked. Service
+//     accounts, accelerators and other referenced resources are not checked
+//     either, and fields the server only
 //     records, such as guestAccelerators or reservationAffinity, keep the
 //     JSON the caller sent. Fields it does not know are rejected with 400.
 //     Instance group managers, deletion protection and resource policies
@@ -163,6 +198,12 @@ type Server struct {
 	policies   map[string]*collection[*ResourcePolicy]
 	templates  map[string]*collection[*InstanceTemplate]
 	routes     map[string]*collection[*Route]
+
+	networks        map[string]*collection[*Network]
+	subnetworks     map[string]*collection[*Subnetwork]
+	routers         map[string]*collection[*Router]
+	firewalls       map[string]*collection[*Firewall]
+	globalAddresses map[string]*collection[*Address]
 }
 
 // Option configures a [Server].
@@ -221,6 +262,12 @@ func New(opts ...Option) *Server {
 		policies:    map[string]*collection[*ResourcePolicy]{},
 		templates:   map[string]*collection[*InstanceTemplate]{},
 		routes:      map[string]*collection[*Route]{},
+
+		networks:        map[string]*collection[*Network]{},
+		subnetworks:     map[string]*collection[*Subnetwork]{},
+		routers:         map[string]*collection[*Router]{},
+		firewalls:       map[string]*collection[*Firewall]{},
+		globalAddresses: map[string]*collection[*Address]{},
 		nextIP: map[string]netip.Addr{
 			// Neither range is routable on the internet, so a test cannot reach a real host by mistake.
 			addressExternal: netip.MustParseAddr("100.64.0.1"),
@@ -288,6 +335,35 @@ func (s *Server) registerRoutes() {
 	s.route("POST "+global+"/routes", "compute.routes.insert", "", s.insertRoute, withNameFromBody)
 	s.route("GET "+global+"/routes/{name}", "compute.routes.get", "", s.getRoute, nil)
 	s.route("DELETE "+global+"/routes/{name}", "compute.routes.delete", "", s.deleteRoute, nil)
+
+	s.route("GET "+global+"/networks", "compute.networks.list", "", s.listNetworks, nil)
+	s.route("POST "+global+"/networks", "compute.networks.insert", "", s.insertNetwork, withNameFromBody)
+	s.route("GET "+global+"/networks/{name}", "compute.networks.get", "", s.getNetwork, nil)
+	s.route("DELETE "+global+"/networks/{name}", "compute.networks.delete", "", s.deleteNetwork, nil)
+
+	s.route("GET "+region+"/subnetworks", "compute.subnetworks.list", "", s.listSubnetworks, nil)
+	s.route("GET "+project+"/aggregated/subnetworks", "compute.subnetworks.aggregatedList", "", s.aggregatedSubnetworks, nil)
+	s.route("POST "+region+"/subnetworks", "compute.subnetworks.insert", "", s.insertSubnetwork, withNameFromBody)
+	s.route("GET "+region+"/subnetworks/{name}", "compute.subnetworks.get", "", s.getSubnetwork, nil)
+	s.route("DELETE "+region+"/subnetworks/{name}", "compute.subnetworks.delete", "", s.deleteSubnetwork, nil)
+
+	s.route("GET "+region+"/routers", "compute.routers.list", "", s.listRouters, nil)
+	s.route("GET "+project+"/aggregated/routers", "compute.routers.aggregatedList", "", s.aggregatedRouters, nil)
+	s.route("POST "+region+"/routers", "compute.routers.insert", "", s.insertRouter, withNameFromBody)
+	s.route("GET "+region+"/routers/{name}", "compute.routers.get", "", s.getRouter, nil)
+	s.route("PATCH "+region+"/routers/{name}", "compute.routers.patch", "", s.patchRouter, nil)
+	s.route("DELETE "+region+"/routers/{name}", "compute.routers.delete", "", s.deleteRouter, nil)
+
+	s.route("GET "+global+"/firewalls", "compute.firewalls.list", "", s.listFirewalls, nil)
+	s.route("POST "+global+"/firewalls", "compute.firewalls.insert", "", s.insertFirewall, withNameFromBody)
+	s.route("GET "+global+"/firewalls/{name}", "compute.firewalls.get", "", s.getFirewall, nil)
+	s.route("DELETE "+global+"/firewalls/{name}", "compute.firewalls.delete", "", s.deleteFirewall, nil)
+
+	s.route("GET "+global+"/addresses", "compute.globalAddresses.list", "", s.listAddresses, nil)
+	s.route("POST "+global+"/addresses", "compute.globalAddresses.insert", "", s.insertGlobalAddress, withNameFromBody)
+	s.route("GET "+global+"/addresses/{name}", "compute.globalAddresses.get", "", s.getAddress, nil)
+	s.route("DELETE "+global+"/addresses/{name}", "compute.globalAddresses.delete", "", s.deleteAddress, nil)
+	s.route("POST "+global+"/addresses/{name}/setLabels", "compute.globalAddresses.setLabels", "/setLabels", s.setAddressLabels, nil)
 
 	for _, scope := range []struct{ path, kind string }{{zone, "zone"}, {region, "region"}, {beta, "region"}, {global, "global"}} {
 		s.route("GET "+scope.path+"/operations/{name}", "compute."+scope.kind+"Operations.get", "", s.getOperation, nil)

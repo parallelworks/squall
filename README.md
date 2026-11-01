@@ -26,8 +26,9 @@ failure replays from its seed.
 | [`aws/s3`](https://pkg.go.dev/github.com/parallelworks/squall/aws/s3) | Amazon S3: general purpose buckets (create, head, list with pages and filters, delete), their tags, versioning, policy and CORS rules, and objects (put, delete one or many, list versions and delete markers). |
 | [`azure/arm`](https://pkg.go.dev/github.com/parallelworks/squall/azure/arm) | Azure Resource Manager: resource groups (get, create or update, list with tag filters, delete with everything in them that nothing outside uses), virtual machines (create or update, get, list, instance view, deallocate, start, delete) and their extensions (create or update, get, list, delete), Uniform scale sets (create or update, update, get, list, delete, delete instances) and their VMs, managed disks (VM OS disks included) and snapshots, with cross-region incremental snapshot copies whose completionPercent climbs to 100, Azure Compute Gallery galleries, image definitions and image versions with their replication status, virtual networks and their subnets, NAT gateways, public load balancers with backend pools and outbound rules, network security groups, network interfaces and public IP addresses, the IP configurations of scale set VMs, private DNS zones, virtual network links and A record sets, resource provider registration, Cost Management exports at a subscription's scope, Log Analytics workspaces (create or update, recover, get, list, delete with soft deletion) and the default workspace Application Insights makes for a component that names none, Cognitive Services deployments with partner model attestations, and long-running operations to poll. |
 | [`azure/graph`](https://pkg.go.dev/github.com/parallelworks/squall/azure/graph) | Microsoft Graph: the organization (list), a directory's domains (list) and users (create with Microsoft Entra's name and password rules, get by ID or user principal name, delete, permanently delete once deleted), with application permissions checked as Graph documents them. |
-| [`gcp/compute`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/compute) | Compute Engine: instances (bulkInsert, insert, get, list, aggregatedList, delete, stop, start, setLabels, setMachineType, addAccessConfig, attachDisk, detachDisk), disks (get, list, aggregatedList, insert, delete), snapshots (insert, get, list, delete), zones, regional addresses (get, list, insert, delete, setLabels), resource policies, instance templates, routes, and zone, region and global operations (get, wait). |
+| [`gcp/compute`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/compute) | Compute Engine: instances (bulkInsert, insert, get, list, aggregatedList, delete, stop, start, setLabels, setMachineType, addAccessConfig, attachDisk, detachDisk), disks (get, list, aggregatedList, insert, delete), snapshots (insert, get, list, delete), zones, regional addresses (get, list, insert, delete, setLabels), resource policies, instance templates, routes, custom mode VPC networks with their default route, subnetworks with secondary ranges, routers with Cloud NAT (insert, get, patch, delete, list, aggregatedList), firewalls, global addresses including ranges for private services access, and zone, region and global operations (get, wait). |
 | [`gcp/lustre`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/lustre) | Managed Lustre: instances (create with the API's capacity, tier, ID, filesystem, root squash and maintenance rules, get, list with filters on name, state, filesystem, network, description and labels, patch labels, description, gkeSupportEnabled and capacity, delete) and their long-running operations (get, list, delete, cancel). |
+| [`gcp/servicenetworking`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/servicenetworking) | Service Networking: private service connections (create, list by network, patch with force, deleteConnection), checked against a `gcp/compute` server's networks and allocated ranges and peering the network there, and their long-running operations (get). |
 | [`gcp/storage`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/storage) | Cloud Storage: buckets (insert, get, list, patch labels, versioning and CORS, delete) and objects (multipart and media uploads, list with versions, delete by generation). |
 
 Coverage grows with use: each stand-in implements the methods someone needed,
@@ -107,10 +108,20 @@ it simplifies, the package documentation says so. For Compute Engine:
   `resourceNotReady`. Machine and
   disk types are any well-formed name in the call's zone. Zones come from a
   fixed set per region, which `WithZones` changes.
-- Networks, subnetworks, service accounts and accelerators are not checked.
-  Fields the stand-in only records keep the JSON the caller sent, and fields it
-  does not know are rejected with 400. Instance group managers are not
-  supported: their aggregated list is always empty.
+- Networks are custom mode only, and each gets the default route to
+  `0.0.0.0/0` that goes with it. Subnetworks, routers, firewalls and
+  `VPC_PEERING` global addresses must name a network that exists (404
+  otherwise), and subnetwork ranges must not overlap within the network or
+  with its allocated ranges. Deleting a network or subnetwork that something
+  still uses, a peering included, fails with 400
+  `resourceInUseByAnotherResource`. A router patch replaces its `nats`, as a
+  JSON merge patch does. A `VPC_PEERING` range with no address gets the first
+  free block of its size in 10.0.0.0/8.
+- Instances, routes and regional addresses may name networks and subnetworks
+  the stand-in does not hold, and service accounts and accelerators are not
+  checked. Fields the stand-in only records keep the JSON the caller sent, and
+  fields it does not know are rejected with 400. Instance group managers are
+  not supported: their aggregated list is always empty.
 - A `bulkInsert` skips each instance whose name, or a disk it would create,
   already exists, and creates the rest when they number at least `minCount`;
   its operation succeeds, with `createdVmCount` and `failedToCreateVmCount`
@@ -133,6 +144,19 @@ it simplifies, the package documentation says so. For Compute Engine:
 - A fault rule's `Resource` for an insert is the resource being created, so a
   rule can target the insert of one name; for a `bulkInsert`, the first
   instance it names.
+
+For Service Networking:
+
+- `WithCompute` checks a connection's network and reserved ranges against a
+  `gcp/compute` server and adds the `servicenetworking-googleapis-com` peering
+  to the network, so the network cannot be deleted until `deleteConnection`.
+  `WithProjectNumber` lets a network be named by project number or ID;
+  connections name it by number, as the API does.
+- Changes finish before the call returns. A second create on a network, or
+  one naming a range that is not a `VPC_PEERING` address on it, ends its
+  operation in `FAILED_PRECONDITION`, the first with the API's "Please use
+  UpdateConnection." message. A patch that drops a range needs `force=true`.
+  Producer services are not modeled, so ranges are never in use by them.
 
 For Managed Lustre:
 
