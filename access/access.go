@@ -92,6 +92,12 @@ func (p *Policy) Check(c Call) []string {
 	return nil
 }
 
+// Grants reports whether the policy grants perm, without recording a use or
+// a denial, as a permission test answers. A nil *Policy grants everything.
+func (p *Policy) Grants(perm string) bool {
+	return p == nil || p.granted(perm)
+}
+
 // Used returns, sorted, every permission an allowed call needed.
 func (p *Policy) Used() []string {
 	if p == nil {

@@ -29,6 +29,7 @@ failure replays from its seed.
 | [`azure/graph`](https://pkg.go.dev/github.com/parallelworks/squall/azure/graph) | Microsoft Graph: the organization (list), a directory's domains (list) and users (create with Microsoft Entra's name and password rules, get by ID or user principal name, delete, permanently delete once deleted), with application permissions checked as Graph documents them. |
 | [`gcp/compute`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/compute) | Compute Engine: instances (bulkInsert, insert, get, list, aggregatedList, delete, stop, start, setLabels, setMachineType, addAccessConfig, attachDisk, detachDisk), disks (get, list, aggregatedList, insert, delete), snapshots (insert, get, list, delete), zones, regional addresses (get, list, insert, delete, setLabels), resource policies, instance templates, routes, custom mode VPC networks with their default route, subnetworks with secondary ranges, routers with Cloud NAT (insert, get, patch, delete, list, aggregatedList), firewalls, global addresses including ranges for private services access, and zone, region and global operations (get, wait). |
 | [`gcp/lustre`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/lustre) | Managed Lustre: instances (create with the API's capacity, tier, ID, filesystem, root squash and maintenance rules, get, list with filters on name, state, filesystem, network, description and labels, patch labels, description, gkeSupportEnabled and capacity, delete) and their long-running operations (get, list, delete, cancel). |
+| [`gcp/resourcemanager`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/resourcemanager) | Cloud Resource Manager: projects (get by ID or number, getIamPolicy, setIamPolicy with etag checks, testIamPermissions answered from the server's access policy), seeded by the test. |
 | [`gcp/servicenetworking`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/servicenetworking) | Service Networking: private service connections (create, list by network, patch with force, deleteConnection), checked against a `gcp/compute` server's networks and allocated ranges and peering the network there, and their long-running operations (get). |
 | [`gcp/storage`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/storage) | Cloud Storage: buckets (insert, get, list, patch labels, versioning and CORS, delete) and objects (multipart and media uploads, list with versions, delete by generation). |
 
@@ -145,6 +146,17 @@ it simplifies, the package documentation says so. For Compute Engine:
 - A fault rule's `Resource` for an insert is the resource being created, so a
   rule can target the insert of one name; for a `bulkInsert`, the first
   instance it names.
+
+For Cloud Resource Manager:
+
+- Projects are seeded with `WithProject` or `PutProject` and are always
+  `ACTIVE`. A project the server does not hold answers 403
+  `PERMISSION_DENIED`, as the API does for one that does not exist.
+- A `setIamPolicy` with a stale etag answers 409 `ABORTED`. Conditional
+  bindings need policy version 3. Audit configs are rejected with 400.
+- `testIamPermissions` answers from the server's `access.Policy`, not the
+  project's own policy, so a test can check code that tests its own
+  permissions before acting.
 
 For Service Networking:
 
