@@ -23,6 +23,7 @@ failure replays from its seed.
 | [`fault`](https://pkg.go.dev/github.com/parallelworks/squall/fault) | Decides which calls fail and how: rejected, applied with the response lost, applied with an error, an operation that ends in an error, or slow. Scripted rules and a seeded random rate. |
 | [`access`](https://pkg.go.dev/github.com/parallelworks/squall/access) | Grants a set of permissions (Google Cloud IAM permissions, AWS IAM actions or Azure RBAC actions) and refuses calls that need one it lacks, with the error the cloud answers, including those a request's fields add and Azure's linked checks. Reports which permissions were needed but missing and which were granted but never used. |
 | [`aws/ec2`](https://pkg.go.dev/github.com/parallelworks/squall/aws/ec2) | Amazon EC2: instances (run with client tokens, describe with filters and pages, start, stop, terminate, change type or which attached volumes terminating deletes), images (describe, register from snapshots, deregister), instance types, EBS volumes (create, describe, attach, detach, delete), EBS snapshots (create, copy across regions, describe with filters and pages, delete), placement groups, tags, Elastic IP addresses (allocate, describe, release, associate with an interface or instance, disassociate) and network interfaces (create with client tokens, describe, delete). |
+| [`aws/route53`](https://pkg.go.dev/github.com/parallelworks/squall/aws/route53) | Amazon Route 53: private hosted zones (create with caller references, get, list by name with pages, delete), their VPC associations, tags, and record sets (change in atomic batches with CREATE, UPSERT and DELETE, list with pages), and changes (get). |
 | [`aws/s3`](https://pkg.go.dev/github.com/parallelworks/squall/aws/s3) | Amazon S3: general purpose buckets (create, head, list with pages and filters, delete), their tags, versioning, policy and CORS rules, and objects (put, delete one or many, list versions and delete markers). |
 | [`azure/arm`](https://pkg.go.dev/github.com/parallelworks/squall/azure/arm) | Azure Resource Manager: resource groups (get, create or update, list with tag filters, delete with everything in them that nothing outside uses), virtual machines (create or update, get, list, instance view, deallocate, start, delete) and their extensions (create or update, get, list, delete), Uniform scale sets (create or update, update, get, list, delete, delete instances) and their VMs, managed disks (VM OS disks included) and snapshots, with cross-region incremental snapshot copies whose completionPercent climbs to 100, Azure Compute Gallery galleries, image definitions and image versions with their replication status, virtual networks and their subnets, NAT gateways, public load balancers with backend pools and outbound rules, network security groups, network interfaces and public IP addresses, the IP configurations of scale set VMs, private DNS zones, virtual network links and A record sets, resource provider registration, Cost Management exports at a subscription's scope, Log Analytics workspaces (create or update, recover, get, list, delete with soft deletion) and the default workspace Application Insights makes for a component that names none, Cognitive Services deployments with partner model attestations, and long-running operations to poll. |
 | [`azure/graph`](https://pkg.go.dev/github.com/parallelworks/squall/azure/graph) | Microsoft Graph: the organization (list), a directory's domains (list) and users (create with Microsoft Entra's name and password rules, get by ID or user principal name, delete, permanently delete once deleted), with application permissions checked as Graph documents them. |
@@ -256,6 +257,30 @@ For Amazon S3:
 - A fault rule's `Resource` is the bucket name, or `bucket/key` for an object
   call. A lost `HeadBucket` breaks off inside its status line, since a sent
   header would read as an answer.
+
+For Amazon Route 53:
+
+- Only private hosted zones are supported: `CreateHostedZone` needs a VPC.
+  VPCs are any ID and region unless `WithVPCLookup` says which exist, so a
+  test can back it with another stand-in. Signatures are not checked.
+- A reused `CallerReference` fails with `HostedZoneAlreadyExists`, even after
+  its zone is deleted. A zone name already associated with the same VPC fails
+  with `ConflictingDomainExists`, on create and on `AssociateVPCWithHostedZone`;
+  removing a zone's last VPC fails with `LastVPCAssociation`.
+- Each zone starts with its SOA and NS record sets, which cannot be deleted,
+  and `DeleteHostedZone` fails with `HostedZoneNotEmpty` while any other
+  remains. Changes are `INSYNC` at once.
+- A change batch applies in order and atomically. A failed one answers
+  `InvalidChangeBatch` with a message per failed change: creating a set that
+  exists, deleting one that is missing or whose TTL and values differ, a name
+  outside the zone, a bad A or AAAA value, or a CNAME that shares its name.
+  Record sets are simple or alias ones: set identifiers, routing policies and
+  health checks are rejected with `InvalidInput`.
+- Names are lowercased with a trailing dot, and other characters are `\ooo`
+  escapes, so `*` lists as `\052`. Lists order by name with its labels
+  reversed, then by zone ID or record type.
+- A fault rule's `Resource` is the bare hosted zone ID, or the zone's name for
+  `CreateHostedZone`.
 
 For Cloud Storage:
 
