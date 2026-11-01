@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.24.0](https://github.com/parallelworks/squall/compare/v0.23.1...v0.24.0) (2026-11-01)
+
+
+### Features
+
+* **ec2:** VPC networking with subnets, internet and NAT gateways, route tables, DHCP options and transit gateway attachments ([#74](https://github.com/parallelworks/squall/issues/74)) ([04591be](https://github.com/parallelworks/squall/commit/04591be2700d2587bc191b8cf0b2fba6fd75156a))
+* **gcp:** VPC networks, subnetworks, Cloud NAT routers, firewalls and private services access connections ([#73](https://github.com/parallelworks/squall/issues/73)) ([7bcffdc](https://github.com/parallelworks/squall/commit/7bcffdc907e95f41bced3f4d8bd938e055e6a442))
+* **route53:** private hosted zones and their record sets ([#72](https://github.com/parallelworks/squall/issues/72)) ([1b700ff](https://github.com/parallelworks/squall/commit/1b700ffb10973222729549aa65db7f898ff0befd))
+
 ## [0.23.1](https://github.com/parallelworks/squall/compare/v0.23.0...v0.23.1) (2026-11-01)
 
 
