@@ -40,7 +40,7 @@ func logWorkspaceOps(c *call, location string) opPaths {
 func (s *Server) registerLogAnalyticsRoutes() {
 	s.add("GET", sub+operationalInsights+"/locations/{loc}/operationstatuses/{op}",
 		"Microsoft.OperationalInsights/locations/operationstatuses/read", false, s.operationStatus)
-	s.add("GET", logWorkspaces+"/{name}/operationresults/{op}", logWorkspaceKind.action("operationresults/read"), false, s.operationResult)
+	s.add("GET", logWorkspaces+"/{name}/operationresults/{op}", logWorkspaceKind.action("operations/read"), false, s.operationResult)
 	s.add("GET", logWorkspaces, logWorkspaceKind.action("read"), false, s.listLogWorkspaces)
 	s.add("PUT", logWorkspaces+"/{name}", logWorkspaceKind.action("write"), true, s.put(putSpec{
 		kind: logWorkspaceKind, id: logWorkspaceID, paths: logWorkspaceOps, render: renderLogWorkspace, prepare: s.prepareLogWorkspace,

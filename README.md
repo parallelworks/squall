@@ -444,10 +444,10 @@ For Azure Resource Manager:
   as a recording of `az monitor log-analytics workspace recover` shows), and
   keeping the properties the create leaves out, as Microsoft documents that
   recovery brings back its configuration. A create in another location while the name is held fails with
-  409 `Conflict`; the code and message are inferred. The polling action for
-  `operationresults`,
-  `Microsoft.OperationalInsights/workspaces/operationresults/read`, is
-  inferred from the path. Tables, data sources, deleted workspace listing and
+  409 `Conflict`; the code and message are inferred. Polling a delete's
+  `operationresults` URL needs
+  `Microsoft.OperationalInsights/workspaces/operations/read`, which is
+  inferred, as Azure defines no `operationresults` action for workspaces. Tables, data sources, deleted workspace listing and
   shared keys are not served.
 - An Application Insights component records and echoes
   `properties.WorkspaceResourceId` as sent, and shows `IngestionMode`

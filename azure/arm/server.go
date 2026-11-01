@@ -561,8 +561,9 @@
 // Microsoft.MachineLearningServices/locations/workspaceOperationsStatus/read,
 // and a Microsoft.OperationalInsights one
 // Microsoft.OperationalInsights/locations/operationstatuses/read, or
-// Microsoft.OperationalInsights/workspaces/operationresults/read for a
-// delete's Location URL, which is inferred. Getting a
+// Microsoft.OperationalInsights/workspaces/operations/read for a delete's
+// Location URL, which is inferred: Azure defines no operationresults action
+// for workspaces. Getting a
 // resource provider needs Microsoft.Resources/subscriptions/providers/read and
 // registering one {namespace}/register/action, such as
 // Microsoft.CostManagementExports/register/action. Actions are not
