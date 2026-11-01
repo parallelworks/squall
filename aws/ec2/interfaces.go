@@ -25,8 +25,11 @@ type NetworkInterface struct {
 	Region             string
 	NetworkInterfaceID string
 	SubnetID           string
-	AvailabilityZone   string
-	Description        string
+	// VPCID is the subnet's VPC. The server sets it, and the availability
+	// zone, when it holds the subnet.
+	VPCID            string
+	AvailabilityZone string
+	Description      string
 	// Status is "available", or "in-use" while the interface is attached.
 	Status           string
 	MACAddress       string
@@ -52,6 +55,7 @@ func (ni *NetworkInterface) clone() NetworkInterface {
 type interfaceXML struct {
 	NetworkInterfaceID string          `xml:"networkInterfaceId"`
 	SubnetID           string          `xml:"subnetId"`
+	VPCID              string          `xml:"vpcId,omitempty"`
 	AvailabilityZone   string          `xml:"availabilityZone"`
 	Description        string          `xml:"description"`
 	RequesterManaged   bool            `xml:"requesterManaged"`
@@ -98,6 +102,7 @@ func (ni *NetworkInterface) xml(a *Address) interfaceXML {
 	out := interfaceXML{
 		NetworkInterfaceID: ni.NetworkInterfaceID,
 		SubnetID:           ni.SubnetID,
+		VPCID:              ni.VPCID,
 		AvailabilityZone:   ni.AvailabilityZone,
 		Description:        ni.Description,
 		Status:             ni.Status,
@@ -106,6 +111,7 @@ func (ni *NetworkInterface) xml(a *Address) interfaceXML {
 		SourceDestCheck:    true,
 		Tags:               tagSet(ni.Tags),
 		InterfaceType:      cmp.Or(ni.InterfaceType, interfaceTypeDefault),
+		RequesterManaged:   ni.InterfaceType == interfaceTypeNAT,
 	}
 	for _, g := range ni.SecurityGroupIDs {
 		out.Groups = append(out.Groups, groupXML{g})
@@ -154,6 +160,8 @@ func interfaceFields(ni *NetworkInterface, a *Address) func(string) ([]string, b
 			return one(ni.Status), true
 		case "subnet-id":
 			return one(ni.SubnetID), true
+		case "vpc-id":
+			return one(ni.VPCID), true
 		}
 		return tagFilter(ni.Tags, name)
 	}
@@ -194,15 +202,29 @@ func (s *Server) storeInterface(region string, ni NetworkInterface) (*NetworkInt
 	if ni.NetworkInterfaceID == "" {
 		ni.NetworkInterfaceID = unusedID(s, "eni", rs.interfaces)
 	}
+	sub := rs.subnets[ni.SubnetID]
+	if sub != nil {
+		ni.VPCID, ni.AvailabilityZone = sub.VPCID, sub.AvailabilityZone
+	}
 	if ni.PrivateIPAddress != "" {
 		ip, err := netip.ParseAddr(ni.PrivateIPAddress)
 		if err != nil || !ip.Is4() {
 			return nil, invalidValue("Invalid private IP address '%s'.", ni.PrivateIPAddress)
 		}
+		if sub != nil && !sub.usable(ip) {
+			return nil, invalidValue("Address %s does not fall within the subnet's address range", ip)
+		}
 		ni.PrivateIPAddress = ip.String()
 		if holder, taken := s.privateIPs[privateKey(region, ni.SubnetID, ni.PrivateIPAddress)]; taken && holder != ni.NetworkInterfaceID {
 			return nil, clientError("InvalidIPAddress.InUse", "The specified address %s is already in use.", ni.PrivateIPAddress)
 		}
+	}
+	if sub != nil && ni.PrivateIPAddress == "" {
+		ip, ok := s.allocateInSubnet(sub)
+		if !ok {
+			return nil, insufficientAddresses(sub.SubnetID)
+		}
+		ni.PrivateIPAddress = ip
 	}
 	if old, ok := rs.interfaces[ni.NetworkInterfaceID]; ok {
 		delete(s.privateIPs, privateKey(region, old.SubnetID, old.PrivateIPAddress))
@@ -240,6 +262,23 @@ func (s *Server) allocatePrivate(region, subnet string) string {
 	}
 	s.nextLocal = ip.Next()
 	return ip.String()
+}
+
+// allocateInSubnet returns the lowest address of sub that EC2 does not keep
+// and no interface holds. The caller holds s.mu.
+func (s *Server) allocateInSubnet(sub *Subnet) (string, bool) {
+	p := sub.prefix()
+	for ip := p.Addr(); p.Contains(ip); ip = ip.Next() {
+		if sub.usable(ip) && s.privateIPs[privateKey(sub.Region, sub.SubnetID, ip.String())] == "" {
+			return ip.String(), true
+		}
+	}
+	return "", false
+}
+
+func insufficientAddresses(subnetID string) *apiError {
+	return clientError("InsufficientFreeAddressesInSubnet",
+		"There are not enough free addresses in subnet '%s' to satisfy the requested number of instances.", subnetID)
 }
 
 // newMAC returns a fresh, locally administered MAC address. The caller holds s.mu.

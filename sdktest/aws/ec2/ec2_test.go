@@ -516,7 +516,7 @@ func TestInterfaceFilters(t *testing.T) {
 			t.Errorf("filters %v = %v, %v; want %v", describe(tc.filters), names, err, tc.want)
 		}
 	}
-	if _, err := describeInterfaces(t, c, &awsec2.DescribeNetworkInterfacesInput{Filters: []types.Filter{filter("vpc-id", "vpc-1")}}); sdkerr.AWSCode(err) != "InvalidParameterValue" {
+	if _, err := describeInterfaces(t, c, &awsec2.DescribeNetworkInterfacesInput{Filters: []types.Filter{filter("requester-id", "1")}}); sdkerr.AWSCode(err) != "InvalidParameterValue" {
 		t.Errorf("an unsupported filter = %v, want InvalidParameterValue", err)
 	}
 }

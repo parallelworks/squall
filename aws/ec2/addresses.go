@@ -422,6 +422,9 @@ func (s *Server) associateAddress(c *call) (response, *apiError) {
 	if !ok {
 		return nil, interfaceNotFound(niID)
 	}
+	if sub, ok := rs.subnets[ni.SubnetID]; ok && rs.gatewayOf(sub.VPCID) == nil {
+		return nil, clientError("Gateway.NotAttached", "Network %s is not attached to any internet gateway", sub.VPCID)
+	}
 	if inst, ok := rs.instances[ni.InstanceID]; ok && inst.State == statePending {
 		return nil, clientError("IncorrectInstanceState",
 			"The pending-instance-creation instance to which '%s' is attached is not in a valid state for this operation", niID)

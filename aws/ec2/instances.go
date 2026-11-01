@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"maps"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -130,6 +131,7 @@ type instanceXML struct {
 	Placement          placementXML             `xml:"placement"`
 	Monitoring         monitoringXML            `xml:"monitoring"`
 	SubnetID           string                   `xml:"subnetId,omitempty"`
+	VPCID              string                   `xml:"vpcId,omitempty"`
 	PrivateIPAddress   string                   `xml:"privateIpAddress,omitempty"`
 	IPAddress          string                   `xml:"ipAddress,omitempty"`
 	Groups             []groupXML               `xml:"groupSet>item"`
@@ -183,6 +185,14 @@ func (v *regionView) primary(inst *Instance) *NetworkInterface {
 	return nil
 }
 
+// vpcOf returns the VPC of inst's subnet, when the server holds the subnet.
+func (v *regionView) vpcOf(inst *Instance) string {
+	if sub, ok := v.rs.subnets[inst.SubnetID]; ok {
+		return sub.VPCID
+	}
+	return ""
+}
+
 func (v *regionView) publicIP(inst *Instance) string {
 	if a := v.public[inst.NetworkInterfaceID]; a != nil && v.primary(inst) != nil {
 		return a.PublicIP
@@ -205,6 +215,7 @@ func (v *regionView) instanceXML(inst *Instance) instanceXML {
 		},
 		Monitoring:         monitoringXML{"disabled"},
 		SubnetID:           inst.SubnetID,
+		VPCID:              v.vpcOf(inst),
 		PrivateIPAddress:   inst.PrivateIPAddress,
 		IPAddress:          v.publicIP(inst),
 		Architecture:       inst.Architecture,
@@ -295,6 +306,8 @@ func (v *regionView) instanceFields(inst *Instance) func(string) ([]string, bool
 			return one(inst.ReservationID), true
 		case "subnet-id":
 			return one(inst.SubnetID), true
+		case "vpc-id":
+			return one(v.vpcOf(inst)), true
 		}
 		return tagFilter(inst.Tags, name)
 	}
@@ -705,6 +718,9 @@ func (s *Server) runInstances(c *call) (response, *apiError) {
 	reservation := s.newID("r")
 	now := time.Now()
 	zone := cmp.Or(l.zone, c.region+"a")
+	if sub, ok := rs.subnets[l.subnet]; ok {
+		zone = sub.AvailabilityZone
+	}
 	if ni != nil {
 		zone = ni.AvailabilityZone
 	}
@@ -806,6 +822,17 @@ func (s *Server) checkLaunch(rs *regionState, region string, l *launch) (*Image,
 	case l.privateIP != "":
 		if _, taken := s.privateIPs[privateKey(region, l.subnet, l.privateIP)]; taken {
 			return nil, nil, nil, clientError("InvalidIPAddress.InUse", "Address %s is in use.", l.privateIP)
+		}
+	}
+	if sub, ok := rs.subnets[l.subnet]; ok && ni == nil {
+		if l.zone != "" && l.zone != sub.AvailabilityZone {
+			return nil, nil, nil, invalidValue("The subnet '%s' is in %s, not %s.", sub.SubnetID, sub.AvailabilityZone, l.zone)
+		}
+		if ip, err := netip.ParseAddr(l.privateIP); err == nil && !sub.usable(ip) {
+			return nil, nil, nil, invalidValue("Address %s does not fall within the subnet's address range", l.privateIP)
+		}
+		if rs.free(sub) < l.count {
+			return nil, nil, nil, insufficientAddresses(sub.SubnetID)
 		}
 	}
 	devices, err := l.devicesFor(image)
@@ -1101,7 +1128,8 @@ func (s *Server) LookupInstance(region, id string) (Instance, bool) {
 
 // Settle completes every transition in progress, as enough describes would:
 // pending instances run, stopping ones stop, shutting-down ones terminate,
-// volumes finish creating, attaching and detaching, and snapshots complete.
+// volumes finish creating, attaching and detaching, snapshots complete, and
+// NAT gateways and transit gateway attachments finish creating or deleting.
 func (s *Server) Settle() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1114,6 +1142,12 @@ func (s *Server) Settle() {
 		}
 		for _, snap := range rs.snapshots {
 			snap.State, snap.wait = snapshotCompleted, 0
+		}
+		for _, nat := range rs.natGateways {
+			s.settleNAT(rs, nat)
+		}
+		for _, a := range rs.transitGatewayAttachments {
+			a.settle()
 		}
 	}
 }

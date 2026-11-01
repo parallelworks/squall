@@ -22,7 +22,7 @@ failure replays from its seed.
 | --- | --- |
 | [`fault`](https://pkg.go.dev/github.com/parallelworks/squall/fault) | Decides which calls fail and how: rejected, applied with the response lost, applied with an error, an operation that ends in an error, or slow. Scripted rules and a seeded random rate. |
 | [`access`](https://pkg.go.dev/github.com/parallelworks/squall/access) | Grants a set of permissions (Google Cloud IAM permissions, AWS IAM actions or Azure RBAC actions) and refuses calls that need one it lacks, with the error the cloud answers, including those a request's fields add and Azure's linked checks. Reports which permissions were needed but missing and which were granted but never used. |
-| [`aws/ec2`](https://pkg.go.dev/github.com/parallelworks/squall/aws/ec2) | Amazon EC2: instances (run with client tokens, describe with filters and pages, start, stop, terminate, change type or which attached volumes terminating deletes), images (describe, register from snapshots, deregister), instance types, EBS volumes (create, describe, attach, detach, delete), EBS snapshots (create, copy across regions, describe with filters and pages, delete), placement groups, tags, Elastic IP addresses (allocate, describe, release, associate with an interface or instance, disassociate) and network interfaces (create with client tokens, describe, delete). |
+| [`aws/ec2`](https://pkg.go.dev/github.com/parallelworks/squall/aws/ec2) | Amazon EC2: instances (run with client tokens, describe with filters and pages, start, stop, terminate, change type or which attached volumes terminating deletes), images (describe, register from snapshots, deregister), instance types, EBS volumes (create, describe, attach, detach, delete), EBS snapshots (create, copy across regions, describe with filters and pages, delete), placement groups, tags, Elastic IP addresses (allocate, describe, release, associate with an interface or instance, disassociate), network interfaces (create with client tokens, describe, delete), and VPC networking: VPCs and their DNS attributes, subnets, availability zones, internet gateways (create, attach, detach, delete), NAT gateways on Elastic IP addresses, route tables with their routes and subnet associations, DHCP options, and VPC attachments to transit gateways the test sets up, refusing deletes with dependencies as EC2 does. |
 | [`aws/route53`](https://pkg.go.dev/github.com/parallelworks/squall/aws/route53) | Amazon Route 53: private hosted zones (create with caller references, get, list by name with pages, delete), their VPC associations, tags, and record sets (change in atomic batches with CREATE, UPSERT and DELETE, list with pages), and changes (get). |
 | [`aws/s3`](https://pkg.go.dev/github.com/parallelworks/squall/aws/s3) | Amazon S3: general purpose buckets (create, head, list with pages and filters, delete), their tags, versioning, policy and CORS rules, and objects (put, delete one or many, list versions and delete markers). |
 | [`azure/arm`](https://pkg.go.dev/github.com/parallelworks/squall/azure/arm) | Azure Resource Manager: resource groups (get, create or update, list with tag filters, delete with everything in them that nothing outside uses), virtual machines (create or update, get, list, instance view, deallocate, start, delete) and their extensions (create or update, get, list, delete), Uniform scale sets (create or update, update, get, list, delete, delete instances) and their VMs, managed disks (VM OS disks included) and snapshots, with cross-region incremental snapshot copies whose completionPercent climbs to 100, Azure Compute Gallery galleries, image definitions and image versions with their replication status, virtual networks and their subnets, NAT gateways, public load balancers with backend pools and outbound rules, network security groups, network interfaces and public IP addresses, the IP configurations of scale set VMs, private DNS zones, virtual network links and A record sets, resource provider registration, Cost Management exports at a subscription's scope, Log Analytics workspaces (create or update, recover, get, list, delete with soft deletion) and the default workspace Application Insights makes for a component that names none, Cognitive Services deployments with partner model attestations, and long-running operations to poll. |
@@ -192,9 +192,12 @@ For Amazon EC2:
 
 - Signatures are not checked. The region comes from the SigV4 credential
   scope, and each region keeps its own resources.
-- Subnet and security group IDs and key pair names are not validated, and
-  there are no VPCs, default or otherwise: `RunInstances` needs a subnet or a
-  network interface.
+- Security group IDs and key pair names are not validated, and there is no
+  default VPC: `RunInstances` needs a subnet or a network interface. A subnet
+  ID the stand-in does not hold is accepted there and by
+  `CreateNetworkInterface`, as before VPCs existed; in a subnet created with
+  `CreateSubnet`, interfaces and instances take the subnet's VPC, zone and an
+  address from its CIDR block.
   Images are registered by the test with `PutImage`, or with `RegisterImage`
   from snapshots the stand-in holds; instance types come from a small built-in
   set or `PutInstanceType`.
@@ -248,7 +251,27 @@ For Amazon EC2:
 - Filters take EC2's `*` and `?` wildcards. Filter names and parameters the
   stand-in does not support are rejected with 400 rather than ignored.
 - Public IP addresses come from 100.64.0.0/10 and private ones from
-  10.0.0.0/8. There is no address quota unless the test sets one.
+  10.0.0.0/8, or from the subnet's CIDR block for subnets the stand-in holds.
+  There is no address quota unless the test sets one.
+- VPCs and subnets take IPv4 CIDR blocks from /16 to /28; IPv6, secondary
+  CIDR blocks and IPAM pools are not supported. Each VPC gets a main route
+  table with the local route and the region's default DHCP options set. A
+  region has the zones `WithAvailabilityZones` sets, or the region with `a`,
+  `b` and `c` appended, with zone IDs such as `use1-az1`.
+- Deletes fail with `DependencyViolation` while something depends on the
+  resource, as in EC2: a VPC with subnets, an attached internet gateway or
+  extra route tables; a subnet with network interfaces (a NAT gateway's
+  included until it is deleted) or a transit gateway attachment; an attached
+  internet gateway; a main or associated route table; DHCP options in use.
+  Detaching an internet gateway while the VPC has public addresses mapped
+  fails the same way.
+- NAT gateways and transit gateway attachments move from `pending` to
+  `available` and from `deleting` to `deleted` as describes see them, like
+  instances, and stay visible once deleted. A NAT gateway on an Elastic IP
+  address that is already associated, or in a VPC with no internet gateway,
+  ends `failed` with EC2's failure code. Routes whose target is gone read
+  `blackhole`. Transit gateways themselves are set up by the test with
+  `PutTransitGateway`; the stand-in has no API to create them.
 - EC2 has no long-running operations, so a failed operation fails the call
   before it takes effect. A fault's reason is the EC2 error code it answers
   with, and the generic ones become `InternalError`, `Unavailable` and

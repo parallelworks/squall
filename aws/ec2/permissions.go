@@ -18,7 +18,7 @@ func WithPolicy(p *access.Policy) Option {
 // action itself, and ec2:CreateTags when it tags what it creates.
 func needs(name string, p *params) []string {
 	perms := []string{"ec2:" + name}
-	if name != "CreateTags" && len(p.indexes("TagSpecification")) > 0 {
+	if name != "CreateTags" && len(p.indexes("TagSpecification"))+len(p.indexes("TagSpecifications")) > 0 {
 		perms = append(perms, "ec2:CreateTags")
 	}
 	return perms

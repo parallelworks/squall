@@ -139,16 +139,22 @@ func (p *params) fingerprint() string {
 
 // tags reads TagSpecification.N for resourceType.
 func (p *params) tags(resourceType string) (map[string]string, *apiError) {
-	specs, err := p.tagSpecs(resourceType)
+	specs, err := p.tagSpecsIn("TagSpecification", resourceType)
 	return specs[resourceType], err
 }
 
 // tagSpecs reads TagSpecification.N, keyed by resource type, for the resource
 // types a call can tag.
 func (p *params) tagSpecs(resourceTypes ...string) (map[string]map[string]string, *apiError) {
+	return p.tagSpecsIn("TagSpecification", resourceTypes...)
+}
+
+// tagSpecsIn reads tag specifications from param.N, which is
+// TagSpecifications for the few actions that name it in the plural.
+func (p *params) tagSpecsIn(param string, resourceTypes ...string) (map[string]map[string]string, *apiError) {
 	out := map[string]map[string]string{}
-	for _, n := range p.indexes("TagSpecification") {
-		spec := "TagSpecification." + n
+	for _, n := range p.indexes(param) {
+		spec := param + "." + n
 		t := p.get(spec + ".ResourceType")
 		if !slices.Contains(resourceTypes, t) {
 			return nil, invalidValue("'%s' is not a valid taggable resource type for this operation.", t)
