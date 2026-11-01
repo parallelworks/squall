@@ -115,3 +115,17 @@ func TestPolicyIsSafeForConcurrentUse(t *testing.T) {
 		t.Errorf("%d denials, want 50", got)
 	}
 }
+
+func TestGrantsRecordsNothing(t *testing.T) {
+	p := Allow("compute.instances.*")
+	if !p.Grants("compute.instances.get") || p.Grants("compute.disks.get") {
+		t.Error("Grants did not follow the grants")
+	}
+	if len(p.Used()) != 0 || len(p.Denials()) != 0 {
+		t.Errorf("Grants recorded use %v or denials %v", p.Used(), p.Denials())
+	}
+	var none *Policy
+	if !none.Grants("anything") {
+		t.Error("a nil policy does not grant everything")
+	}
+}
