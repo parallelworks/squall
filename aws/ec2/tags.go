@@ -22,6 +22,8 @@ func (rs *regionState) tagsOf(id string) (*map[string]string, *apiError) {
 		return tagsIn(rs.natGateways, id, natGatewayNotFound, func(v *NATGateway) *map[string]string { return &v.Tags })
 	case "rtb":
 		return tagsIn(rs.routeTables, id, routeTableNotFound, func(v *RouteTable) *map[string]string { return &v.Tags })
+	case "sg":
+		return tagsIn(rs.securityGroups, id, securityGroupNotFound, func(v *SecurityGroup) *map[string]string { return &v.Tags })
 	case "dopt":
 		return tagsIn(rs.dhcpOptions, id, dhcpOptionsNotFound, func(v *DHCPOptions) *map[string]string { return &v.Tags })
 	case "tgw":

@@ -27,14 +27,16 @@
 //     of the SigV4 Authorization header (or the X-Amz-Credential query
 //     parameter), and each region keeps its own resources. There is one
 //     account: the server keeps no owner IDs.
-//   - Security group IDs and key pair names are not validated, and there is
-//     no default VPC. A subnet ID the server does not hold is accepted where
-//     an interface or instance names one, so code that never creates a VPC
-//     keeps working: such an interface reports no VPC ID, and its
-//     availability zone is the region with "a" appended unless an instance
-//     launched in another. In a subnet the server holds, an interface takes
+//   - Key pair names are not validated, nor are security group IDs outside
+//     subnets the server holds, and there is no default VPC. A subnet ID the
+//     server does not hold is accepted where an interface or instance names
+//     one, so code that never creates a VPC keeps working: such an interface
+//     reports no VPC ID, and its availability zone is the region with "a"
+//     appended unless an instance launched in another. In a subnet the server holds, an interface takes
 //     the subnet's VPC and zone and an address from its CIDR block, as EC2
-//     assigns them. ReleaseAddress fails with
+//     assigns them, and security groups of that VPC: the ones it names, which
+//     must exist (else InvalidGroup.NotFound) in the VPC (else
+//     InvalidParameter), or the VPC's default group. ReleaseAddress fails with
 //     InvalidIPAddress.InUse for an associated address, as in a nondefault
 //     VPC, rather than disassociating it. Private IP addresses are unique
 //     within a subnet and, outside subnets the server holds, come from
@@ -162,7 +164,11 @@
 //     subnet, DisassociateRouteTable, CreateRoute to an internet gateway, NAT
 //     gateway or transit gateway, DeleteRouteTable), DHCP options
 //     (CreateDhcpOptions, DescribeDhcpOptions, AssociateDhcpOptions,
-//     DeleteDhcpOptions) and transit gateway VPC attachments
+//     DeleteDhcpOptions), security groups (CreateSecurityGroup,
+//     DescribeSecurityGroups, DescribeSecurityGroupRules,
+//     AuthorizeSecurityGroupIngress, AuthorizeSecurityGroupEgress,
+//     RevokeSecurityGroupIngress, RevokeSecurityGroupEgress,
+//     DeleteSecurityGroup) and transit gateway VPC attachments
 //     (CreateTransitGatewayVpcAttachment, DescribeTransitGatewayVpcAttachments,
 //     DescribeTransitGatewayAttachments, DeleteTransitGatewayVpcAttachment).
 //     IPv6, secondary CIDR blocks, IPAM pools and Outposts are not supported.
@@ -170,17 +176,35 @@
 //     lie within its VPC (else InvalidSubnet.Range) and not overlap another
 //     (InvalidSubnet.Conflict). A VPC answers pending to CreateVpc and is
 //     available from then on. Each VPC gets a main route table with the local
-//     route, deleted with it, and the region's default DHCP options set,
-//     which the server creates with the region's first VPC.
+//     route and a security group named "default", both deleted with it, and
+//     the region's default DHCP options set, which the server creates with
+//     the region's first VPC.
+//   - The default security group allows all traffic from its own members and
+//     all outbound traffic, and DeleteSecurityGroup refuses it with
+//     CannotDelete. A new group starts with the rule that allows all outbound
+//     traffic. A group's name is unique in its VPC (else
+//     InvalidGroup.Duplicate), and "default" is reserved
+//     (InvalidGroup.Reserved). Rules take IPv4 and IPv6 CIDR blocks and groups
+//     in the same VPC as peers, and are given and described as IpPermissions,
+//     one rule per peer; an existing rule fails with
+//     InvalidPermission.Duplicate, and revoking one the group lacks with
+//     InvalidPermission.NotFound, as in a nondefault VPC. Prefix lists, the
+//     flat CidrIp and SourceSecurityGroupName parameters, and rule tags are
+//     not supported. With no default VPC, a GroupName stands in for a GroupId
+//     only in DescribeSecurityGroups, where it matches groups of that name in
+//     any VPC; CreateSecurityGroup without a VpcId and other calls with a
+//     GroupName fail with VPCIdNotSpecified.
 //   - A region has the zones [WithAvailabilityZones] sets, or by default the
 //     region with "a", "b" and "c" appended. Zone IDs are numbered in that
 //     order, such as use1-az1. CreateSubnet without a zone uses the first.
 //   - Deletes that EC2 refuses while something depends on the resource fail
 //     with DependencyViolation: a VPC with subnets, an attached internet
-//     gateway or route tables other than the main one; a subnet with network
-//     interfaces (a NAT gateway's until it is deleted, an instance's until
-//     termination releases it) or a transit gateway attachment that is not
-//     deleted; an attached internet gateway; a route table that is main or
+//     gateway, route tables other than the main one or security groups other
+//     than the default one; a security group a network interface uses (an
+//     instance's included) or another group's rule refers to; a subnet with
+//     network interfaces (a NAT gateway's until it is deleted, an instance's
+//     until termination releases it) or a transit gateway attachment that is
+//     not deleted; an attached internet gateway; a route table that is main or
 //     associated with a subnet; a DHCP options set a VPC uses. Detaching an
 //     internet gateway while an interface in the VPC has a public address
 //     also fails with DependencyViolation, and AssociateAddress fails with
@@ -216,7 +240,7 @@
 // that takes several; a create call names the resource it creates (the first
 // instance, for RunInstances), placement group calls name the group by name,
 // AssociateRouteTable and CreateRoute name the route table, AssociateDhcpOptions
-// names the options set, and a describe call names the collection, such as
+// names the options set, security group rule calls name the group, and a describe call names the collection, such as
 // "us-east-1/addresses" or "us-east-1/nat-gateways".
 // EC2 has no long-running operations, so [fault.ModeFailOperation] fails a
 // call as [fault.ModeReject] does. A fault's
@@ -294,6 +318,7 @@ type regionState struct {
 	dhcpOptions               map[string]*DHCPOptions
 	transitGateways           map[string]*TransitGateway
 	transitGatewayAttachments map[string]*TransitGatewayAttachment
+	securityGroups            map[string]*SecurityGroup
 	// defaultDHCP is the ID of the region's default DHCP options set.
 	defaultDHCP string
 }
@@ -397,6 +422,15 @@ func New(opts ...Option) *Server {
 		"DescribeDhcpOptions":       {collection("dhcp-options"), s.describeDHCPOptions},
 		"AssociateDhcpOptions":      {named("DhcpOptionsId"), s.associateDHCPOptions},
 		"DeleteDhcpOptions":         {named("DhcpOptionsId"), s.deleteDHCPOptions},
+
+		"CreateSecurityGroup":           {createTarget(s, "sg", "", securityGroupsOf), s.createSecurityGroup},
+		"DescribeSecurityGroups":        {collection("security-groups"), s.describeSecurityGroups},
+		"DescribeSecurityGroupRules":    {collection("security-group-rules"), s.describeSecurityGroupRules},
+		"AuthorizeSecurityGroupIngress": {named("GroupId"), s.authorizeIngress},
+		"AuthorizeSecurityGroupEgress":  {named("GroupId"), s.authorizeEgress},
+		"RevokeSecurityGroupIngress":    {named("GroupId"), s.revokeIngress},
+		"RevokeSecurityGroupEgress":     {named("GroupId"), s.revokeEgress},
+		"DeleteSecurityGroup":           {named("GroupId"), s.deleteSecurityGroup},
 
 		"CreateTransitGatewayVpcAttachment":    {createTarget(s, "tgw-attach", "", attachmentsOf), s.createTransitGatewayVPCAttachment},
 		"DescribeTransitGatewayVpcAttachments": {collection("transit-gateway-vpc-attachments"), s.describeTransitGatewayVPCAttachments},
@@ -564,6 +598,7 @@ func (s *Server) region(region string) *regionState {
 			vpcs:            map[string]*VPC{}, subnets: map[string]*Subnet{}, internetGateways: map[string]*InternetGateway{},
 			natGateways: map[string]*NATGateway{}, routeTables: map[string]*RouteTable{}, dhcpOptions: map[string]*DHCPOptions{},
 			transitGateways: map[string]*TransitGateway{}, transitGatewayAttachments: map[string]*TransitGatewayAttachment{},
+			securityGroups: map[string]*SecurityGroup{},
 		}
 		s.regions[region] = rs
 	}
