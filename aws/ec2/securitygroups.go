@@ -503,6 +503,8 @@ func readPermissions(p *params, egress bool) ([]SecurityGroupRule, *apiError) {
 				return nil, err
 			}
 			r.Description = p.get(key + "Groups." + m + ".Description")
+			p.get(key + "Groups." + m + ".UserId")
+			p.get(key + "Groups." + m + ".VpcId")
 			out = append(out, r)
 		}
 		if len(out) == before {

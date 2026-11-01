@@ -72,6 +72,26 @@ func deleteGroup(t *testing.T, c *awsec2.Client, id string) error {
 	return err
 }
 
+func TestSecurityGroupPairNamingItsVPCAndAccount(t *testing.T) {
+	c := newClient(t, ec2.New())
+	vpc := createVPC(t, c, "10.0.0.0/16")
+	web, db := createGroup(t, c, vpc, "web"), createGroup(t, c, vpc, "db")
+	_, err := c.AuthorizeSecurityGroupIngress(t.Context(), &awsec2.AuthorizeSecurityGroupIngressInput{
+		GroupId: aws.String(db),
+		IpPermissions: []types.IpPermission{{
+			IpProtocol:       aws.String("-1"),
+			UserIdGroupPairs: []types.UserIdGroupPair{{GroupId: aws.String(web), VpcId: aws.String(vpc), UserId: aws.String("123456789012")}},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pairs := describeGroup(t, c, db).IpPermissions
+	if len(pairs) != 1 || len(pairs[0].UserIdGroupPairs) != 1 || aws.ToString(pairs[0].UserIdGroupPairs[0].GroupId) != web {
+		t.Errorf("db ingress = %+v, want all traffic from web", pairs)
+	}
+}
+
 func TestSecurityGroupLifecycle(t *testing.T) {
 	s := ec2.New()
 	c := newClient(t, s)
