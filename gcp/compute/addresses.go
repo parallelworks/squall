@@ -24,7 +24,9 @@ const (
 	maxLabelLength = 63
 )
 
-// Address is a regional address, in the API's JSON shape.
+// Address is a regional or global address, in the API's JSON shape. A global
+// address with purpose VPC_PEERING is a range allocated for private services
+// access: Address and PrefixLength give its CIDR range.
 type Address struct {
 	Kind              string            `json:"kind"`
 	ID                uint64            `json:"id,string"`
@@ -38,8 +40,9 @@ type Address struct {
 	IPVersion         string            `json:"ipVersion,omitzero"`
 	Subnetwork        string            `json:"subnetwork,omitzero"`
 	Network           string            `json:"network,omitzero"`
+	PrefixLength      int               `json:"prefixLength,omitzero"`
 	Status            string            `json:"status"`
-	Region            string            `json:"region"`
+	Region            string            `json:"region,omitzero"`
 	SelfLink          string            `json:"selfLink"`
 	Labels            map[string]string `json:"labels,omitzero"`
 	LabelFingerprint  string            `json:"labelFingerprint"`
@@ -55,9 +58,17 @@ func (a *Address) clone() Address {
 
 func addressPath(region, name string) string { return region + "/addresses/" + name }
 
-// lookup returns the named address in region. The caller holds s.mu.
-func (s *Server) lookup(region, name string) (*Address, bool) {
-	return lookupIn(s.addresses, region, name)
+// addressMap holds the addresses of scope, a region or the global scope.
+func (s *Server) addressMap(scope string) map[string]*collection[*Address] {
+	if strings.HasSuffix(scope, "/global") {
+		return s.globalAddresses
+	}
+	return s.addresses
+}
+
+// lookup returns the named address in scope. The caller holds s.mu.
+func (s *Server) lookup(scope, name string) (*Address, bool) {
+	return lookupIn(s.addressMap(scope), scope, name)
 }
 
 var addressFields = fieldSet{names: []string{"name", "description", "status", "address", "addressType", "id"}, labels: true}
@@ -76,6 +87,10 @@ func (a *Address) filterValue(field string) string {
 		return a.AddressType
 	case "id":
 		return strconv.FormatUint(a.ID, 10)
+	case "purpose":
+		return a.Purpose
+	case "network":
+		return a.Network
 	}
 	return a.Labels[strings.TrimPrefix(field, "labels.")]
 }
@@ -240,7 +255,7 @@ func (s *Server) insertAddress(r *http.Request, opFault *apiError) (any, *apiErr
 }
 
 func (s *Server) getAddress(r *http.Request, _ *apiError) (any, *apiError) {
-	region, name := regionPath(r), r.PathValue("name")
+	region, name := scopeOf(r), r.PathValue("name")
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	a, ok := s.lookup(region, name)
@@ -256,7 +271,7 @@ func (s *Server) deleteAddress(r *http.Request, opFault *apiError) (any, *apiErr
 	if err != nil {
 		return nil, err
 	}
-	region, name := regionPath(r), r.PathValue("name")
+	region, name := scopeOf(r), r.PathValue("name")
 	path := addressPath(region, name)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -268,7 +283,7 @@ func (s *Server) deleteAddress(r *http.Request, opFault *apiError) (any, *apiErr
 		return nil, notFound(path)
 	}
 	if opFault == nil {
-		s.addresses[region].remove(name)
+		s.addressMap(region)[region].remove(name)
 		key := ipKey(region, a.AddressType, a.Address)
 		if len(a.Users) > 0 {
 			// The API releases an address in use, and the IP stays with its user until the user goes.
@@ -300,7 +315,7 @@ func (s *Server) setAddressLabels(r *http.Request, opFault *apiError) (any, *api
 	if err != nil {
 		return nil, err
 	}
-	region, name := regionPath(r), r.PathValue("name")
+	region, name := scopeOf(r), r.PathValue("name")
 	path := addressPath(region, name)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -322,14 +337,17 @@ func (s *Server) setAddressLabels(r *http.Request, opFault *apiError) (any, *api
 }
 
 func (s *Server) listAddresses(r *http.Request, _ *apiError) (any, *apiError) {
-	q, err := parseListQuery(r, addressFields)
+	scope, fields := scopeOf(r), addressFields
+	if r.PathValue("region") == "" {
+		fields = globalAddressFields
+	}
+	q, err := parseListQuery(r, fields)
 	if err != nil {
 		return nil, err
 	}
-	region := regionPath(r)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return listScope(s.addresses[region], q, "compute#addressList", region+"/addresses", nil), nil
+	return listScope(s.addressMap(scope)[scope], q, "compute#addressList", scope+"/addresses", nil), nil
 }
 
 // Addresses returns every address the server holds, ordered by selfLink.

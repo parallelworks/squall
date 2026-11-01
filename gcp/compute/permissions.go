@@ -72,6 +72,35 @@ var basePermissions = map[string][]string{
 	"compute.routes.get":    {"compute.routes.get"},
 	"compute.routes.delete": {"compute.routes.delete"},
 
+	"compute.networks.list":   {"compute.networks.list"},
+	"compute.networks.insert": {"compute.networks.create"},
+	"compute.networks.get":    {"compute.networks.get"},
+	"compute.networks.delete": {"compute.networks.delete"},
+
+	"compute.subnetworks.list":           {"compute.subnetworks.list"},
+	"compute.subnetworks.aggregatedList": {"compute.subnetworks.list"},
+	"compute.subnetworks.insert":         {"compute.subnetworks.create"},
+	"compute.subnetworks.get":            {"compute.subnetworks.get"},
+	"compute.subnetworks.delete":         {"compute.subnetworks.delete"},
+
+	"compute.routers.list":           {"compute.routers.list"},
+	"compute.routers.aggregatedList": {"compute.routers.list"},
+	"compute.routers.insert":         {"compute.routers.create"},
+	"compute.routers.get":            {"compute.routers.get"},
+	"compute.routers.patch":          {"compute.routers.update"},
+	"compute.routers.delete":         {"compute.routers.delete"},
+
+	"compute.firewalls.list":   {"compute.firewalls.list"},
+	"compute.firewalls.insert": {"compute.firewalls.create", "compute.networks.updatePolicy"},
+	"compute.firewalls.get":    {"compute.firewalls.get"},
+	"compute.firewalls.delete": {"compute.firewalls.delete", "compute.networks.updatePolicy"},
+
+	"compute.globalAddresses.list":      {"compute.globalAddresses.list"},
+	"compute.globalAddresses.insert":    {"compute.globalAddresses.create|compute.globalAddresses.createInternal"},
+	"compute.globalAddresses.get":       {"compute.globalAddresses.get"},
+	"compute.globalAddresses.delete":    {"compute.globalAddresses.delete|compute.globalAddresses.deleteInternal"},
+	"compute.globalAddresses.setLabels": {"compute.globalAddresses.setLabels"},
+
 	"compute.zoneOperations.get":    {"compute.zoneOperations.get"},
 	"compute.zoneOperations.wait":   {"compute.zoneOperations.get"},
 	"compute.regionOperations.get":  {"compute.regionOperations.get"},
@@ -163,6 +192,8 @@ func needs(method string, r *http.Request) []string {
 	case "compute.addresses.insert":
 		add(len(f.Labels) > 0, "compute.addresses.setLabels")
 		add(f.Subnetwork != "", "compute.subnetworks.use")
+	case "compute.globalAddresses.insert":
+		add(len(f.Labels) > 0, "compute.globalAddresses.setLabels")
 	case "compute.disks.insert":
 		add(f.SourceImage != "", "compute.images.useReadOnly")
 		add(f.SourceSnapshot != "", "compute.snapshots.useReadOnly")
