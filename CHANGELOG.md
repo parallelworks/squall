@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.1](https://github.com/parallelworks/squall/compare/v0.23.0...v0.23.1) (2026-11-01)
+
+
+### Bug fixes
+
+* **arm:** polling a Log Analytics workspace delete's operation result needs workspaces/operations/read ([#70](https://github.com/parallelworks/squall/issues/70)) ([170c919](https://github.com/parallelworks/squall/commit/170c919fc24d11d7b63185fbb92ec75aa5e39adb))
+
 ## [0.23.0](https://github.com/parallelworks/squall/compare/v0.22.1...v0.23.0) (2026-10-31)
 
 
