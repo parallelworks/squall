@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.25.0](https://github.com/parallelworks/squall/compare/v0.24.0...v0.25.0) (2026-11-01)
+
+
+### Features
+
+* **ec2:** VPC security groups with ingress and egress rules and each VPC's default group ([#76](https://github.com/parallelworks/squall/issues/76)) ([af93c71](https://github.com/parallelworks/squall/commit/af93c713f0d4db1827b348a695c75b37accc18ba))
+* **gcp:** Cloud Resource Manager projects with IAM policies ([#77](https://github.com/parallelworks/squall/issues/77)) ([d4865e9](https://github.com/parallelworks/squall/commit/d4865e9f4bb006ceae008212b36aecc642291ab0))
+
 ## [0.24.0](https://github.com/parallelworks/squall/compare/v0.23.1...v0.24.0) (2026-11-01)
 
 
