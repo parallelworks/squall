@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.26.0](https://github.com/parallelworks/squall/compare/v0.25.0...v0.26.0) (2026-11-02)
+
+
+### Features
+
+* **cur:** Cost and Usage Reports definitions with S3 bucket policy verification ([#79](https://github.com/parallelworks/squall/issues/79)) ([0322df9](https://github.com/parallelworks/squall/commit/0322df907e1384c54a46179fad2ae67225908689))
+* **gcp:** BigQuery datasets and Service Usage ([#80](https://github.com/parallelworks/squall/issues/80)) ([2b2932a](https://github.com/parallelworks/squall/commit/2b2932acfd48fdfbbf3df7052fd2ba34f8be4f7c))
+* **s3:** ListObjectsV2 with pages, prefixes, delimiters and URL encoding ([#81](https://github.com/parallelworks/squall/issues/81)) ([0a76db6](https://github.com/parallelworks/squall/commit/0a76db63dcd5ba5f88774c6055daf7c1e26b9d96))
+
 ## [0.25.0](https://github.com/parallelworks/squall/compare/v0.24.0...v0.25.0) (2026-11-01)
 
 
