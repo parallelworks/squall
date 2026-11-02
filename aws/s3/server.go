@@ -15,7 +15,7 @@
 // their tags (PutBucketTagging, GetBucketTagging, DeleteBucketTagging),
 // versioning (PutBucketVersioning, GetBucketVersioning), policy
 // (PutBucketPolicy) and CORS rules (PutBucketCors), and the objects in them
-// (PutObject, DeleteObject, DeleteObjects, ListObjectVersions), with the real
+// (PutObject, DeleteObject, DeleteObjects, ListObjectsV2, ListObjectVersions), with the real
 // API's error codes. Other operations answer 404 with the code
 // NotImplemented. Where it differs from S3:
 //
@@ -60,6 +60,13 @@
 //     then newest first, and its markers are positions, so a page may follow
 //     one whose versions were deleted; it takes no delimiter or
 //     encoding-type.
+//   - ListObjectsV2 lists each key whose newest version is not a delete
+//     marker, in UTF-8 binary order, and rolls keys up into CommonPrefixes
+//     by delimiter. Its continuation token encodes the last key or common
+//     prefix a page listed, so like ListObjectVersions' markers it is a
+//     position. With
+//     encoding-type=url, keys and prefixes are query escaped with "/" kept.
+//     Owners are the account's canonical ID, without a display name.
 //   - Tags follow S3's rules: up to 50, keys of 1 to 128 characters, values
 //     of up to 256, Unicode letters, numbers, separators and "+-=._:/@", no
 //     duplicates and no "aws:" prefix. PutBucketTagging with an empty tag set removes
@@ -74,7 +81,7 @@
 // [WithPolicy] grants the caller a set of IAM actions and refuses a call that
 // needs one it lacks with 403 AccessDenied, before any fault. Each operation
 // needs the action the S3 user guide lists for it, such as s3:ListBucket for
-// HeadBucket; deleting a version needs s3:DeleteObjectVersion instead of
+// HeadBucket and ListObjectsV2; deleting a version needs s3:DeleteObjectVersion instead of
 // s3:DeleteObject, an ACL header on PutObject s3:PutObjectAcl, and an
 // object ownership header on CreateBucket s3:PutBucketOwnershipControls.
 // DeleteObjects is checked key by key, as S3 checks it: a key the policy may
@@ -221,6 +228,7 @@ func (s *Server) operations() map[string]operation {
 		"PUT bucket?policy":      {"PutBucketPolicy", nil, s.putBucketPolicy},
 		"PUT bucket?cors":        {"PutBucketCors", nil, s.putBucketCors},
 		"GET bucket?versions":    {"ListObjectVersions", []string{"prefix", "key-marker", "version-id-marker", "max-keys"}, s.listObjectVersions},
+		"GET bucket?list-type":   {"ListObjectsV2", listObjectsV2Params, s.listObjectsV2},
 		"POST bucket?delete":     {"DeleteObjects", nil, s.deleteObjects},
 		"PUT object":             {"PutObject", nil, s.putObject},
 		"DELETE object":          {"DeleteObject", []string{"versionId"}, s.deleteObject},
@@ -229,7 +237,6 @@ func (s *Server) operations() map[string]operation {
 		"DELETE service":         {},
 		"POST service":           {},
 		"GET bucket?location":    {},
-		"GET bucket?list-type":   {},
 		"GET object":             {},
 		"HEAD object":            {},
 		"POST object?uploads":    {},

@@ -27,6 +27,14 @@ func TestPolicyRefusesAnOperationByItsAction(t *testing.T) {
 	if !strings.Contains(err.Error(), "s3:ListBucketVersions") {
 		t.Errorf("error = %v, want it to name s3:ListBucketVersions", err)
 	}
+
+	_, err = c.ListObjectsV2(t.Context(), &awss3.ListObjectsV2Input{Bucket: aws.String("data")})
+	if sdkerr.AWSCode(err) != "AccessDenied" || !strings.Contains(err.Error(), "s3:ListBucket ") {
+		t.Fatalf("list objects = %v, want AccessDenied naming s3:ListBucket", err)
+	}
+	if denials := policy.Denials(); len(denials) != 2 || denials[1].Method != "s3.ListObjectsV2" || !slices.Equal(denials[1].Missing, []string{"s3:ListBucket"}) {
+		t.Errorf("Denials() = %+v", denials)
+	}
 }
 
 func TestPolicyChecksDeleteObjectsKeyByKey(t *testing.T) {

@@ -22,6 +22,7 @@ var actions = map[string]string{
 	"DeleteBucketTagging": "s3:PutBucketTagging",
 	"PutBucketCors":       "s3:PutBucketCORS",
 	"ListObjectVersions":  "s3:ListBucketVersions",
+	"ListObjectsV2":       "s3:ListBucket",
 }
 
 // needs returns the IAM actions a call to op needs, or nil for DeleteObjects,
