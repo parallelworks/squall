@@ -27,10 +27,12 @@ failure replays from its seed.
 | [`aws/s3`](https://pkg.go.dev/github.com/parallelworks/squall/aws/s3) | Amazon S3: general purpose buckets (create, head, list with pages and filters, delete), their tags, versioning, policy and CORS rules, and objects (put, delete one or many, list versions and delete markers). |
 | [`azure/arm`](https://pkg.go.dev/github.com/parallelworks/squall/azure/arm) | Azure Resource Manager: resource groups (get, create or update, list with tag filters, delete with everything in them that nothing outside uses), virtual machines (create or update, get, list, instance view, deallocate, start, delete) and their extensions (create or update, get, list, delete), Uniform scale sets (create or update, update, get, list, delete, delete instances) and their VMs, managed disks (VM OS disks included) and snapshots, with cross-region incremental snapshot copies whose completionPercent climbs to 100, Azure Compute Gallery galleries, image definitions and image versions with their replication status, virtual networks and their subnets, NAT gateways, public load balancers with backend pools and outbound rules, network security groups, network interfaces and public IP addresses, the IP configurations of scale set VMs, private DNS zones, virtual network links and A record sets, resource provider registration, Cost Management exports at a subscription's scope, Log Analytics workspaces (create or update, recover, get, list, delete with soft deletion) and the default workspace Application Insights makes for a component that names none, Cognitive Services deployments with partner model attestations, and long-running operations to poll. |
 | [`azure/graph`](https://pkg.go.dev/github.com/parallelworks/squall/azure/graph) | Microsoft Graph: the organization (list), a directory's domains (list) and users (create with Microsoft Entra's name and password rules, get by ID or user principal name, delete, permanently delete once deleted), with application permissions checked as Graph documents them. |
+| [`gcp/bigquery`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/bigquery) | BigQuery: datasets (insert with the API's ID and label rules, get, list with pages, patch friendly name, description and labels with etag checks, delete refusing a dataset that holds tables unless `deleteContents`), optionally refused in a project where a `gcp/serviceusage` server has not enabled the API. |
 | [`gcp/compute`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/compute) | Compute Engine: instances (bulkInsert, insert, get, list, aggregatedList, delete, stop, start, setLabels, setMachineType, addAccessConfig, attachDisk, detachDisk), disks (get, list, aggregatedList, insert, delete), snapshots (insert, get, list, delete), zones, regional addresses (get, list, insert, delete, setLabels), resource policies, instance templates, routes, custom mode VPC networks with their default route, subnetworks with secondary ranges, routers with Cloud NAT (insert, get, patch, delete, list, aggregatedList), firewalls, global addresses including ranges for private services access, and zone, region and global operations (get, wait). |
 | [`gcp/lustre`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/lustre) | Managed Lustre: instances (create with the API's capacity, tier, ID, filesystem, root squash and maintenance rules, get, list with filters on name, state, filesystem, network, description and labels, patch labels, description, gkeSupportEnabled and capacity, delete) and their long-running operations (get, list, delete, cancel). |
 | [`gcp/resourcemanager`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/resourcemanager) | Cloud Resource Manager: projects (get by ID or number, getIamPolicy, setIamPolicy with etag checks, testIamPermissions answered from the server's access policy), seeded by the test. |
 | [`gcp/servicenetworking`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/servicenetworking) | Service Networking: private service connections (create, list by network, patch with force, deleteConnection), checked against a `gcp/compute` server's networks and allocated ranges and peering the network there, and their long-running operations (get). |
+| [`gcp/serviceusage`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/serviceusage) | Service Usage: services (enable, disable, get, list by state) in projects seeded by the test and named by number or ID, and their long-running operations (get). |
 | [`gcp/storage`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/storage) | Cloud Storage: buckets (insert, get, list, patch labels, versioning and CORS, delete) and objects (multipart and media uploads, list with versions, delete by generation). |
 
 Coverage grows with use: each stand-in implements the methods someone needed,
@@ -157,6 +159,29 @@ For Cloud Resource Manager:
 - `testIamPermissions` answers from the server's `access.Policy`, not the
   project's own policy, so a test can check code that tests its own
   permissions before acting.
+
+For BigQuery:
+
+- Point the client at `srv.URL + "/bigquery/v2/"`.
+- Datasets hold a friendly name, a description, labels and a location, which
+  defaults to `US`. Other dataset fields are rejected with 400, and projects
+  are not checked.
+- Tables are not served; `AddTable` puts one in a dataset, so a delete
+  without `deleteContents` is refused with 400 `resourceInUse`.
+- `WithServiceUsage` refuses calls in a project where a `gcp/serviceusage`
+  server has not enabled `bigquery.googleapis.com`, with 403
+  `accessNotConfigured`.
+
+For Service Usage:
+
+- Projects are seeded with `WithProject` and start with no service enabled.
+  A project the server does not hold, or a service outside its catalog
+  (extended with `WithService`), answers 403 `PERMISSION_DENIED`, as the API
+  does for one that does not exist.
+- Changes finish before the call returns. Enabling an enabled service
+  answers with the done operation `operations/noop.DONE_OPERATION`;
+  disabling a disabled one is refused with `FAILED_PRECONDITION`.
+  Dependencies between services are not modeled.
 
 For Service Networking:
 
