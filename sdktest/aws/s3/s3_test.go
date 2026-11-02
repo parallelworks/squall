@@ -507,6 +507,112 @@ func TestListObjectVersionsPagesAndRejects(t *testing.T) {
 	}
 }
 
+// listAll pages through in and returns every key and common prefix it lists.
+func listAll(t *testing.T, c *awss3.Client, in *awss3.ListObjectsV2Input) (keys, prefixes []string, pages int) {
+	t.Helper()
+	for p := awss3.NewListObjectsV2Paginator(c, in); p.HasMorePages(); {
+		page, err := p.NextPage(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		pages++
+		if int(aws.ToInt32(page.KeyCount)) != len(page.Contents)+len(page.CommonPrefixes) {
+			t.Fatalf("KeyCount = %d for %d objects and %d prefixes", aws.ToInt32(page.KeyCount), len(page.Contents), len(page.CommonPrefixes))
+		}
+		for _, o := range page.Contents {
+			keys = append(keys, aws.ToString(o.Key))
+		}
+		for _, cp := range page.CommonPrefixes {
+			prefixes = append(prefixes, aws.ToString(cp.Prefix))
+		}
+	}
+	return keys, prefixes, pages
+}
+
+func TestListObjectsV2(t *testing.T) {
+	s := s3.New()
+	c := newClient(t, s, "us-east-1")
+	create(t, c, "objects")
+	for _, key := range []string{"logs/2026/a", "logs/2026/b", "logs/2027/c", "logs/top", "readme", "zeta"} {
+		put(t, c, "objects", key, strings.NewReader(key))
+	}
+
+	keys, prefixes, pages := listAll(t, c, &awss3.ListObjectsV2Input{Bucket: aws.String("objects"), MaxKeys: aws.Int32(2)})
+	if want := []string{"logs/2026/a", "logs/2026/b", "logs/2027/c", "logs/top", "readme", "zeta"}; !slices.Equal(keys, want) || prefixes != nil || pages != 3 {
+		t.Fatalf("pages = %d, keys = %v, prefixes = %v", pages, keys, prefixes)
+	}
+
+	keys, prefixes, pages = listAll(t, c, &awss3.ListObjectsV2Input{Bucket: aws.String("objects"), Prefix: aws.String("logs/"), Delimiter: aws.String("/"), MaxKeys: aws.Int32(1)})
+	if !slices.Equal(keys, []string{"logs/top"}) || !slices.Equal(prefixes, []string{"logs/2026/", "logs/2027/"}) || pages != 3 {
+		t.Fatalf("pages = %d, keys = %v, prefixes = %v", pages, keys, prefixes)
+	}
+
+	out, err := c.ListObjectsV2(t.Context(), &awss3.ListObjectsV2Input{Bucket: aws.String("objects"), StartAfter: aws.String("readme"), FetchOwner: aws.Bool(true)})
+	if err != nil || len(out.Contents) != 1 || aws.ToString(out.StartAfter) != "readme" || aws.ToBool(out.IsTruncated) {
+		t.Fatalf("start after = %+v, %v", out, err)
+	}
+	o := out.Contents[0]
+	if aws.ToString(o.Key) != "zeta" || aws.ToInt64(o.Size) != 4 || aws.ToString(o.ETag) == "" || o.StorageClass != types.ObjectStorageClassStandard ||
+		o.LastModified == nil || o.Owner == nil || aws.ToString(o.Owner.ID) == "" {
+		t.Fatalf("object = %+v", o)
+	}
+	if out, err := c.ListObjectsV2(t.Context(), &awss3.ListObjectsV2Input{Bucket: aws.String("objects"), Prefix: aws.String("zeta")}); err != nil || out.Contents[0].Owner != nil {
+		t.Fatalf("without fetch-owner = %+v, %v", out, err)
+	}
+
+	if _, err := c.ListObjectsV2(t.Context(), &awss3.ListObjectsV2Input{Bucket: aws.String("objects"), ContinuationToken: aws.String("not a token")}); sdkerr.AWSCode(err) != "InvalidArgument" {
+		t.Fatalf("a bad token = %v", err)
+	}
+	if _, err := c.ListObjectsV2(t.Context(), &awss3.ListObjectsV2Input{Bucket: aws.String("missing")}); sdkerr.AWSCode(err) != "NoSuchBucket" || sdkerr.AWSStatus(err) != http.StatusNotFound {
+		t.Fatalf("a missing bucket = %v", err)
+	}
+}
+
+func TestListObjectsV2SkipsDeletedKeysInAVersionedBucket(t *testing.T) {
+	s := s3.New()
+	c := newClient(t, s, "us-east-1")
+	create(t, c, "versioned")
+	if _, err := c.PutBucketVersioning(t.Context(), &awss3.PutBucketVersioningInput{
+		Bucket:                  aws.String("versioned"),
+		VersioningConfiguration: &types.VersioningConfiguration{Status: types.BucketVersioningStatusEnabled},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"a", "b", "b", "c"} {
+		put(t, c, "versioned", key, strings.NewReader(key))
+	}
+	if _, err := c.DeleteObject(t.Context(), &awss3.DeleteObjectInput{Bucket: aws.String("versioned"), Key: aws.String("b")}); err != nil {
+		t.Fatal(err)
+	}
+	keys, _, _ := listAll(t, c, &awss3.ListObjectsV2Input{Bucket: aws.String("versioned"), MaxKeys: aws.Int32(1)})
+	if !slices.Equal(keys, []string{"a", "c"}) {
+		t.Fatalf("keys = %v, want a deleted key left out", keys)
+	}
+	if n := len(s.ObjectVersions("versioned")); n != 5 {
+		t.Fatalf("%d versions and delete markers, want 5", n)
+	}
+}
+
+func TestListObjectsV2Faults(t *testing.T) {
+	faults := fault.New().Add(fault.Rule{Method: "s3.ListObjectsV2", Resource: "flaky", Nth: 2, Fault: fault.Reject(http.StatusServiceUnavailable, "")})
+	s := s3.New(s3.WithFaults(faults))
+	c := newClient(t, s, "us-east-1")
+	create(t, c, "flaky")
+	for _, key := range []string{"a", "b", "c"} {
+		put(t, c, "flaky", key, strings.NewReader(key))
+	}
+	p := awss3.NewListObjectsV2Paginator(c, &awss3.ListObjectsV2Input{Bucket: aws.String("flaky"), MaxKeys: aws.Int32(2)})
+	if _, err := p.NextPage(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.NextPage(t.Context()); sdkerr.AWSCode(err) != "ServiceUnavailable" || sdkerr.AWSStatus(err) != http.StatusServiceUnavailable {
+		t.Fatalf("second page = %v", err)
+	}
+	if got := faults.Injected(); len(got) != 1 || got[0].Call.Resource != "flaky" {
+		t.Fatalf("injected = %v", got)
+	}
+}
+
 func TestPolicyCORSAndUnimplemented(t *testing.T) {
 	s := s3.New()
 	c := newClient(t, s, "us-east-1")

@@ -53,6 +53,61 @@ func TestResponsesUseTheS3Shape(t *testing.T) {
 	}
 }
 
+func TestListObjectsV2(t *testing.T) {
+	s := s3.New()
+	if _, err := s.PutBucket(s3.Bucket{Name: "list", Region: "us-east-1", Versioning: "Enabled"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"b", "a b/1", "a b/2", "c/d/e", "é", "Z", "gone"} {
+		if _, err := s.PutObject("list", key, []byte(key)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if code, _, body := do(t, s, http.MethodDelete, "/list/gone", authorization, ""); code != http.StatusNoContent {
+		t.Fatalf("delete = %d %s", code, body)
+	}
+	code, _, body := do(t, s, http.MethodGet, "/list?list-type=2&delimiter=/&encoding-type=url&fetch-owner=true", authorization, "")
+	for _, want := range []string{
+		`<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>list</Name><Prefix></Prefix><Delimiter>/</Delimiter><MaxKeys>1000</MaxKeys><EncodingType>url</EncodingType><KeyCount>5</KeyCount><IsTruncated>false</IsTruncated>`,
+		`<Contents><Key>Z</Key><LastModified>`, `<ETag>&#34;21c2e59531c8710156d34a3c30ac81d5&#34;</ETag><Size>1</Size><StorageClass>STANDARD</StorageClass><Owner><ID>`,
+		`<Key>%C3%A9</Key>`, `<CommonPrefixes><Prefix>a+b/</Prefix></CommonPrefixes><CommonPrefixes><Prefix>c/</Prefix></CommonPrefixes>`,
+	} {
+		if code != http.StatusOK || !strings.Contains(body, want) {
+			t.Fatalf("list = %d %s, want %s", code, body, want)
+		}
+	}
+	if strings.Contains(body, "gone") || strings.Index(body, "<Key>Z</Key>") > strings.Index(body, "<Key>b</Key>") {
+		t.Fatalf("list = %s, want binary order without deleted keys", body)
+	}
+	code, _, body = do(t, s, http.MethodGet, "/list?list-type=2&max-keys=1&start-after=a", authorization, "")
+	if code != http.StatusOK || !strings.Contains(body, "<StartAfter>a</StartAfter><Contents><Key>a b/1</Key>") ||
+		!strings.Contains(body, "<IsTruncated>true</IsTruncated><NextContinuationToken>") || strings.Contains(body, "<Owner>") {
+		t.Fatalf("a page = %d %s", code, body)
+	}
+	for _, tc := range []struct {
+		name, query string
+		status      int
+		code        string
+	}{
+		{"list-type 1", "list-type=1", http.StatusBadRequest, "InvalidArgument"},
+		{"negative max-keys", "list-type=2&max-keys=-1", http.StatusBadRequest, "InvalidArgument"},
+		{"non-numeric max-keys", "list-type=2&max-keys=ten", http.StatusBadRequest, "InvalidArgument"},
+		{"a bad continuation token", "list-type=2&continuation-token=bm9wZQ", http.StatusBadRequest, "InvalidArgument"},
+		{"an empty continuation token", "list-type=2&continuation-token=", http.StatusBadRequest, "InvalidArgument"},
+		{"another encoding", "list-type=2&encoding-type=base64", http.StatusBadRequest, "InvalidArgument"},
+		{"an unknown parameter", "list-type=2&marker=a", http.StatusBadRequest, "InvalidArgument"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if code, _, body := do(t, s, http.MethodGet, "/list?"+tc.query, authorization, ""); code != tc.status || !strings.Contains(body, "<Code>"+tc.code+"</Code>") {
+				t.Fatalf("= %d %s, want %d %s", code, body, tc.status, tc.code)
+			}
+		})
+	}
+	if code, _, body := do(t, s, http.MethodGet, "/missing?list-type=2", authorization, ""); code != http.StatusNotFound || !strings.Contains(body, "<Code>NoSuchBucket</Code>") {
+		t.Fatalf("missing = %d %s", code, body)
+	}
+}
+
 func TestRequestsTheServerCannotRead(t *testing.T) {
 	s := s3.New()
 	for _, tc := range []struct {
@@ -172,6 +227,7 @@ func FuzzServeHTTP(f *testing.F) {
 	for _, seed := range []struct{ method, target, header, body string }{
 		{http.MethodPut, "/fuzz/k", "Content-Encoding: aws-chunked", "5;chunk-signature=0\r\nhello\r\n0\r\n\r\n"},
 		{http.MethodGet, "/fuzz?versions&key-marker=k&version-id-marker=null&max-keys=1", "", ""},
+		{http.MethodGet, "/fuzz?list-type=2&delimiter=/&max-keys=1&continuation-token=cGs&encoding-type=url", "", ""},
 		{http.MethodPost, "/fuzz?delete", "", "<Delete><Object><Key>k</Key><VersionId>null</VersionId></Object></Delete>"},
 		{http.MethodPut, "/fuzz?tagging", "X-Amz-Content-Sha256: STREAMING-UNSIGNED-PAYLOAD-TRAILER", "0\r\n\r\n"},
 		{http.MethodGet, "/?max-buckets=1&continuation-token=YQ&bucket-region=us-east-1", "", ""},

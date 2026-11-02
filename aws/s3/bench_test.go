@@ -35,3 +35,24 @@ func BenchmarkPutListDeleteVersions(b *testing.B) {
 		do(http.MethodPost, "/bench?delete", "<Delete><Object><Key>new</Key></Object></Delete>")
 	}
 }
+
+func BenchmarkListObjectsV2(b *testing.B) {
+	s := s3.New()
+	if _, err := s.PutBucket(s3.Bucket{Name: "bench", Region: "us-east-1"}); err != nil {
+		b.Fatal(err)
+	}
+	for i := range 1000 {
+		if _, err := s.PutObject("bench", "dir-"+strconv.Itoa(i%10)+"/key-"+strconv.Itoa(i), []byte("data")); err != nil {
+			b.Fatal(err)
+		}
+	}
+	for b.Loop() {
+		req := httptest.NewRequestWithContext(b.Context(), http.MethodGet, "/bench?list-type=2&max-keys=100&prefix=dir-1/", http.NoBody)
+		req.Header.Set("Authorization", authorization)
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			b.Fatalf("list = %d %s", rec.Code, rec.Body)
+		}
+	}
+}

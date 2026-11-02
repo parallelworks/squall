@@ -3,12 +3,14 @@ package s3
 import (
 	"cmp"
 	"crypto/md5" //nolint:gosec // S3 ETags are MD5 digests; nothing here relies on them for security
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/xml"
 	"errors"
 	"fmt"
 	"maps"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -286,13 +288,9 @@ type versionXML struct {
 }
 
 func (s *Server) listObjectVersions(c *call) (*reply, *apiError) {
-	limit := maxKeys
-	if v := c.query.Get("max-keys"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 0 {
-			return nil, invalidArgument("Provided max-keys not an integer or within integer range")
-		}
-		limit = min(n, maxKeys)
+	limit, err := maxKeysOf(c)
+	if err != nil {
+		return nil, err
 	}
 	prefix, keyMarker, idMarker := c.query.Get("prefix"), c.query.Get("key-marker"), c.query.Get("version-id-marker")
 	var markerSeq uint64
@@ -336,6 +334,147 @@ func (s *Server) listObjectVersions(c *call) (*reply, *apiError) {
 			out.Entries = append(out.Entries, entryXML(v.export(key, i == 0)))
 			last = &out.Entries[len(out.Entries)-1]
 		}
+	}
+	return &reply{body: out}, nil
+}
+
+// maxKeysOf reads a listing's max-keys, which defaults to and is capped at 1000.
+func maxKeysOf(c *call) (int, *apiError) {
+	v := c.query.Get("max-keys")
+	if v == "" {
+		return maxKeys, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 0, invalidArgument("Provided max-keys not an integer or within integer range")
+	}
+	return min(n, maxKeys), nil
+}
+
+var listObjectsV2Params = []string{"prefix", "delimiter", "max-keys", "continuation-token", "start-after", "encoding-type", "fetch-owner"}
+
+type listObjectsV2XML struct {
+	XMLName               xml.Name          `xml:"http://s3.amazonaws.com/doc/2006-03-01/ ListBucketResult"`
+	Name                  string            `xml:"Name"`
+	Prefix                string            `xml:"Prefix"`
+	Delimiter             string            `xml:"Delimiter,omitempty"`
+	MaxKeys               int               `xml:"MaxKeys"`
+	EncodingType          string            `xml:"EncodingType,omitempty"`
+	KeyCount              int               `xml:"KeyCount"`
+	IsTruncated           bool              `xml:"IsTruncated"`
+	ContinuationToken     string            `xml:"ContinuationToken,omitempty"`
+	NextContinuationToken string            `xml:"NextContinuationToken,omitempty"`
+	StartAfter            string            `xml:"StartAfter,omitempty"`
+	Contents              []objectXML       `xml:"Contents"`
+	CommonPrefixes        []commonPrefixXML `xml:"CommonPrefixes"`
+}
+
+type objectXML struct {
+	Key          string    `xml:"Key"`
+	LastModified string    `xml:"LastModified"`
+	ETag         string    `xml:"ETag"`
+	Size         int64     `xml:"Size"`
+	StorageClass string    `xml:"StorageClass"`
+	Owner        *ownerXML `xml:"Owner,omitempty"`
+}
+
+type commonPrefixXML struct {
+	Prefix string `xml:"Prefix"`
+}
+
+// A continuation token is the last key or common prefix a page listed, behind a byte saying which.
+const (
+	tokenKey    = 'k'
+	tokenPrefix = 'p'
+)
+
+func badContinuationToken() *apiError {
+	return invalidArgument("The continuation token provided is incorrect")
+}
+
+func (s *Server) listObjectsV2(c *call) (*reply, *apiError) {
+	if c.query.Get("list-type") != "2" {
+		return nil, invalidArgument("Invalid List Type specified in Request")
+	}
+	limit, err := maxKeysOf(c)
+	if err != nil {
+		return nil, err
+	}
+	encode := func(v string) string { return v }
+	switch c.query.Get("encoding-type") {
+	case "":
+	case "url":
+		encode = func(v string) string { return strings.ReplaceAll(url.QueryEscape(v), "%2F", "/") }
+	default:
+		return nil, invalidArgument("Invalid Encoding Method specified in Request")
+	}
+	var fetchOwner bool
+	switch c.query.Get("fetch-owner") {
+	case "", "false":
+	case "true":
+		fetchOwner = true
+	default:
+		return nil, invalidArgument("Invalid fetch-owner specified in Request")
+	}
+	prefix, delimiter, startAfter, token := c.query.Get("prefix"), c.query.Get("delimiter"), c.query.Get("start-after"), c.query.Get("continuation-token")
+	after, afterPrefix := startAfter, false
+	if c.query.Has("continuation-token") {
+		raw, err := base64.RawURLEncoding.DecodeString(token)
+		if err != nil || len(raw) < 2 || raw[0] != tokenKey && raw[0] != tokenPrefix {
+			return nil, badContinuationToken()
+		}
+		after, afterPrefix = string(raw[1:]), raw[0] == tokenPrefix
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, err := s.lookup(c)
+	if err != nil {
+		return nil, err
+	}
+	out := listObjectsV2XML{
+		Name: c.bucket, Prefix: encode(prefix), Delimiter: encode(delimiter), MaxKeys: limit,
+		ContinuationToken: token, StartAfter: encode(startAfter),
+	}
+	if c.query.Get("encoding-type") != "" {
+		out.EncodingType = "url"
+	}
+	var last string
+	var lastKind byte
+	for _, key := range slices.Sorted(maps.Keys(b.objects)) {
+		if !strings.HasPrefix(key, prefix) || key <= after || afterPrefix && strings.HasPrefix(key, after) {
+			continue
+		}
+		if b.objects[key][0].deleteMarker {
+			continue
+		}
+		entry, kind := key, byte(tokenKey)
+		if delimiter != "" {
+			if i := strings.Index(key[len(prefix):], delimiter); i >= 0 {
+				entry, kind = key[:len(prefix)+i+len(delimiter)], tokenPrefix
+				if kind == lastKind && entry == last {
+					continue
+				}
+			}
+		}
+		if out.KeyCount == limit {
+			out.IsTruncated = true
+			if last != "" {
+				out.NextContinuationToken = base64.RawURLEncoding.EncodeToString(append([]byte{lastKind}, last...))
+			}
+			break
+		}
+		if kind == tokenPrefix {
+			out.CommonPrefixes = append(out.CommonPrefixes, commonPrefixXML{Prefix: encode(entry)})
+		} else {
+			v := b.objects[key][0]
+			o := objectXML{Key: encode(key), LastModified: v.modified.Format(timeFormat), ETag: v.etag, Size: v.size, StorageClass: "STANDARD"}
+			if fetchOwner {
+				o.Owner = &ownerXML{ID: ownerID}
+			}
+			out.Contents = append(out.Contents, o)
+		}
+		out.KeyCount++
+		last, lastKind = entry, kind
 	}
 	return &reply{body: out}, nil
 }
