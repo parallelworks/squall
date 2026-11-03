@@ -225,8 +225,11 @@
 //     with 409 OperationNotAllowed when another VM has it, inferred from how
 //     Azure refuses to delete an attached disk; one the server does not hold
 //     is recorded, not checked. Deleting an attached disk fails with 409
-//     OperationNotAllowed, naming the VM. Data disks, and the OS disks of
-//     scale set VMs, are not modeled.
+//     OperationNotAllowed, naming the VM. A disk's LastOwnershipUpdateTime,
+//     capitalized as Azure writes it, is when a VM last attached or released
+//     it, or was last deallocated or started while holding it, and is absent
+//     until then. Data disks, and the OS disks of scale set VMs, are not
+//     modeled.
 //   - A VM extension create answers 201, and an update 200, with an
 //     Azure-AsyncOperation URL under
 //     Microsoft.Compute/locations/{location}/operations; a delete in progress

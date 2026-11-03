@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v8"
@@ -220,6 +221,67 @@ func TestVirtualMachineOSDisks(t *testing.T) {
 	}
 	if disks := c.server.Disks(); len(disks) != 1 || disks[0].State != "Unattached" || disks[0].VirtualMachine != "" {
 		t.Fatalf("Disks() after deleting a VM that detaches its OS disk = %+v", disks)
+	}
+}
+
+func TestDiskLastOwnershipUpdateTime(t *testing.T) {
+	var now time.Time
+	c := setup(t, arm.WithClock(func() time.Time { return now }))
+	owned := func() *time.Time {
+		t.Helper()
+		disk, err := c.disks.Get(t.Context(), group, "boot", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return disk.Properties.LastOwnershipUpdateTime
+	}
+	now = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	c.createGroup(t, group, nil)
+	dp, err := c.disks.BeginCreateOrUpdate(t.Context(), group, "boot", diskBody(location, 10), nil)
+	if _, err = wait(t, dp, err); err != nil {
+		t.Fatal(err)
+	}
+	if got := owned(); got != nil {
+		t.Fatalf("lastOwnershipUpdateTime of a disk never attached = %v", got)
+	}
+	body := vmBody(c.createNIC(t, group, "nic-1", nil).ID)
+	body.Properties.StorageProfile = &armcompute.StorageProfile{OSDisk: &armcompute.OSDisk{
+		CreateOption: new(armcompute.DiskCreateOptionTypesAttach), OSType: new(armcompute.OperatingSystemTypesLinux),
+		ManagedDisk: &armcompute.ManagedDiskParameters{ID: new(computePrefix + "disks/boot")}, DeleteOption: new(armcompute.DiskDeleteOptionTypesDetach),
+	}}
+	body.Properties.OSProfile = nil
+	for _, step := range []struct {
+		name string
+		do   func() error
+	}{
+		{"attached", func() error {
+			p, err := c.vms.BeginCreateOrUpdate(t.Context(), group, "vm-1", body, nil)
+			_, err = wait(t, p, err)
+			return err
+		}},
+		{"deallocated", func() error {
+			p, err := c.vms.BeginDeallocate(t.Context(), group, "vm-1", nil)
+			_, err = wait(t, p, err)
+			return err
+		}},
+		{"started", func() error {
+			p, err := c.vms.BeginStart(t.Context(), group, "vm-1", nil)
+			_, err = wait(t, p, err)
+			return err
+		}},
+		{"released", func() error {
+			p, err := c.vms.BeginDelete(t.Context(), group, "vm-1", nil)
+			_, err = wait(t, p, err)
+			return err
+		}},
+	} {
+		now = now.Add(time.Hour)
+		if err := step.do(); err != nil {
+			t.Fatalf("%s: %v", step.name, err)
+		}
+		if got := owned(); got == nil || !got.Equal(now) {
+			t.Fatalf("lastOwnershipUpdateTime once %s = %v, want %v", step.name, got, now)
+		}
 	}
 }
 
