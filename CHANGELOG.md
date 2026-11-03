@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.27.0](https://github.com/parallelworks/squall/compare/v0.26.0...v0.27.0) (2026-11-03)
+
+
+### Features
+
+* **azure:** grant and revoke access to a snapshot ([#83](https://github.com/parallelworks/squall/issues/83)) ([7806485](https://github.com/parallelworks/squall/commit/78064851076d3024c90ca62e388e886db881713a))
+* **azure:** managed disks report LastOwnershipUpdateTime ([#84](https://github.com/parallelworks/squall/issues/84)) ([1aba354](https://github.com/parallelworks/squall/commit/1aba3543aad64d9ba2e204588191e37437a8885d))
+
 ## [0.26.0](https://github.com/parallelworks/squall/compare/v0.25.0...v0.26.0) (2026-11-02)
 
 
