@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 )
 
 var (
@@ -21,7 +22,7 @@ var (
 			"purchasePlan", "securityProfile", "supportedCapabilities", "supportsHibernation", "tier",
 		},
 		readOnly: []string{
-			"burstingEnabledTime", "completionPercent", "diskSizeBytes", "diskState", "lastOwnershipUpdateTime",
+			"burstingEnabledTime", "completionPercent", "diskSizeBytes", "diskState", "LastOwnershipUpdateTime",
 			"propertyUpdatesInProgress", "provisioningState", "shareInfo", "timeCreated", "uniqueId",
 		},
 		located: true,
@@ -63,6 +64,9 @@ const (
 type diskState struct {
 	// vm is the ID of the VM the disk is attached to, if any.
 	vm string
+	// owned is its lastOwnershipUpdateTime: when it was last attached or
+	// detached, or its VM last deallocated or started.
+	owned time.Time
 	// source and sourceGUID name the disk or snapshot it was copied from, if any.
 	source, sourceGUID string
 	// family is the incrementalSnapshotFamilyId of its incremental snapshots.
@@ -402,7 +406,7 @@ func (s *Server) attachOSDisk(vm *resource) {
 		s.resources[key(id)] = d
 	}
 	if d != nil && d.disk != nil {
-		d.disk.vm = vm.id
+		d.disk.vm, d.disk.owned = vm.id, s.now()
 	}
 }
 
@@ -429,6 +433,15 @@ func (s *Server) newOSDisk(vm *resource, os map[string]any, id string) *resource
 	return res
 }
 
+// powerChanged dates the OS disk of the VM vm, which was just deallocated or
+// started, as Azure dates the disk's ownership then. The caller holds s.mu.
+func (s *Server) powerChanged(vm *resource) {
+	d := s.resources[key(refID(osDiskOf(vm), "managedDisk"))]
+	if d != nil && d.disk != nil && key(d.disk.vm) == key(vm.id) {
+		d.disk.owned = s.now()
+	}
+}
+
 // releaseOSDisk detaches the VM vm, which is being deleted, from its OS disk,
 // deleting the disk when its deleteOption is Delete. The caller holds s.mu.
 func (s *Server) releaseOSDisk(vm *resource) {
@@ -437,7 +450,7 @@ func (s *Server) releaseOSDisk(vm *resource) {
 	if d == nil || d.disk == nil || key(d.disk.vm) != key(vm.id) {
 		return
 	}
-	d.disk.vm = ""
+	d.disk.vm, d.disk.owned = "", s.now()
 	if strings.EqualFold(str(os, "deleteOption"), "Delete") {
 		s.remove(d)
 	}
@@ -502,6 +515,9 @@ func (s *Server) renderDisk(res *resource) map[string]any {
 		}
 		if res.disk.vm != "" {
 			m["managedBy"] = res.disk.vm
+		}
+		if !res.disk.owned.IsZero() {
+			props["LastOwnershipUpdateTime"] = timestamp(res.disk.owned)
 		}
 	case res.snap != nil:
 		st := res.snap

@@ -498,6 +498,7 @@ func (s *Server) powerVM(target string) handler {
 		}
 		op := s.change(c, res, computeOps(c, res.loc), http.StatusNoContent, stateUpdating, func() {
 			res.vm.power, res.vm.changed = target, s.now()
+			s.powerChanged(res)
 		})
 		if op.status == opInProgress {
 			res.vm.power, res.vm.changed = transition, s.now()
