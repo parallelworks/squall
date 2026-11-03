@@ -507,3 +507,62 @@ func TestCopyStepsSetsHowLongACopyRuns(t *testing.T) {
 		}
 	}
 }
+
+func TestSnapshotAccess(t *testing.T) {
+	for _, settle := range []int{0, 2} {
+		c := setup(t, arm.WithSettleAfter(settle))
+		c.createGroup(t, group, nil)
+		disk, err := c.putDisk(t, "data", diskBody(location, 10))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.putSnapshot(t, "snap", snapshotBody(location, armcompute.DiskCreateOptionCopy, *disk.ID, true)); err != nil {
+			t.Fatal(err)
+		}
+		state := func() armcompute.DiskState {
+			t.Helper()
+			got, err := c.snapshots.Get(t.Context(), group, "snap", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return *got.Properties.DiskState
+		}
+		gp, err := c.snapshots.BeginGrantAccess(t.Context(), group, "snap",
+			armcompute.GrantAccessData{Access: new(armcompute.AccessLevelRead), DurationInSeconds: new(int32(3600))}, nil)
+		granted, err := wait(t, gp, err)
+		if err != nil || granted.AccessSAS == nil || !strings.HasPrefix(*granted.AccessSAS, "https://") {
+			t.Fatalf("settle %d: granting access = %+v, %v", settle, granted, err)
+		}
+		if got := state(); got != armcompute.DiskStateActiveSAS {
+			t.Fatalf("settle %d: diskState while shared = %s", settle, got)
+		}
+		if snaps := c.server.Snapshots(); len(snaps) != 1 || !snaps[0].Shared {
+			t.Fatalf("settle %d: Snapshots() while shared = %+v", settle, snaps)
+		}
+		rp, err := c.snapshots.BeginRevokeAccess(t.Context(), group, "snap", nil)
+		if _, err := wait(t, rp, err); err != nil {
+			t.Fatal(err)
+		}
+		if got := state(); got != armcompute.DiskStateUnattached {
+			t.Fatalf("settle %d: diskState once revoked = %s", settle, got)
+		}
+	}
+
+	c := setup(t)
+	c.createGroup(t, group, nil)
+	if _, err := c.snapshots.BeginGrantAccess(t.Context(), group, "none",
+		armcompute.GrantAccessData{Access: new(armcompute.AccessLevelRead), DurationInSeconds: new(int32(60))}, nil); code(err) != "ResourceNotFound" {
+		t.Fatalf("granting access to a missing snapshot = %v", err)
+	}
+	disk, err := c.putDisk(t, "data", diskBody(location, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.putSnapshot(t, "snap", snapshotBody(location, armcompute.DiskCreateOptionCopy, *disk.ID, true)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.snapshots.BeginGrantAccess(t.Context(), group, "snap",
+		armcompute.GrantAccessData{Access: new(armcompute.AccessLevelWrite), DurationInSeconds: new(int32(60))}, nil); code(err) != "InvalidParameter" {
+		t.Fatalf("granting write access = %v", err)
+	}
+}

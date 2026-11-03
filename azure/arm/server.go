@@ -33,7 +33,7 @@
 //     and their VMs (list, get);
 //   - Microsoft.Compute resource SKUs: list, which lists none;
 //   - Microsoft.Compute managed disks and snapshots: create or update, get,
-//     list in a group and delete;
+//     list in a group and delete, and a snapshot's access (grant and revoke);
 //   - Microsoft.Compute galleries, their image definitions and image
 //     versions: create or update, get, list in their group, gallery or image
 //     definition, and delete;
@@ -286,6 +286,11 @@
 //     were made in is not modeled. Deleting the source while it copies
 //     succeeds and ends the copy with copyCompletionError CopySourceNotFound,
 //     the code the API defines for it; the error message is inferred.
+//   - Granting access to a snapshot (beginGetAccess) takes access Read and
+//     durationInSeconds, and its operation's output is an accessSAS URL that
+//     serves nothing; the snapshot shows diskState ActiveSAS until access is
+//     revoked (endGetAccess), as Microsoft documents. Write access, the
+//     duration running out, and what a SAS blocks are not modeled.
 //   - A gallery, image definition or image version create answers 201, and an
 //     update 200, with an Azure-AsyncOperation URL under
 //     Microsoft.Compute/locations/{location}/capsOperations; a delete in
