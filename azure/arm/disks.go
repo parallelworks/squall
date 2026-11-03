@@ -79,6 +79,8 @@ type snapState struct {
 	// message of the error its background copy ended in, if any.
 	percent int
 	copyErr string
+	// shared is whether a SAS granted for it is active.
+	shared bool
 }
 
 func computeID(c *call, k *kind) string { return resourceID(c, k.typ, c.val("name")) }
@@ -107,6 +109,50 @@ func (s *Server) registerDiskRoutes() {
 		}))
 		s.add("GET", items+"/{name}", k.action("read"), false, s.getDisk(k))
 		s.add("DELETE", items+"/{name}", k.action("delete"), true, s.deleteCompute(k, func(c *call) string { return computeID(c, k) }, diskOps))
+	}
+	snapshot := compute + "/" + snapshotKind.plural + "/{name}"
+	s.add("POST", snapshot+"/beginGetAccess", snapshotKind.action("beginGetAccess/action"), true, s.snapshotAccess(true))
+	s.add("POST", snapshot+"/endGetAccess", snapshotKind.action("endGetAccess/action"), true, s.snapshotAccess(false))
+}
+
+// snapshotAccess grants a SAS for a snapshot, or revokes it.
+func (s *Server) snapshotAccess(grant bool) handler {
+	return func(c *call) (*reply, *apiError) {
+		if grant {
+			body, err := readObject(c.r)
+			if err != nil {
+				return nil, err
+			}
+			if err := checkMembers(body, "GrantAccessData", "", "access", "durationInSeconds", "fileFormat", "getSecureVMGuestStateSAS"); err != nil {
+				return nil, err
+			}
+			if access := str(body, "access"); access != "Read" {
+				return nil, invalidParameter("grantAccessData.access", "The value '%s' of parameter 'access' is not allowed for a snapshot.", access)
+			}
+			if _, ok := body["durationInSeconds"]; !ok {
+				return nil, requiredParameter("durationInSeconds")
+			}
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if err := s.writableGroup(c); err != nil {
+			return nil, err
+		}
+		res, err := s.claim(computeID(c, snapshotKind), "")
+		if err != nil {
+			return nil, err
+		}
+		if res == nil || res.snap == nil {
+			return nil, resourceNotFound(snapshotKind.typ, c.val("name"), c.val("rg"))
+		}
+		result := noBody
+		if grant {
+			sas := encode(map[string]string{"accessSAS": "https://md-squall.blob.core.windows.net/" + res.guid + "/abcd?sv=2018-03-28&sr=b&sp=r&sig=squall"})
+			result = func() []byte { return sas }
+		}
+		op := s.change(c, res, diskOps(c, res.loc), http.StatusOK, stateUpdating, func() { res.snap.shared = grant })
+		op.result = result
+		return accepted(c, op, http.StatusOK, http.StatusAccepted, true, result), nil
 	}
 }
 
@@ -418,6 +464,9 @@ func skuTier(name string) string {
 
 // diskState is the diskState the disk res shows. The caller holds s.mu.
 func (s *Server) diskStateOf(res *resource) string {
+	if res.snap != nil && res.snap.shared {
+		return "ActiveSAS"
+	}
 	if res.disk == nil || res.disk.vm == "" {
 		return "Unattached"
 	}
@@ -621,7 +670,9 @@ type Snapshot struct {
 	// CompletionPercent is how much of a CopyStart copy is done; 100 for any other snapshot.
 	CompletionPercent int
 	// CopyError is the message of the error a CopyStart copy ended in, if any.
-	CopyError         string
+	CopyError string
+	// Shared reports whether a SAS granted for it is active.
+	Shared            bool
 	ProvisioningState string
 	Tags              map[string]string
 }
@@ -638,7 +689,7 @@ func (s *Server) Snapshots() []Snapshot {
 		sku, _ := res.top["sku"].(map[string]any)
 		snap := Snapshot{
 			ID: res.id, Location: res.loc, SKU: str(sku, "name"), Source: res.snap.source, Incremental: res.snap.incremental,
-			CopyStart: res.snap.copyStart, CompletionPercent: 100, CopyError: res.snap.copyErr, ProvisioningState: res.state, Tags: maps.Clone(res.tags),
+			CopyStart: res.snap.copyStart, CompletionPercent: 100, CopyError: res.snap.copyErr, Shared: res.snap.shared, ProvisioningState: res.state, Tags: maps.Clone(res.tags),
 		}
 		if res.snap.copyStart {
 			snap.CompletionPercent = res.snap.percent
