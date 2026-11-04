@@ -423,13 +423,17 @@
 //     deletion.The container(s) {names} have a locked immutability policy.",
 //     as Azure answers; the status, and the message for a legal hold, are
 //     inferred. Deleting its group fails with ResourceGroupDeletionBlocked
-//     with that error as the account's detail, and leaves the account and its
-//     containers. Version-level immutability (immutableStorageWithVersioning
-//     on the account or a container) blocks deleting a container, through
-//     ARM or the Blob service, while it holds a blob (409
-//     BlobImmutableDueToPolicy), and deleting the account while any
-//     container holds one (409 AccountProtectedFromDeletion), as Microsoft
-//     documents; the codes are inferred. Blob-level immutability policies
+//     with that error as the account's detail, and leaves the account whole:
+//     its containers, shares, queues, tables and services. A container with
+//     version-level immutability (immutableStorageWithVersioning on it or
+//     its account) can be deleted only through ARM, once it holds no blob,
+//     and never through the Blob service (409 BlobImmutableDueToPolicy). An
+//     account cannot be deleted while it has a container with version-level
+//     immutability, or has it enabled itself and any container (409
+//     AccountProtectedFromDeletion, "{account} is protected from
+//     deletion.The container(s) {names} have version-level immutability and
+//     must be deleted first."), as Microsoft documents; the codes and that
+//     message are inferred. Blob-level immutability policies
 //     and legal holds are not supported: Put Blob with
 //     x-ms-immutability-policy-until-date, x-ms-immutability-policy-mode or
 //     x-ms-legal-hold fails with 400 BadRequest.

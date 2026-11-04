@@ -532,11 +532,10 @@ func (s *Server) checkUnused(res *resource) *apiError {
 		}
 	case accountKind:
 		return s.accountProtected(res)
-	case containerKind:
-		id, _, _ := strings.Cut(res.id, "/"+blobService.path+"/")
-		if acct := s.resources[key(id)]; acct != nil {
-			return s.accountProtected(acct)
-		}
+	}
+	// A protected account keeps everything in it whole when its group is deleted.
+	if acct := s.storageParent(res); acct != nil {
+		return s.accountProtected(acct)
 	}
 	return nil
 }

@@ -454,10 +454,7 @@ func (s *Server) write(acct, cont *resource, name string, e *blobEntry) {
 		e.created = old.created
 		switch {
 		case set.versioning || old.versionID != "":
-			if old.versionID == "" {
-				old.versionID = stamp(old.modified)
-			}
-			b.versions = append(b.versions, old)
+			keepVersion(b, old)
 		case set.keep > 0:
 			old.deleted, old.keep = e.modified, set.keep
 			b.snapshots = append(b.snapshots, old)
@@ -466,6 +463,15 @@ func (s *Server) write(acct, cont *resource, name string, e *blobEntry) {
 	}
 	s.retireDeleted(b)
 	b.current, b.uncommitted = e, nil
+}
+
+// keepVersion keeps e as a previous version of b, giving one written before
+// versioning was on the version ID of its last write.
+func keepVersion(b *blobName, e *blobEntry) {
+	if e.versionID == "" {
+		e.versionID = stamp(e.modified)
+	}
+	b.versions = append(b.versions, e)
 }
 
 // retireDeleted keeps b's soft-deleted blob, if any, as a soft-deleted
@@ -631,7 +637,7 @@ func (s *Server) snapshotBlob(c *blobCall) (*blobReply, *apiError) {
 	if settingsOf(acct).versioning {
 		next := *cur
 		next.versionID = stamp(s.tick())
-		b.versions = append(b.versions, cur)
+		keepVersion(b, cur)
 		b.current = &next
 		h.Set("x-ms-version-id", next.versionID)
 	}
@@ -810,10 +816,7 @@ func (s *Server) deleteCurrent(b *blobName, set blobSettings, now time.Time) {
 	switch {
 	case cur == nil:
 	case set.versioning || cur.versionID != "":
-		if cur.versionID == "" {
-			cur.versionID = stamp(cur.modified)
-		}
-		b.versions = append(b.versions, cur)
+		keepVersion(b, cur)
 	case set.keep > 0:
 		cur.deleted, cur.keep = now, set.keep
 		b.deleted = cur

@@ -1,8 +1,10 @@
 package arm_test
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -10,7 +12,6 @@ import (
 
 	"github.com/parallelworks/squall/access"
 	"github.com/parallelworks/squall/azure/arm"
-	"github.com/parallelworks/squall/fault"
 )
 
 const containerPath = accountPath + "/blobServices/default/containers/data"
@@ -225,18 +226,40 @@ func TestBlobDataActionsPerOperation(t *testing.T) {
 
 const blobAction = "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/"
 
+// signalReader closes reading on its first Read.
+type signalReader struct {
+	once    sync.Once
+	reading chan struct{}
+	r       io.Reader
+}
+
+func (s *signalReader) Read(p []byte) (int, error) {
+	s.once.Do(func() { close(s.reading) })
+	return s.r.Read(p)
+}
+
 func TestWriteNeedsAreCheckedAgainWhenTheBlobAppears(t *testing.T) {
 	p := access.Allow("Microsoft.Resources/*", "Microsoft.Storage/storageAccounts/write", "Microsoft.Storage/storageAccounts/blobServices/containers/write",
 		blobAction+"add/action")
-	faults := fault.New().Add(fault.Rule{Method: "PutBlob", Resource: "acct/data/a", Nth: 1, Fault: fault.Delay(300 * time.Millisecond)})
-	s := arm.New(arm.WithPolicy(p), arm.WithFaults(faults))
+	s := arm.New(arm.WithPolicy(p))
 	newStorage(t, s, "")
-	var slow *httptest.ResponseRecorder
+	pr, pw := io.Pipe()
+	body := &signalReader{reading: make(chan struct{}), r: pr}
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPut, "/acct/data/a", body)
+	req.Header.Set("Authorization", "Bearer token")
+	req.Header.Set("x-ms-blob-type", "BlockBlob")
+	slow := httptest.NewRecorder()
 	var wg sync.WaitGroup
-	wg.Go(func() { slow = blobDo(t, s, http.MethodPut, "/acct/data/a", "slow") })
-	time.Sleep(100 * time.Millisecond)
+	wg.Go(func() { s.Blob().ServeHTTP(slow, req) })
+	<-body.reading
 	if rec := blobDo(t, s, http.MethodPut, "/acct/data/a", "fast"); rec.Code != http.StatusCreated {
 		t.Fatalf("the create that wins = %d %s", rec.Code, rec.Body)
+	}
+	if _, err := pw.Write([]byte("slow")); err != nil {
+		t.Fatal(err)
+	}
+	if err := pw.Close(); err != nil {
+		t.Fatal(err)
 	}
 	wg.Wait()
 	wantError(t, slow, http.StatusForbidden, "AuthorizationPermissionMismatch")
@@ -252,5 +275,93 @@ func TestExpiredDeletedContainersArePurgedOnAccess(t *testing.T) {
 	now = now.Add(-47 * time.Hour)
 	if _, body := do(t, s, http.MethodGet, accountPath+"/blobServices/default/containers?$include=deleted&api-version=1", ""); len(body["value"].([]any)) != 0 {
 		t.Fatalf("an expired deleted container outlived an access to its account: %v", body)
+	}
+}
+
+func TestSnapshotOfABlobFromBeforeVersioning(t *testing.T) {
+	s := arm.New()
+	newStorage(t, s, "")
+	blobDo(t, s, http.MethodPut, "/acct/data/a", "1")
+	do(t, s, http.MethodPut, accountPath+"/blobServices/default", `{"properties":{"isVersioningEnabled":true}}`)
+	if rec := blobDo(t, s, http.MethodPut, "/acct/data/a?comp=snapshot", ""); rec.Code != http.StatusCreated {
+		t.Fatalf("snapshot = %d %s", rec.Code, rec.Body)
+	}
+	got := s.Blobs()
+	if len(got) != 3 {
+		t.Fatalf("blobs = %+v", got)
+	}
+	for _, b := range got {
+		target := "/acct/data/a"
+		switch {
+		case b.Current:
+			continue
+		case b.Snapshot != "":
+			target += "?snapshot=" + b.Snapshot
+		case b.VersionID != "":
+			target += "?versionid=" + b.VersionID
+		default:
+			t.Fatalf("a previous version without a version ID: %+v", b)
+		}
+		if rec := blobDo(t, s, http.MethodDelete, target, ""); rec.Code != http.StatusAccepted {
+			t.Fatalf("DELETE %s = %d %s", target, rec.Code, rec.Body)
+		}
+	}
+	if got := s.Blobs(); len(got) != 1 || !got[0].Current {
+		t.Fatalf("blobs = %+v", got)
+	}
+}
+
+func TestEmptyVersionLevelImmutableContainers(t *testing.T) {
+	t.Run("container", func(t *testing.T) {
+		s := arm.New()
+		newStorage(t, s, "")
+		do(t, s, http.MethodPut, accountPath+"/blobServices/default/containers/worm", `{"properties":{"immutableStorageWithVersioning":{"enabled":true}}}`)
+		wantError(t, blobDo(t, s, http.MethodDelete, "/acct/worm?restype=container", ""), http.StatusConflict, "BlobImmutableDueToPolicy")
+		rec, body := do(t, s, http.MethodDelete, accountPath, "")
+		wantStatus(t, rec, body, http.StatusConflict, "AccountProtectedFromDeletion")
+		rec, body = do(t, s, http.MethodDelete, accountPath+"/blobServices/default/containers/worm", "")
+		wantStatus(t, rec, body, http.StatusOK, "")
+		rec, body = do(t, s, http.MethodDelete, accountPath, "")
+		wantStatus(t, rec, body, http.StatusOK, "")
+	})
+	t.Run("account", func(t *testing.T) {
+		s := arm.New()
+		newGroup(t, s)
+		do(t, s, http.MethodPut, accountPath, `{"location":"eastus","sku":{"name":"Standard_LRS"},"kind":"StorageV2","properties":{"immutableStorageWithVersioning":{"enabled":true}}}`)
+		blobDo(t, s, http.MethodPut, "/acct/data?restype=container", "")
+		wantError(t, blobDo(t, s, http.MethodDelete, "/acct/data?restype=container", ""), http.StatusConflict, "BlobImmutableDueToPolicy")
+		rec, body := do(t, s, http.MethodDelete, accountPath, "")
+		wantStatus(t, rec, body, http.StatusConflict, "AccountProtectedFromDeletion")
+	})
+}
+
+func TestBlockedGroupDeleteKeepsTheWholeAccount(t *testing.T) {
+	s := arm.New()
+	newStorage(t, s, "")
+	hold(t, s)
+	blobDo(t, s, http.MethodPut, "/acct/data/a", "1")
+	children := []string{"/fileServices/default/shares/files", "/queueServices/default/queues/jobs", "/tableServices/default/tables/Jobs"}
+	for _, path := range children {
+		if rec, body := do(t, s, http.MethodPut, accountPath+path, `{"properties":{}}`); rec.Code >= 300 {
+			t.Fatalf("PUT %s = %d %v", path, rec.Code, body)
+		}
+	}
+	rec, body := do(t, s, http.MethodDelete, groupPath, "")
+	if rec.Code == http.StatusAccepted {
+		u, _ := url.Parse(rec.Header().Get("Location"))
+		s.Settle()
+		rec, body = do(t, s, http.MethodGet, u.RequestURI(), "")
+	}
+	wantStatus(t, rec, body, http.StatusConflict, "ResourceGroupDeletionBlocked")
+	if msg, _ := body["error"].(map[string]any)["message"].(string); strings.Contains(msg, "shares") || strings.Contains(msg, "queues") || !strings.Contains(msg, "storageAccounts/acct") {
+		t.Fatalf("the error should name only the account: %s", msg)
+	}
+	for _, path := range append(children, "/blobServices/default/containers/data", "/blobServices/default", "/fileServices/default", "/queueServices/default", "/tableServices/default") {
+		if rec, body := do(t, s, http.MethodGet, accountPath+path, ""); rec.Code != http.StatusOK {
+			t.Errorf("GET %s after a blocked group delete = %d %v", path, rec.Code, body)
+		}
+	}
+	if got := s.Blobs(); len(got) != 1 {
+		t.Fatalf("blobs = %+v", got)
 	}
 }

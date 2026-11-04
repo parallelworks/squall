@@ -264,20 +264,36 @@ func versionLevelWORM(props map[string]any) bool {
 	return on
 }
 
-// accountOf returns the storage account holding the container res, or nil. The caller holds s.mu.
+// accountOf returns the storage account holding res, a container, share,
+// queue, table or service of one, or nil. The caller holds s.mu.
 func (s *Server) accountOf(res *resource) *resource {
-	id, _, _ := strings.Cut(res.id, "/"+blobService.path+"/")
-	return s.resources[key(id)]
+	const seg = "/storageaccounts/"
+	k := key(res.id)
+	i := strings.Index(k, seg)
+	if i < 0 {
+		return nil
+	}
+	name, _, _ := strings.Cut(k[i+len(seg):], "/")
+	return s.resources[k[:i+len(seg)+len(name)]]
+}
+
+// storageParent returns the storage account holding res when res is not
+// itself one, or nil. The caller holds s.mu.
+func (s *Server) storageParent(res *resource) *resource {
+	if res.kind == accountKind {
+		return nil
+	}
+	return s.accountOf(res)
 }
 
 // containerProtected fails a deletion of the container res, or returns nil.
 // Through ARM, a container under a legal hold or a policy can be deleted once
-// it is empty; through the Blob service, not at all. One with version-level
-// immutability, its own or its account's, can be deleted only once empty.
-// The caller holds s.mu.
+// it is empty; through the Blob service, not at all. The same holds for one
+// with version-level immutability, its own or its account's. The caller
+// holds s.mu.
 func (s *Server) containerProtected(res *resource, dataPlane bool) *apiError {
 	empty := !s.holdsBlobs(res)
-	if acct := s.accountOf(res); !empty && (versionLevelWORM(res.props) || acct != nil && versionLevelWORM(acct.props)) {
+	if acct := s.accountOf(res); (dataPlane || !empty) && (versionLevelWORM(res.props) || acct != nil && versionLevelWORM(acct.props)) {
 		return immutableDueToPolicy()
 	}
 	if !dataPlane && empty {
@@ -295,8 +311,8 @@ func (s *Server) containerProtected(res *resource, dataPlane bool) *apiError {
 }
 
 // accountProtected fails a deletion of the storage account acct that a
-// container's locked policy, or legal hold on blobs it holds, protects, or
-// returns nil. The caller holds s.mu.
+// container's locked policy, legal hold on blobs it holds or version-level
+// immutability protects, or returns nil. The caller holds s.mu.
 func (s *Server) accountProtected(acct *resource) *apiError {
 	var locked, held, all, versioned []string
 	prefix := key(acct.id) + "/"
@@ -310,7 +326,7 @@ func (s *Server) accountProtected(acct *resource) *apiError {
 			locked = append(locked, res.name)
 		case res.worm.held() && s.holdsBlobs(res):
 			held = append(held, res.name)
-		case versionLevelWORM(res.props) && s.holdsBlobs(res):
+		case versionLevelWORM(res.props):
 			versioned = append(versioned, res.name)
 		}
 	}
