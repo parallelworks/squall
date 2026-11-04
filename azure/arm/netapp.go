@@ -97,6 +97,8 @@ type netappLevel struct {
 	prepare func(s *Server, res *resource, p *parsed) (func(), *apiError)
 	// updatedStatus answers a put to an existing one, if not 200.
 	updatedStatus int
+	// syncUpdate finishes a put to an existing one before answering.
+	syncUpdate bool
 }
 
 var netappLevels = []*netappLevel{
@@ -105,7 +107,7 @@ var netappLevels = []*netappLevel{
 	{kind: volumeKind, path: netappVolume, id: volumeID, parent: poolID, prepare: (*Server).prepareVolume},
 	{
 		kind: netappSnapshotKind, path: netappSnapshot, id: netappSnapshotID, parent: volumeID,
-		prepare: (*Server).prepareNetAppSnapshot, updatedStatus: http.StatusCreated,
+		prepare: (*Server).prepareNetAppSnapshot, updatedStatus: http.StatusCreated, syncUpdate: true,
 	},
 }
 
@@ -121,7 +123,10 @@ func (s *Server) registerNetAppRoutes() {
 }
 
 func (s *Server) putNetApp(l *netappLevel) handler {
-	spec := putSpec{kind: l.kind, id: l.id, parent: l.parent, paths: netappOps, render: renderNetApp, updatedStatus: l.updatedStatus}
+	spec := putSpec{
+		kind: l.kind, id: l.id, parent: l.parent, paths: netappOps, render: renderNetApp,
+		updatedStatus: l.updatedStatus, syncUpdate: l.syncUpdate,
+	}
 	spec.prepare = func(res *resource, p *parsed) (func(), *apiError) {
 		res.name = netappName(res.id)
 		if l.prepare == nil {
@@ -150,13 +155,44 @@ func (s *Server) prepareVolume(res *resource, p *parsed) (func(), *apiError) {
 	return s.holdAddress(res, p, subnet, "subnetId")
 }
 
+// maxVolumeSnapshots is how many snapshots Azure lets a volume hold.
+const maxVolumeSnapshots = 255
+
 // prepareNetAppSnapshot accepts a snapshot, which has nothing to change, so
-// a put to an existing one leaves it as it is.
-func (s *Server) prepareNetAppSnapshot(_ *resource, p *parsed) (func(), *apiError) {
+// a put to an existing one leaves it as it is. The caller holds s.mu.
+func (s *Server) prepareNetAppSnapshot(res *resource, p *parsed) (func(), *apiError) {
 	if p.tags != nil {
 		return nil, unsupported("a NetApp snapshot takes no tags")
 	}
+	if s.resources[key(res.id)] != res {
+		vol, _, _ := strings.Cut(res.id, "/snapshots/")
+		if err := s.checkSnapshotRoom(vol); err != nil {
+			return nil, err
+		}
+	}
 	return func() {}, nil
+}
+
+// checkSnapshotRoom fails a new snapshot of the volume vol once it holds the
+// most Azure allows. The caller holds s.mu.
+func (s *Server) checkSnapshotRoom(vol string) *apiError {
+	if len(s.volumeSnapshots(vol)) >= maxVolumeSnapshots {
+		return newError(http.StatusConflict, "SnapshotLimitReached",
+			"Volume '%s' already has the maximum of %d snapshots.", netappName(vol), maxVolumeSnapshots)
+	}
+	return nil
+}
+
+// volumeSnapshots returns the snapshots of the volume vol. The caller holds s.mu.
+func (s *Server) volumeSnapshots(vol string) []*resource {
+	prefix := key(vol) + "/snapshots/"
+	var out []*resource
+	for k, snap := range s.resources {
+		if snap.kind == netappSnapshotKind && strings.HasPrefix(k, prefix) {
+			out = append(out, snap)
+		}
+	}
+	return out
 }
 
 func (s *Server) getNetApp(l *netappLevel) handler {
@@ -198,6 +234,9 @@ func (s *Server) deleteNetApp(l *netappLevel) handler {
 		if err := s.writableGroup(c); err != nil {
 			return nil, err
 		}
+		if f := c.query("forceDelete"); l.kind == volumeKind && f != "" && !strings.EqualFold(f, "true") && !strings.EqualFold(f, "false") {
+			return nil, unsupported("forceDelete must be true or false, not '%s'", f)
+		}
 		res, err := s.claim(l.id(c), "")
 		if err != nil {
 			return nil, err
@@ -205,11 +244,13 @@ func (s *Server) deleteNetApp(l *netappLevel) handler {
 		if res == nil || res.kind != l.kind {
 			return &reply{status: http.StatusNoContent}, nil
 		}
-		if f := c.query("forceDelete"); l.kind == volumeKind && f != "" && !strings.EqualFold(f, "true") && !strings.EqualFold(f, "false") {
-			return nil, unsupported("forceDelete must be true or false, not '%s'", f)
-		}
 		if err := s.checkUnused(res); err != nil {
 			return nil, err
+		}
+		if res.kind == volumeKind {
+			for _, snap := range s.volumeSnapshots(res.id) {
+				s.finish(snap.pending)
+			}
 		}
 		op := s.change(c, res, netappOps(c, res.loc), 0, stateDeleting, func() { s.remove(res) })
 		return acceptedOnePath(c, op, resultLocation), nil
@@ -219,12 +260,9 @@ func (s *Server) deleteNetApp(l *netappLevel) handler {
 // removeVolumeSnapshots deletes the snapshots of the volume res, as deleting
 // a volume does, with or without forceDelete. The caller holds s.mu.
 func (s *Server) removeVolumeSnapshots(res *resource) {
-	prefix := key(res.id) + "/snapshots/"
-	for k, snap := range s.resources {
-		if snap.kind == netappSnapshotKind && strings.HasPrefix(k, prefix) {
-			s.finish(snap.pending)
-			delete(s.resources, k)
-		}
+	for _, snap := range s.volumeSnapshots(res.id) {
+		s.finish(snap.pending)
+		delete(s.resources, key(snap.id))
 	}
 }
 
@@ -338,17 +376,22 @@ func (s *Server) Volumes() []Volume {
 
 // SnapshotVolume adds the snapshot name, created at at, to the NetApp volume
 // with ID id, as a finished create of it does. It returns the snapshot's ID
-// and reports whether the volume exists, is not being deleted and has no
-// snapshot of that name.
+// and reports whether the volume exists, once any create of it in progress
+// finishes, has not failed and is not being deleted, has no snapshot of that
+// name and has room for another.
 func (s *Server) SnapshotVolume(id, name string, at time.Time) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	vol := s.resources[key(id)]
-	if vol == nil || vol.kind != volumeKind || vol.state == stateDeleting || name == "" || strings.Contains(name, "/") || at.IsZero() {
+	if vol := s.resources[key(id)]; vol == nil || vol.kind != volumeKind || vol.state == stateDeleting {
+		return "", false
+	}
+	vol := s.settled(id)
+	if vol == nil || vol.state == stateFailed ||
+		name == "" || strings.Contains(name, "/") || at.IsZero() {
 		return "", false
 	}
 	snapID := vol.id + "/snapshots/" + name
-	if s.resources[key(snapID)] != nil {
+	if s.resources[key(snapID)] != nil || s.checkSnapshotRoom(vol.id) != nil {
 		return "", false
 	}
 	at = at.UTC()

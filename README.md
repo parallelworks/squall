@@ -710,11 +710,16 @@ For Azure Resource Manager:
   report `systemData`, whose `createdAt` equals `lastModifiedAt` on create
   and whose `lastModifiedAt` moves only with a write that takes effect. A
   snapshot create is long-running like other NetApp writes; a snapshot shows
-  `created` and a `snapshotId` and takes no tags (400). Deleting a volume
-  deletes its snapshots, with or without `forceDelete`, as Microsoft
-  documents. Creating an existing snapshot answers 201 and changes nothing
-  (inferred). `SnapshotVolume` adds a snapshot directly, at a time the test
-  chooses.
+  `created` and a `snapshotId`. The API gives snapshots no tags, so a create
+  that sends any, even `"tags": {}`, is rejected with 400, as squall rejects
+  input it does not model. A volume holds up to 255 snapshots, as Microsoft
+  documents; one more fails with 409 `SnapshotLimitReached` (status, code
+  and message inferred). Deleting a volume deletes its snapshots, with or
+  without `forceDelete`, as Microsoft documents, and a snapshot create in
+  progress when the delete begins finishes first (inferred). Creating an
+  existing snapshot answers 201 at once and changes nothing (inferred).
+  Snapshots are listed among their group's resources (inferred).
+  `SnapshotVolume` adds a snapshot directly, at a time the test chooses.
 - Fault method names are the Azure RBAC action, such as
   `Microsoft.Compute/virtualMachines/write`, and a rule's `Resource` is the
   resource ID in the call's path. Blob service faults name the operation,

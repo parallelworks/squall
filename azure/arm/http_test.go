@@ -838,7 +838,9 @@ func TestNetAppSnapshotShapes(t *testing.T) {
 	if rec, out := do(t, s, http.MethodPut, vol+"/snapshots/s", `{"location":"eastus","properties":{"size":1}}`); rec.Code != http.StatusBadRequest {
 		t.Errorf("a snapshot with an unknown property = %d %v", rec.Code, out)
 	}
-	if rec, out := do(t, s, http.MethodDelete, vol+"?api-version=2024-01-01&forceDelete=maybe", ""); rec.Code != http.StatusBadRequest {
-		t.Errorf("deleting a volume with forceDelete=maybe = %d %v", rec.Code, out)
+	for _, v := range []string{vol, vol + "x"} {
+		if rec, out := do(t, s, http.MethodDelete, v+"?api-version=2024-01-01&forceDelete=maybe", ""); rec.Code != http.StatusBadRequest {
+			t.Errorf("deleting %s with forceDelete=maybe = %d %v", v, rec.Code, out)
+		}
 	}
 }

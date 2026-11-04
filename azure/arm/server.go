@@ -662,14 +662,19 @@
 //     pools, volumes and snapshots report systemData as Managed Lustre file
 //     systems do, its lastModifiedAt moved by each write that takes effect.
 //     A snapshot, named account/pool/volume/snapshot, shows created, its
-//     creation time, and a snapshotId; it takes no tags, and a create that
-//     sends them fails with 400. Creating an existing snapshot answers 201
-//     and changes nothing, which is inferred. Deleting a volume deletes its
-//     snapshots, with or without forceDelete, as Microsoft documents; the
-//     rest forceDelete cleans up is not modeled. The limit of 255 snapshots
-//     a volume is not enforced, and snapshot updates, restores and snapshot
-//     policies are not served. [Server.SnapshotVolume] adds a snapshot
-//     directly.
+//     creation time, and a snapshotId. The API gives it no tags, so a create
+//     that sends any, even an empty object, fails with 400, as the server
+//     rejects input it does not model. Creating an existing snapshot answers
+//     201 at once and changes nothing, which is inferred. A volume holds up
+//     to 255 snapshots, as Microsoft documents; a create past that fails
+//     with 409 SnapshotLimitReached, whose status, code and message are
+//     inferred. Deleting a volume deletes its snapshots, with or without
+//     forceDelete, as Microsoft documents; the rest forceDelete cleans up is
+//     not modeled. A snapshot create in progress when its volume's delete
+//     begins finishes first, which is inferred. Snapshots are listed among
+//     their group's resources, which is inferred. Snapshot updates, restores
+//     and snapshot policies are not served. [Server.SnapshotVolume] adds a
+//     snapshot directly.
 //   - A Managed Lustre change in progress answers with an
 //     Azure-AsyncOperation URL under
 //     Microsoft.StorageCache/locations/{location}/ascOperations; a delete

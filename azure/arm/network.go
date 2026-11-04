@@ -100,6 +100,8 @@ type putSpec struct {
 	createdStatus int
 	// updatedStatus answers an update, if not 200.
 	updatedStatus int
+	// syncUpdate finishes an update before answering, as sync does.
+	syncUpdate bool
 	// createState is the state a create in progress shows, if not Creating.
 	createState string
 	// finish, when set, ends the change once it is done, failing its
@@ -210,7 +212,7 @@ func (s *Server) put(spec putSpec) handler {
 		}
 		commit()
 		s.resources[key(id)] = res
-		if spec.sync {
+		if spec.sync || spec.syncUpdate && existing != nil {
 			return &reply{status: status, body: render()}, nil
 		}
 		op := s.changeOr(c, res, paths, 0, state, func() *apiError {

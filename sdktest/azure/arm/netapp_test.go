@@ -1,6 +1,7 @@
 package arm_test
 
 import (
+	"fmt"
 	"net/http"
 	"net/netip"
 	"strings"
@@ -352,5 +353,134 @@ func TestNetAppVolumeDeletionTakesSnapshots(t *testing.T) {
 				t.Fatalf("snapshots of a volume made again = %+v, %v", page.Value, err)
 			}
 		})
+	}
+}
+
+func TestNetAppSnapshotLimit(t *testing.T) {
+	c := setup(t)
+	c.createGroup(t, group, nil)
+	vol, err := c.createVolume(t, "acct", "pool", "vol")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.createVolumeSnapshot(t, "snap"); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	for i := range 254 {
+		if _, ok := c.server.SnapshotVolume(*vol.ID, fmt.Sprintf("s%03d", i), at); !ok {
+			t.Fatalf("SnapshotVolume %d failed", i)
+		}
+	}
+	if _, ok := c.server.SnapshotVolume(*vol.ID, "one-more", at); ok {
+		t.Fatal("SnapshotVolume took a 256th snapshot")
+	}
+	if _, err := c.createVolumeSnapshot(t, "one-more"); code(err) != "SnapshotLimitReached" || status(err) != http.StatusConflict {
+		t.Fatalf("a 256th snapshot = %v", err)
+	}
+	if _, err := c.createVolumeSnapshot(t, "snap"); err != nil {
+		t.Fatalf("creating an existing snapshot at the limit = %v", err)
+	}
+	dp, err := c.volSnaps.BeginDelete(t.Context(), group, "acct", "pool", "vol", "s000", nil)
+	if _, err = wait(t, dp, err); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.createVolumeSnapshot(t, "one-more"); err != nil {
+		t.Fatalf("a snapshot after one is deleted = %v", err)
+	}
+}
+
+func TestNetAppSnapshotCreatedAgainFinishesAtOnce(t *testing.T) {
+	c := setup(t, arm.WithSettleAfter(5))
+	c.createGroup(t, group, nil)
+	if _, err := c.createVolume(t, "acct", "pool", "vol"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.createVolumeSnapshot(t, "snap"); err != nil {
+		t.Fatal(err)
+	}
+	p, err := c.volSnaps.BeginCreate(t.Context(), group, "acct", "pool", "vol", "snap", armnetapp.Snapshot{Location: new(location)}, nil)
+	if err != nil || !p.Done() {
+		t.Fatalf("creating an existing snapshot = done %v, %v", p != nil && p.Done(), err)
+	}
+	got, err := c.volSnaps.Get(t.Context(), group, "acct", "pool", "vol", "snap", nil)
+	if err != nil || *got.Properties.ProvisioningState != "Succeeded" {
+		t.Fatalf("a snapshot created again = %+v, %v", got.Properties, err)
+	}
+}
+
+func TestNetAppSnapshotVolumeSettlesTheVolume(t *testing.T) {
+	c := setup(t, arm.WithSettleAfter(-1))
+	c.createGroup(t, group, nil)
+	ap, err := c.netapps.BeginCreateOrUpdate(t.Context(), group, "acct", armnetapp.Account{Location: new(location)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.server.Settle()
+	if _, err := ap.PollUntilDone(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	pp, err := c.pools.BeginCreateOrUpdate(t.Context(), group, "acct", "pool", armnetapp.CapacityPool{
+		Location:   new(location),
+		Properties: &armnetapp.PoolProperties{ServiceLevel: new(armnetapp.ServiceLevelPremium), Size: new(4 * tib)},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.server.Settle()
+	if _, err := pp.PollUntilDone(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	vp, err := c.volumes.BeginCreateOrUpdate(t.Context(), group, "acct", "pool", "vol", armnetapp.Volume{
+		Location:   new(location),
+		Properties: &armnetapp.VolumeProperties{CreationToken: new("vol"), SubnetID: new(subnet), UsageThreshold: new(tib)},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vols := c.server.Resources()
+	id := ""
+	for _, r := range vols {
+		if strings.HasSuffix(r.ID, "/volumes/vol") {
+			id = r.ID
+			if r.ProvisioningState != "Creating" {
+				t.Fatalf("the volume = %+v, want it Creating", r)
+			}
+		}
+	}
+	if _, ok := c.server.SnapshotVolume(id, "snap", time.Now()); !ok {
+		t.Fatal("SnapshotVolume failed on a volume being created")
+	}
+	got, err := c.volumes.Get(t.Context(), group, "acct", "pool", "vol", nil)
+	if err != nil || *got.Properties.ProvisioningState != "Succeeded" {
+		t.Fatalf("the volume after SnapshotVolume = %+v, %v", got.Properties, err)
+	}
+	if _, err := vp.PollUntilDone(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNetAppVolumeDeletionFinishesSnapshotCreates(t *testing.T) {
+	c := setup(t, arm.WithSettleAfter(5))
+	c.createGroup(t, group, nil)
+	if _, err := c.createVolume(t, "acct", "pool", "vol"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.volSnaps.BeginCreate(t.Context(), group, "acct", "pool", "vol", "snap", armnetapp.Snapshot{Location: new(location)}, nil); err != nil {
+		t.Fatal(err)
+	}
+	dp, err := c.volumes.BeginDelete(t.Context(), group, "acct", "pool", "vol", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.volSnaps.Get(t.Context(), group, "acct", "pool", "vol", "snap", nil)
+	if err != nil || *got.Properties.ProvisioningState != "Succeeded" {
+		t.Fatalf("a snapshot whose create was in progress when its volume's delete began = %+v, %v", got.Properties, err)
+	}
+	if _, err := dp.PollUntilDone(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.volSnaps.Get(t.Context(), group, "acct", "pool", "vol", "snap", nil); code(err) != "ResourceNotFound" {
+		t.Fatalf("the snapshot after its volume's deletion = %v", err)
 	}
 }
