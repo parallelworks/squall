@@ -84,6 +84,16 @@ var (
 	deleteBlobOp     = &blobOp{name: "DeleteBlob", needs: deleteNeeds, h: (*Server).deleteBlob}
 )
 
+// oneSegmentOp answers a call that names only a container without
+// restype=container, once the call is authenticated and its account found.
+func oneSegmentOp(c *blobCall) *blobOp {
+	msg := "addressing a blob in the root container without $root in the path is not supported"
+	if c.query.Get("comp") == "list" {
+		msg = "List Blobs needs restype=container"
+	}
+	return &blobOp{name: "Unserved", needs: always(), h: func(*Server, *blobCall) (*blobReply, *apiError) { return nil, unsupported("%s", msg) }}
+}
+
 // blobOperation returns the operation c asks for, or nil if it is not served.
 func blobOperation(c *blobCall) *blobOp {
 	restype, comp := c.query.Get("restype"), c.query.Get("comp")
@@ -150,8 +160,7 @@ func (s *Server) serveBlob(w http.ResponseWriter, r *http.Request) {
 	c := parseBlobRequest(r)
 	op := blobOperation(c)
 	if op == nil && c.container != "" && c.blobName == "" && c.query.Get("restype") == "" {
-		s.writeBlobError(w, r, unsupported("addressing a blob in the root container without $root in the path is not supported"))
-		return
+		op = oneSegmentOp(c)
 	}
 	if op == nil {
 		s.writeBlobError(w, r, newError(http.StatusNotFound, "NotImplemented", "squall: %s %s is not served", r.Method, r.URL.RequestURI()))

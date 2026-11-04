@@ -485,7 +485,7 @@ func TestAccountVersionLevelImmutabilityIsFixedAtCreation(t *testing.T) {
 	wantStatus(t, rec, body, http.StatusBadRequest, "PropertyIsImmutable")
 }
 
-func TestSoftDeletedContainersKeepTheAccountProtected(t *testing.T) {
+func TestSoftDeletedContainersDoNotProtectTheAccount(t *testing.T) {
 	t.Run("locked policy", func(t *testing.T) {
 		s := arm.New()
 		newStorage(t, s, `{"containerDeleteRetentionPolicy":{"enabled":true,"days":7}}`)
@@ -494,7 +494,7 @@ func TestSoftDeletedContainersKeepTheAccountProtected(t *testing.T) {
 			t.Fatalf("delete the empty container = %d %v", rec.Code, body)
 		}
 		rec, body := do(t, s, http.MethodDelete, accountPath, "")
-		wantStatus(t, rec, body, http.StatusConflict, "AccountProtectedFromDeletion")
+		wantStatus(t, rec, body, http.StatusOK, "")
 	})
 	t.Run("version-level immutability", func(t *testing.T) {
 		s := arm.New()
@@ -503,7 +503,7 @@ func TestSoftDeletedContainersKeepTheAccountProtected(t *testing.T) {
 		do(t, s, http.MethodPut, worm, `{"properties":{"immutableStorageWithVersioning":{"enabled":true}}}`)
 		do(t, s, http.MethodDelete, worm, "")
 		rec, body := do(t, s, http.MethodDelete, accountPath, "")
-		wantStatus(t, rec, body, http.StatusConflict, "AccountProtectedFromDeletion")
+		wantStatus(t, rec, body, http.StatusOK, "")
 	})
 }
 
@@ -555,19 +555,6 @@ func TestBlobsNameTheAccountAsCreated(t *testing.T) {
 		t.Fatalf("blobs = %+v", got)
 	}
 	wantError(t, blobDo(t, s, http.MethodGet, "/acct/Logs?restype=container&comp=list", ""), http.StatusNotFound, "ContainerNotFound")
-}
-
-func TestSoftDeletedContainerProtectionLapses(t *testing.T) {
-	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	s := arm.New(arm.WithClock(func() time.Time { return now }))
-	newStorage(t, s, `{"containerDeleteRetentionPolicy":{"enabled":true,"days":1}}`)
-	lock(t, s, policy(t, s))
-	do(t, s, http.MethodDelete, containerPath, "")
-	rec, body := do(t, s, http.MethodDelete, accountPath, "")
-	wantStatus(t, rec, body, http.StatusConflict, "AccountProtectedFromDeletion")
-	now = now.Add(48 * time.Hour)
-	rec, body = do(t, s, http.MethodDelete, accountPath, "")
-	wantStatus(t, rec, body, http.StatusOK, "")
 }
 
 func TestBlobServiceEdges(t *testing.T) {
@@ -676,4 +663,109 @@ func TestBlobCallsUseCanonicalNames(t *testing.T) {
 		blobDo(t, s, http.MethodPut, "/acct/data/a", "1")
 		wantError(t, blobDo(t, s, http.MethodPut, "/acct/Data/a", "2"), http.StatusNotFound, "ContainerNotFound")
 	})
+}
+
+func TestImmutabilityPolicyReads(t *testing.T) {
+	s := arm.New()
+	newStorage(t, s, "")
+	rec, body := do(t, s, http.MethodGet, containerPath+"/immutabilityPolicies/default", "")
+	wantStatus(t, rec, body, http.StatusNotFound, "ResourceNotFound")
+	etag := policy(t, s)
+	rec, body = do(t, s, http.MethodGet, containerPath+"/immutabilityPolicies/default", "")
+	if rec.Code != http.StatusOK || body["etag"] != etag || rec.Header().Get("ETag") != etag {
+		t.Fatalf("get policy = %d %v %v", rec.Code, rec.Header(), body)
+	}
+	rec, body = do(t, s, http.MethodDelete, containerPath+"/immutabilityPolicies/default", "")
+	wantStatus(t, rec, body, http.StatusBadRequest, "BadRequest")
+	rec, body = do(t, s, http.MethodPost, containerPath+"/immutabilityPolicies/default/extend", `{"properties":{"immutabilityPeriodSinceCreationInDays":2}}`)
+	wantStatus(t, rec, body, http.StatusBadRequest, "BadRequest")
+}
+
+func TestLegalHoldTags(t *testing.T) {
+	s := arm.New()
+	newStorage(t, s, "")
+	rec, body := do(t, s, http.MethodPost, containerPath+"/setLegalHold", `{"tags":[]}`)
+	wantStatus(t, rec, body, http.StatusBadRequest, "InvalidParameter")
+	tags := make([]string, 10)
+	for i := range tags {
+		tags[i] = `"Case` + string(rune('a'+i)) + `x"`
+	}
+	rec, body = do(t, s, http.MethodPost, containerPath+"/setLegalHold", `{"tags":[`+strings.Join(tags, ",")+`,"CASEAX","caseax"]}`)
+	if got, _ := body["tags"].([]any); rec.Code != http.StatusOK || len(got) != 10 {
+		t.Fatalf("ten tags with repeats in other cases = %d %v", rec.Code, body)
+	}
+	rec, body = do(t, s, http.MethodPost, containerPath+"/setLegalHold", `{"tags":["CASEBX"]}`)
+	wantStatus(t, rec, body, http.StatusOK, "")
+	rec, body = do(t, s, http.MethodPost, containerPath+"/clearLegalHold", `{"tags":["never"]}`)
+	wantStatus(t, rec, body, http.StatusOK, "")
+}
+
+func TestRootContainerNames(t *testing.T) {
+	s := arm.New()
+	newStorage(t, s, "")
+	blobDo(t, s, http.MethodPut, "/acct/$root?restype=container", "")
+	wantError(t, blobDo(t, s, http.MethodPut, "/acct/$root/a/b", "1"), http.StatusBadRequest, "InvalidResourceName")
+	if rec := blobDo(t, s, http.MethodPut, "/acct/data/a/b", "1"); rec.Code != http.StatusCreated {
+		t.Fatalf("a slash outside $root = %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestOneSegmentCallsAuthenticateFirst(t *testing.T) {
+	s := arm.New()
+	newStorage(t, s, "")
+	wantError(t, blobDo(t, s, http.MethodGet, "/acct/a", "", "Authorization", ""), http.StatusUnauthorized, "NoAuthenticationInformation")
+	wantError(t, blobDo(t, s, http.MethodGet, "/nobody/a", ""), http.StatusNotFound, "ResourceNotFound")
+	rec := blobDo(t, s, http.MethodGet, "/acct/data?comp=list", "")
+	if rec.Code != http.StatusBadRequest || strings.Contains(rec.Body.String(), "root container") || !strings.Contains(rec.Body.String(), "restype=container") {
+		t.Fatalf("List Blobs without restype = %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestDeleteOfOnlyUncommittedBlocks(t *testing.T) {
+	s := arm.New()
+	newStorage(t, s, "")
+	blobDo(t, s, http.MethodPut, "/acct/data/a?comp=block&blockid=QUFBQQ==", "zz")
+	wantError(t, blobDo(t, s, http.MethodHead, "/acct/data/a", ""), http.StatusNotFound, "BlobNotFound")
+	wantError(t, blobDo(t, s, http.MethodDelete, "/acct/data/a", ""), http.StatusNotFound, "BlobNotFound")
+}
+
+func TestAccountVersionLevelSettingsEdges(t *testing.T) {
+	const vlw = `{"location":"eastus","sku":{"name":"Standard_LRS"},"kind":"StorageV2","properties":{"immutableStorageWithVersioning":%s}}`
+	s := arm.New()
+	newGroup(t, s)
+	rec, body := do(t, s, http.MethodPut, accountPath, strings.Replace(vlw, "%s", `{"enabled":true,"immutabilityPolicy":{}}`, 1))
+	props, _ := body["properties"].(map[string]any)
+	if v, _ := props["immutableStorageWithVersioning"].(map[string]any); rec.Code != http.StatusOK || v["enabled"] != true || v["immutabilityPolicy"] != nil {
+		t.Fatalf("an empty immutabilityPolicy = %d %v", rec.Code, body)
+	}
+	rec, body = do(t, s, http.MethodPut, accountPath, strings.Replace(vlw, "%s", `{"enabled":true,"immutabilityPolicy":null}`, 1))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("a null immutabilityPolicy = %d %v", rec.Code, body)
+	}
+	rec, body = do(t, s, http.MethodPut, accountPath, strings.Replace(vlw, "%s", `{}`, 1))
+	props, _ = body["properties"].(map[string]any)
+	if v, _ := props["immutableStorageWithVersioning"].(map[string]any); rec.Code != http.StatusOK || v["enabled"] != true {
+		t.Fatalf("an update with no enabled = %d %v", rec.Code, body)
+	}
+	other := groupPath + "/providers/Microsoft.Storage/storageAccounts/hns"
+	rec, body = do(t, s, http.MethodPut, other, `{"location":"eastus","sku":{"name":"Standard_LRS"},"kind":"StorageV2","properties":{"isHnsEnabled":true,"immutableStorageWithVersioning":{"enabled":true}}}`)
+	wantStatus(t, rec, body, http.StatusBadRequest, "BadRequest")
+}
+
+func TestARMContainersShowInheritedVersionLevelImmutability(t *testing.T) {
+	s := arm.New()
+	newGroup(t, s)
+	do(t, s, http.MethodPut, accountPath, `{"location":"eastus","sku":{"name":"Standard_LRS"},"kind":"StorageV2","properties":{"immutableStorageWithVersioning":{"enabled":true}}}`)
+	blobDo(t, s, http.MethodPut, "/acct/data?restype=container", "")
+	check := func(body map[string]any) {
+		t.Helper()
+		props, _ := body["properties"].(map[string]any)
+		if v, _ := props["immutableStorageWithVersioning"].(map[string]any); v["enabled"] != true {
+			t.Fatalf("container = %v", body)
+		}
+	}
+	_, body := do(t, s, http.MethodGet, containerPath, "")
+	check(body)
+	_, body = do(t, s, http.MethodGet, accountPath+"/blobServices/default/containers", "")
+	check(body["value"].([]any)[0].(map[string]any))
 }

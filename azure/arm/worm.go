@@ -45,6 +45,9 @@ func (s *Server) registerWormRoutes() {
 	s.add("POST", item+"/clearLegalHold", containerKind.action("clearLegalHold/action"), false, s.legalHold(false))
 	s.add("PUT", item+"/immutabilityPolicies/{policy}", containerKind.action("immutabilityPolicies/write"), false, s.putImmutabilityPolicy)
 	s.add("POST", item+"/immutabilityPolicies/{policy}/lock", containerKind.action("immutabilityPolicies/lock/action"), false, s.lockImmutabilityPolicy)
+	s.add("GET", item+"/immutabilityPolicies/{policy}", containerKind.action("immutabilityPolicies/read"), false, s.getImmutabilityPolicy)
+	s.add("DELETE", item+"/immutabilityPolicies/{policy}", containerKind.action("immutabilityPolicies/delete"), false, notModeled("deleting an immutability policy"))
+	s.add("POST", item+"/immutabilityPolicies/{policy}/extend", containerKind.action("immutabilityPolicies/extend/action"), false, notModeled("extending an immutability policy"))
 }
 
 // wormContainer returns the call's container for a change to its legal hold
@@ -78,6 +81,9 @@ func (s *Server) legalHold(set bool) handler {
 		}
 		if all, _ := boolean(body, "allowProtectedAppendWritesAll"); all {
 			return nil, unsupported("allowProtectedAppendWritesAll is not supported")
+		}
+		if len(raw) == 0 {
+			return nil, invalidParameter("tags", "At least one tag is required.")
 		}
 		var tags []string
 		for _, t := range raw {
@@ -179,6 +185,26 @@ func (s *Server) putImmutabilityPolicy(c *call) (*reply, *apiError) {
 	}
 	p.days, p.appendWrites, p.appendWritesAll = days, appendWrites, appendWritesAll
 	s.touchPolicy(p, update)
+	return s.policyReply(res), nil
+}
+
+func notModeled(what string) handler {
+	return func(*call) (*reply, *apiError) { return nil, unsupported("%s is not supported", what) }
+}
+
+func (s *Server) getImmutabilityPolicy(c *call) (*reply, *apiError) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.account(c); err != nil {
+		return nil, err
+	}
+	res := s.resources[key(containers.id(c))]
+	if res == nil {
+		return nil, containers.notFound()
+	}
+	if c.val("policy") != "default" || res.worm == nil || res.worm.policy == nil {
+		return nil, newError(http.StatusNotFound, "ResourceNotFound", "The container %s has no immutability policy.", res.name)
+	}
 	return s.policyReply(res), nil
 }
 
@@ -366,17 +392,11 @@ func (s *Server) containerProtected(res *resource, dataPlane bool) *apiError {
 func (s *Server) accountProtected(acct *resource) *apiError {
 	var locked, held, all, versioned []string
 	prefix := key(acct.id) + "/"
-	conts := make([]*resource, 0, len(acct.account.deleted))
+	// Soft-deleted containers do not protect the account, as Microsoft documents container soft delete.
 	for k, res := range s.resources {
-		if res.kind == containerKind && strings.HasPrefix(k, prefix) {
-			conts = append(conts, res)
+		if res.kind != containerKind || !strings.HasPrefix(k, prefix) {
+			continue
 		}
-	}
-	// Soft-deleted containers keep their protection, which is inferred.
-	for _, d := range s.deletedContainers(acct) {
-		conts = append(conts, d.res)
-	}
-	for _, res := range conts {
 		all = append(all, res.name)
 		switch {
 		case res.worm.locked():

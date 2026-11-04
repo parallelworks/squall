@@ -150,9 +150,21 @@ func (s *Server) putAccount(c *call) (*reply, *apiError) {
 			}
 			const vlw = "immutableStorageWithVersioning"
 			created := res.account == nil
-			was, given := res.props[vlw], p.props[vlw] != nil
-			if m, _ := p.props[vlw].(map[string]any); m["immutabilityPolicy"] != nil {
-				return nil, unsupported("a default version-level immutability policy is not supported")
+			m, _ := p.props[vlw].(map[string]any)
+			if pol := m["immutabilityPolicy"]; pol != nil {
+				if pm, ok := pol.(map[string]any); !ok || len(pm) > 0 {
+					return nil, unsupported("a default version-level immutability policy is not supported")
+				}
+			}
+			if m != nil {
+				m = maps.Clone(m)
+				delete(m, "immutabilityPolicy")
+				p.props[vlw] = m
+			}
+			_, given := boolean(m, "enabled")
+			was := res.props[vlw]
+			if hns, _ := boolean(p.props, "isHnsEnabled"); hns && versionLevelWORM(p.props) {
+				return nil, unsupported("version-level immutability on an account with a hierarchical namespace is not supported")
 			}
 			if !created && given && versionLevelWORM(p.props) != versionLevelWORM(res.props) {
 				return nil, newError(http.StatusBadRequest, "PropertyIsImmutable",
@@ -166,11 +178,15 @@ func (s *Server) putAccount(c *call) (*reply, *apiError) {
 					}
 				}
 				s.update(res, p)
-				if !created && !given && was != nil {
+				if !created && !given {
 					if res.props == nil {
 						res.props = map[string]any{}
 					}
-					res.props[vlw] = was
+					if was != nil {
+						res.props[vlw] = was
+					} else {
+						delete(res.props, vlw)
+					}
 				}
 			}, nil
 		},
@@ -489,14 +505,14 @@ func (s *Server) putChild(ch *child) handler {
 				return nil, ch.exists()
 			}
 			s.update(existing, p)
-			return ok200(ch.render(existing)), nil
+			return ok200(s.renderChild(ch, existing)), nil
 		}
 		res := s.newResource(c, ch.kind, id, p)
 		s.resources[key(id)] = res
 		if ch.upsert {
-			return ok200(ch.render(res)), nil
+			return ok200(s.renderChild(ch, res)), nil
 		}
-		return &reply{status: http.StatusCreated, body: encode(ch.render(res))}, nil
+		return &reply{status: http.StatusCreated, body: encode(s.renderChild(ch, res))}, nil
 	}
 }
 
@@ -511,7 +527,7 @@ func (s *Server) getChild(ch *child) handler {
 		if res == nil {
 			return nil, ch.notFound()
 		}
-		m := ch.render(res)
+		m := s.renderChild(ch, res)
 		expand := c.query("$expand")
 		switch {
 		case ch == shares && slices.Contains(strings.Split(expand, ","), "stats"):
@@ -543,7 +559,7 @@ func (s *Server) listChildren(ch *child) handler {
 		var items []map[string]any
 		for k, res := range s.resources {
 			if res.kind == ch.kind && strings.HasPrefix(k, prefix) && strings.HasPrefix(res.name, filter) {
-				items = append(items, ch.render(res))
+				items = append(items, s.renderChild(ch, res))
 			}
 		}
 		if include == "deleted" {
@@ -552,7 +568,7 @@ func (s *Server) listChildren(ch *child) handler {
 				if !strings.HasPrefix(d.res.name, filter) {
 					continue
 				}
-				m := ch.render(d.res)
+				m := s.renderChild(ch, d.res)
 				props := m["properties"].(map[string]any)
 				props["deleted"], props["deletedTime"], props["version"] = true, timestamp(d.deleted), d.version
 				props["remainingRetentionDays"] = daysLeft(d.deleted, now, d.keep)
@@ -603,6 +619,24 @@ func renderLeased(res *resource) (map[string]any, map[string]any) {
 	props["leaseStatus"] = "Unlocked"
 	props["remainingRetentionDays"] = 0
 	return m, props
+}
+
+// renderChild renders res, a child ch holds; a container shows the
+// version-level immutability it takes from its account, which is inferred.
+// The caller holds s.mu.
+func (s *Server) renderChild(ch *child, res *resource) map[string]any {
+	m := ch.render(res)
+	if ch == containers && s.containerVersionLevel(res) {
+		props, _ := m["properties"].(map[string]any)
+		vlw, _ := props["immutableStorageWithVersioning"].(map[string]any)
+		vlw = maps.Clone(vlw)
+		if vlw == nil {
+			vlw = map[string]any{}
+		}
+		vlw["enabled"] = true
+		props["immutableStorageWithVersioning"] = vlw
+	}
+	return m
 }
 
 func renderContainer(res *resource) map[string]any {

@@ -81,6 +81,10 @@ func TestLockedPolicyProtectsTheAccount(t *testing.T) {
 	if err != nil || *locked.Properties.State != armstorage.ImmutabilityPolicyStateLocked {
 		t.Fatalf("lock = %+v, %v", locked, err)
 	}
+	read, err := c.containers.GetImmutabilityPolicy(t.Context(), group, "worm1", "data", nil)
+	if err != nil || *read.Properties.State != armstorage.ImmutabilityPolicyStateLocked || read.Etag == nil || *read.Etag != *locked.Etag {
+		t.Fatalf("reading the locked policy = %+v, %v", read, err)
+	}
 	if _, err := c.containers.CreateOrUpdateImmutabilityPolicy(t.Context(), group, "worm1", "data", policy(0)); code(err) != "InvalidParameter" {
 		t.Fatalf("a zero-day policy = %v", err)
 	}
@@ -245,6 +249,13 @@ func TestVersionLevelImmutability(t *testing.T) {
 	}
 	if _, err := c.containers.Create(t.Context(), group, "vlw1", "data", armstorage.BlobContainer{}, nil); err != nil {
 		t.Fatal(err)
+	}
+	armCont, err := c.containers.Get(t.Context(), group, "vlw1", "data", nil)
+	if err != nil || armCont.ContainerProperties.ImmutableStorageWithVersioning == nil || !*armCont.ContainerProperties.ImmutableStorageWithVersioning.Enabled {
+		t.Fatalf("ARM container of a version-level immutable account = %+v, %v", armCont, err)
+	}
+	if _, err := c.containers.GetImmutabilityPolicy(t.Context(), group, "vlw1", "data", nil); status(err) != http.StatusNotFound {
+		t.Fatalf("immutability policy of a container with none = %v", err)
 	}
 	client := c.blobs(t, "vlw1")
 	props, err := client.ServiceClient().NewContainerClient("data").GetProperties(t.Context(), nil)

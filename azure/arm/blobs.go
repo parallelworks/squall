@@ -150,6 +150,9 @@ func (s *Server) containerOf(c *blobCall) (*resource, *resource, *apiError) {
 		return nil, nil, newError(http.StatusNotFound, "ResourceNotFound", "The specified resource does not exist.")
 	}
 	s.deletedContainers(acct)
+	if c.container == "$root" && strings.Contains(c.blobName, "/") {
+		return acct, nil, newError(http.StatusBadRequest, "InvalidResourceName", "The specified resource name contains invalid characters.")
+	}
 	res := s.resources[key(containerID(acct, c.container))]
 	if res == nil || res.name != c.container {
 		return acct, nil, containers.notFound()
@@ -773,7 +776,7 @@ func (s *Server) deleteBlob(c *blobCall) (*blobReply, *apiError) {
 		}
 		discard(e, list)
 	} else {
-		if b == nil || b.current == nil && len(b.uncommitted) == 0 {
+		if b == nil || b.current == nil {
 			return nil, blobNotFound()
 		}
 		live := slices.DeleteFunc(slices.Clone(b.snapshots), func(e *blobEntry) bool { return !e.deleted.IsZero() })
