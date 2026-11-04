@@ -39,8 +39,15 @@
 //     definition, and delete;
 //   - Microsoft.Storage: storage accounts (create, get, list in a group or
 //     subscription, list keys and delete), name availability checks, the
-//     blob and file services' properties (set and get), and blob containers
-//     and file shares (create, get, list and delete);
+//     blob, file, queue and table services' properties (set and get), blob
+//     containers (create, get, list with soft-deleted ones and delete), their
+//     legal holds (set and clear) and immutability policies (create or update
+//     and lock), file shares (create, get with usage stats, list and
+//     delete), and queues and tables (create, get, list and delete);
+//   - the Blob service's data plane, which [Server.Blob] serves: List
+//     Containers, Create Container, Delete Container, Get Container
+//     Properties, List Blobs, Put Blob, Put Block, Put Block List, Snapshot
+//     Blob, Get Blob Properties and Delete Blob, for block blobs;
 //   - Microsoft.NetApp: accounts, capacity pools and volumes (create or
 //     update, get, list in their group, account or pool, and delete);
 //   - Microsoft.StorageCache: Azure Managed Lustre file systems (create or
@@ -374,7 +381,85 @@
 //     call leaves out, inferred from the Blob service's own Set Blob Service
 //     Properties; setting file service properties replaces them all, also
 //     inferred. Account keys are derived from the account and never change.
-//     Blob and file data are not served.
+//     File data is not served: [Server.SetShareUsage] sets the
+//     shareUsageBytes a share shows with $expand=stats. Queues show an
+//     approximateMessageCount of 0. A PUT of a queue or table that exists
+//     updates it and answers 200, and a DELETE answers 204 whether or not it
+//     exists, which is inferred; a missing one answers 404 QueueNotFound or
+//     TableNotFound, the data plane's codes, inferred for ARM. Listing
+//     containers takes $include=deleted and a $filter that is a name prefix,
+//     and returns every container on one page; shares and queues take
+//     neither.
+//   - Deleting a blob container through ARM or the Blob service, while the
+//     blob service's containerDeleteRetentionPolicy is enabled, keeps it with
+//     its blobs as deleted for that many days (7 when days is not set, which
+//     is inferred). Deleted containers are listed, with deleted, deletedTime,
+//     remainingRetentionDays and version, but not restored. Deleting a
+//     storage account, or its group, deletes its containers and blobs,
+//     deleted ones included.
+//   - A legal hold takes tags of 3 to 23 letters and digits, lower-cased as
+//     Azure does. An immutability policy is default, takes 1 to 146,000 days
+//     and is Unlocked until locked with its current ETag in If-Match; a
+//     locked one cannot be changed (409 ContainerImmutabilityPolicyLocked) and
+//     extending or deleting a policy is not served. While a container has a
+//     legal hold, its blobs can be created but not overwritten or deleted (409
+//     BlobImmutableDueToLegalHold); a policy blocks overwrites and deletes of
+//     a blob for its days since the blob was created (409
+//     BlobImmutableDueToPolicy), as Microsoft documents container-level WORM.
+//     Deleting a container that has a legal hold or a policy fails through
+//     ARM while it holds a blob, and always through the Blob service, as
+//     Microsoft documents, with 409 ContainerHasLegalHold,
+//     ContainerImmutabilityPolicyLocked or, for an unlocked policy,
+//     BlobImmutableDueToPolicy; those codes are the Blob service's and are
+//     inferred for ARM. Deleting a storage account that has a container with
+//     a locked policy, or with a legal hold and a blob, fails with 409
+//     AccountProtectedFromDeletion, "{account} is protected from
+//     deletion.The container(s) {names} have a locked immutability policy.",
+//     as Azure answers; the status, and the message for a legal hold, are
+//     inferred. Deleting its group fails with ResourceGroupDeletionBlocked
+//     with that error as the account's detail, and leaves the account and its
+//     containers.
+//   - The Blob service takes the account from a host name such as
+//     {account}.blob.core.windows.net, or else from the first path segment,
+//     as the storage emulator does, so an azblob client made with
+//     {URL}/{account} for the URL [Server.Blob] is served at reaches it. Each
+//     call needs a bearer token, which is not checked, or Shared Key, whose
+//     signature is not checked and which an account with
+//     allowSharedKeyAccess false refuses with 403
+//     KeyBasedAuthenticationNotPermitted; one with neither fails with 401
+//     NoAuthenticationInformation, and shared access signatures with 400. A
+//     call to an account that does not exist fails with 404
+//     ResourceNotFound, where Azure's host name would not resolve. An account
+//     whose publicNetworkAccess is Disabled, or whose networkAcls deny by
+//     default, refuses calls with 403 AuthorizationFailure unless an IP rule
+//     allows the caller's address; virtual network rules and bypass are not
+//     modeled. Errors are XML with the code in x-ms-error-code, and HEAD
+//     errors carry only the header.
+//   - Blobs keep their size, MD5, HTTP properties and metadata, not their
+//     data, up to 16 MiB a call, and Get Blob is not served. Metadata names
+//     are lower-cased. Put Blob takes block blobs only and checks Content-MD5,
+//     If-Match and If-None-Match. With isVersioningEnabled, each write gets a
+//     version ID and keeps the version it replaces, and deleting the blob
+//     keeps its current version as a previous one. Otherwise, with
+//     deleteRetentionPolicy enabled, an overwrite keeps the blob as a
+//     soft-deleted snapshot and a delete soft-deletes it, as Microsoft
+//     documents. With it enabled, deleting a previous version or snapshot
+//     soft-deletes it, whether or not versioning is on. Soft-deleted entries are dropped after the policy's days. Deleting a
+//     blob with snapshots needs x-ms-delete-snapshots (409 SnapshotsPresent).
+//     Permanent deletion, deleting the current version by its version ID,
+//     undelete, leases, tags, tiers, copies, page and append blobs are not
+//     supported.
+//   - List Blobs takes prefix, delimiter, startFrom, maxresults (up to 5,000)
+//     and marker, and include values snapshots, versions, deleted,
+//     deletedwithversions, uncommittedblobs and metadata; copy, tags,
+//     immutabilitypolicy and legalhold are accepted and add nothing, as blobs
+//     have none. It lists names in byte order, each name's snapshots oldest
+//     first, then its versions oldest first, then the blob. A name with
+//     versions but no current version lists, with deletedwithversions, its
+//     newest version with Deleted and HasVersionsOnly, which is inferred.
+//     Markers are positions, so a listing survives deletes between pages.
+//     List Containers takes prefix, maxresults, marker and include values
+//     deleted, metadata and system.
 //   - A private endpoint takes one private link service connection, whose
 //     target is recorded, not checked. A new one gets a network interface
 //     with an address in its subnet, named customNetworkInterfaceName or
@@ -533,7 +618,12 @@
 //     a group, so deleting a group leaves them. Scopes other than a
 //     subscription are not served.
 //
-// Fault method names are the operation's Azure RBAC action, such as
+// Fault method names are the operation's Azure RBAC action, or for the Blob
+// service the operation's name, such as ListBlobs, PutBlob or
+// DeleteContainer, whose resource is {account}/{container}/{blob}. Blob
+// service faults fail as [fault.ModeReject] does for ModeFailOperation, and
+// the generic reasons become InternalError, or ServerBusy for 503 and rate
+// limits. Other fault method names are the operation's Azure RBAC action, such as
 // "Microsoft.Compute/virtualMachines/write",
 // "Microsoft.Compute/virtualMachines/deallocate/action" or
 // "Microsoft.Resources/subscriptions/resourceGroups/delete". A call's
@@ -590,7 +680,19 @@
 // for workspaces. Getting a
 // resource provider needs Microsoft.Resources/subscriptions/providers/read and
 // registering one {namespace}/register/action, such as
-// Microsoft.CostManagementExports/register/action. Actions are not
+// Microsoft.CostManagementExports/register/action. Blob service calls need
+// the data actions Microsoft lists for each operation, such as
+// Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read for
+// List Blobs (and blobs/tags/read with include=tags), blobs/add/action or
+// blobs/write to create a blob and blobs/write to overwrite one, blobs/delete
+// (and blobs/deleteBlobVersion/action for a version) to delete, and
+// containers/read, containers/write or containers/delete for containers, and
+// fail without one with 403 AuthorizationPermissionMismatch; Shared Key calls
+// are not checked. Azure keeps data actions apart from actions, so a role's
+// "*" does not grant them, where a grant of "*" here does. Legal holds and
+// policies need containers/setLegalHold/action,
+// containers/clearLegalHold/action, containers/immutabilityPolicies/write and
+// containers/immutabilityPolicies/lock/action. Actions are not
 // checked against the scope they act on: a grant covers every subscription.
 //
 // A lost response aborts the handler with [http.ErrAbortHandler] after
@@ -611,6 +713,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/parallelworks/squall/access"
@@ -639,9 +742,12 @@ type Server struct {
 	settleAfter int
 	copySteps   int
 	routes      []route
+	requests    atomic.Uint64
 
-	mu         sync.Mutex
-	seq        uint64
+	mu  sync.Mutex
+	seq uint64
+	// lastTick is the time of the last blob write.
+	lastTick   time.Time
 	groups     map[string]*group
 	resources  map[string]*resource
 	ops        map[string]*operation

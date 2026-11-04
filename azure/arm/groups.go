@@ -143,7 +143,8 @@ func (s *Server) emptyGroup(g *group, gk string) *apiError {
 	}
 	var left []*resource
 	for _, res := range s.resources {
-		if res.inGroup(gk) {
+		// Azure names the storage account a container's protection keeps, not the container.
+		if res.inGroup(gk) && res.kind != containerKind {
 			left = append(left, res)
 		}
 	}

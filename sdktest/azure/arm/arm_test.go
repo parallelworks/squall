@@ -79,6 +79,9 @@ type clients struct {
 	containers  *armstorage.BlobContainersClient
 	files       *armstorage.FileServicesClient
 	shares      *armstorage.FileSharesClient
+	queues      *armstorage.QueueClient
+	tables      *armstorage.TableClient
+	queueSvc    *armstorage.QueueServicesClient
 	endpoints   *armnetwork.PrivateEndpointsClient
 	netapps     *armnetapp.AccountsClient
 	pools       *armnetapp.PoolsClient
@@ -100,6 +103,8 @@ type clients struct {
 	exports     *armcostmanagement.ExportsClient
 	requests    *[]string
 	options     *azarm.ClientOptions
+	// blobURL is where the server's Blob service is served.
+	blobURL string
 }
 
 // setup serves a new server and returns clients for it that do not retry,
@@ -122,6 +127,8 @@ func setupWith(t *testing.T, retry policy.RetryOptions, opts ...arm.Option) *cli
 	s := arm.New(opts...)
 	srv := httptest.NewServer(s)
 	t.Cleanup(srv.Close)
+	blobs := httptest.NewServer(s.Blob())
+	t.Cleanup(blobs.Close)
 	requests := &[]string{}
 	options := &azarm.ClientOptions{
 		Cloud: cloud.Configuration{Services: map[cloud.ServiceName]cloud.ServiceConfiguration{
@@ -204,13 +211,14 @@ func setupWith(t *testing.T, retry policy.RetryOptions, opts ...arm.Option) *cli
 		zones: dns.NewPrivateZonesClient(), links: dns.NewVirtualNetworkLinksClient(), records: dns.NewRecordSetsClient(),
 		accounts: store.NewAccountsClient(), blob: store.NewBlobServicesClient(), containers: store.NewBlobContainersClient(),
 		files: store.NewFileServicesClient(), shares: store.NewFileSharesClient(), endpoints: network.NewPrivateEndpointsClient(),
+		queues: store.NewQueueClient(), tables: store.NewTableClient(), queueSvc: store.NewQueueServicesClient(),
 		netapps: netapp.NewAccountsClient(), pools: netapp.NewPoolsClient(), volumes: netapp.NewVolumesClient(),
 		lustre: cache.NewAmlFilesystemsClient(), cache: cache.NewManagementClient(),
 		cognitive: cog.NewAccountsClient(), deployments: cog.NewDeploymentsClient(), deleted: cog.NewDeletedAccountsClient(),
 		capacities: cog.NewModelCapacitiesClient(), search: search.NewServicesClient(), searchKeys: search.NewAdminKeysClient(),
 		vaults: keyvault.NewVaultsClient(), components: insights.NewComponentsClient(), workspaces: ml.NewWorkspacesClient(),
 		logs: logs.NewWorkspacesClient(), roles: authorization.NewRoleAssignmentsClient(), providers: resources.NewProvidersClient(), exports: cost.NewExportsClient(),
-		requests: requests, options: options,
+		requests: requests, options: options, blobURL: blobs.URL,
 	}
 }
 

@@ -530,6 +530,13 @@ func (s *Server) checkUnused(res *resource) *apiError {
 		if res.disk.vm != "" {
 			return diskAttached(res.name, res.disk.vm)
 		}
+	case accountKind:
+		return s.accountProtected(res)
+	case containerKind:
+		id, _, _ := strings.Cut(res.id, "/"+blobService.path+"/")
+		if acct := s.resources[key(id)]; acct != nil {
+			return s.accountProtected(acct)
+		}
 	}
 	return nil
 }
