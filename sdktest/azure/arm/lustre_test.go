@@ -103,7 +103,8 @@ func TestManagedLustreSystemData(t *testing.T) {
 		app := armstoragecache.CreatedByTypeApplication
 		if sd := fs.SystemData; sd == nil || sd.CreatedAt == nil || !sd.CreatedAt.Equal(created) ||
 			sd.LastModifiedAt == nil || !sd.LastModifiedAt.Equal(modified) ||
-			*sd.CreatedBy != caller || *sd.CreatedByType != app || *sd.LastModifiedBy != caller || *sd.LastModifiedByType != app {
+			sd.CreatedBy == nil || *sd.CreatedBy != caller || sd.CreatedByType == nil || *sd.CreatedByType != app ||
+			sd.LastModifiedBy == nil || *sd.LastModifiedBy != caller || sd.LastModifiedByType == nil || *sd.LastModifiedByType != app {
 			t.Fatalf("systemData = %+v, want created at %v and last modified at %v", sd, created, modified)
 		}
 	}
@@ -140,6 +141,19 @@ func TestManagedLustreSystemData(t *testing.T) {
 		t.Fatal(err)
 	}
 	check(&got.AmlFilesystem, updated)
+}
+
+func TestManagedLustreCreatedIsLastModified(t *testing.T) {
+	c := setup(t)
+	c.createGroup(t, group, nil)
+	p, err := c.beginFilesystem(t, "fs")
+	res, err := wait(t, p, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sd := res.SystemData; sd == nil || sd.CreatedAt == nil || sd.LastModifiedAt == nil || !sd.CreatedAt.Equal(*sd.LastModifiedAt) {
+		t.Fatalf("systemData of a new file system = %+v", sd)
+	}
 }
 
 func TestManagedLustrePollingNeedsAscOperations(t *testing.T) {

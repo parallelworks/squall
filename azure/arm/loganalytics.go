@@ -141,7 +141,7 @@ func (s *Server) deleteLogWorkspace(c *call) (*reply, *apiError) {
 func renderLogWorkspace(res *resource) map[string]any {
 	m, props := envelope(res)
 	props["customerId"] = res.guid
-	props["createdDate"], props["modifiedDate"] = timestamp(res.created), timestamp(res.created)
+	props["createdDate"], props["modifiedDate"] = timestamp(res.created), timestamp(res.modified)
 	if res.restoring && res.state == stateCreating {
 		props["provisioningState"] = "Restoring"
 	}

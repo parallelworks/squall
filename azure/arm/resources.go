@@ -303,7 +303,10 @@ func (s *Server) touch(res *resource) {
 // update records p as the new body of res. The caller holds s.mu.
 func (s *Server) update(res *resource, p *parsed) {
 	res.tags, res.top, res.props = p.tags, p.top, p.props
-	res.modified = s.now()
+	// A resource not stored yet is being created and keeps its creation time.
+	if s.resources[key(res.id)] == res {
+		res.modified = s.now()
+	}
 	s.touch(res)
 }
 
@@ -326,8 +329,7 @@ func envelope(res *resource) (map[string]any, map[string]any) {
 	return m, props
 }
 
-// systemData renders who created and last modified res, and when, naming
-// the caller as refusals do.
+// systemData names every caller as clientID, as the server does not read its token.
 func systemData(res *resource) map[string]any {
 	return map[string]any{
 		"createdBy": clientID, "createdByType": "Application", "createdAt": timestamp(res.created),

@@ -1,6 +1,7 @@
 package arm
 
 import (
+	"bytes"
 	"cmp"
 	"fmt"
 	"maps"
@@ -357,18 +358,18 @@ func (s *Server) prepareVNet(res *resource, p *parsed) (func(), *apiError) {
 		for _, sn := range gone {
 			s.remove(sn)
 		}
+		now := s.now()
 		for _, pl := range plan {
 			sn := pl.res
 			if sn == nil {
 				id := res.id + "/subnets/" + pl.name
 				sn = &resource{
 					kind: subnetKind, id: id, name: pl.name, sub: res.sub, group: res.group,
-					state: stateSucceeded, created: s.now(), guid: s.newUUID(), top: map[string]any{},
+					state: stateSucceeded, created: now, modified: now, guid: s.newUUID(), top: map[string]any{},
 				}
-				sn.modified = sn.created
 				s.resources[key(id)] = sn
-			} else {
-				sn.modified = s.now()
+			} else if !bytes.Equal(encode(sn.props), encode(pl.props)) {
+				sn.modified = now
 			}
 			sn.subnet, sn.props = pl.st, pl.props
 			s.touch(sn)
