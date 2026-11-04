@@ -86,6 +86,7 @@ type clients struct {
 	netapps     *armnetapp.AccountsClient
 	pools       *armnetapp.PoolsClient
 	volumes     *armnetapp.VolumesClient
+	volSnaps    *armnetapp.SnapshotsClient
 	lustre      *armstoragecache.AmlFilesystemsClient
 	cache       *armstoragecache.ManagementClient
 	cognitive   *armcognitiveservices.AccountsClient
@@ -213,7 +214,7 @@ func setupWith(t *testing.T, retry policy.RetryOptions, opts ...arm.Option) *cli
 		files: store.NewFileServicesClient(), shares: store.NewFileSharesClient(), endpoints: network.NewPrivateEndpointsClient(),
 		queues: store.NewQueueClient(), tables: store.NewTableClient(), queueSvc: store.NewQueueServicesClient(),
 		netapps: netapp.NewAccountsClient(), pools: netapp.NewPoolsClient(), volumes: netapp.NewVolumesClient(),
-		lustre: cache.NewAmlFilesystemsClient(), cache: cache.NewManagementClient(),
+		volSnaps: netapp.NewSnapshotsClient(), lustre: cache.NewAmlFilesystemsClient(), cache: cache.NewManagementClient(),
 		cognitive: cog.NewAccountsClient(), deployments: cog.NewDeploymentsClient(), deleted: cog.NewDeletedAccountsClient(),
 		capacities: cog.NewModelCapacitiesClient(), search: search.NewServicesClient(), searchKeys: search.NewAdminKeysClient(),
 		vaults: keyvault.NewVaultsClient(), components: insights.NewComponentsClient(), workspaces: ml.NewWorkspacesClient(),

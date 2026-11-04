@@ -314,7 +314,7 @@ func (s *Server) renderOne(res *resource) map[string]any {
 		return renderGallery(res, false)
 	case accountKind:
 		return s.accountBody(res)
-	case netappAccountKind, poolKind, volumeKind:
+	case netappAccountKind, poolKind, volumeKind, netappSnapshotKind:
 		return renderNetApp(res)
 	case amlfsKind:
 		return renderAmlfs(res)

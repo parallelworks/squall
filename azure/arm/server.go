@@ -50,7 +50,8 @@
 //     Properties, List Blobs, Put Blob, Put Block, Put Block List, Snapshot
 //     Blob, Get Blob Properties and Delete Blob, for block blobs;
 //   - Microsoft.NetApp: accounts, capacity pools and volumes (create or
-//     update, get, list in their group, account or pool, and delete);
+//     update, get, list in their group, account or pool, and delete) and
+//     volume snapshots (create, get, list and delete);
 //   - Microsoft.StorageCache: Azure Managed Lustre file systems (create or
 //     update, get, list in a group and delete), and subnet checks;
 //   - Microsoft.CognitiveServices: accounts (create or update, get, list keys
@@ -657,7 +658,18 @@
 //     creationToken, subnetId and usageThreshold; their values are not
 //     checked. Deleting an account or pool that holds pools or volumes fails
 //     with 409 CannotDeleteResource, as Azure refuses it; the code is
-//     inferred. An update's status, Updating, is inferred too.
+//     inferred. An update's status, Updating, is inferred too. Accounts,
+//     pools, volumes and snapshots report systemData as Managed Lustre file
+//     systems do, its lastModifiedAt moved by each write that takes effect.
+//     A snapshot, named account/pool/volume/snapshot, shows created, its
+//     creation time, and a snapshotId; it takes no tags, and a create that
+//     sends them fails with 400. Creating an existing snapshot answers 201
+//     and changes nothing, which is inferred. Deleting a volume deletes its
+//     snapshots, with or without forceDelete, as Microsoft documents; the
+//     rest forceDelete cleans up is not modeled. The limit of 255 snapshots
+//     a volume is not enforced, and snapshot updates, restores and snapshot
+//     policies are not served. [Server.SnapshotVolume] adds a snapshot
+//     directly.
 //   - A Managed Lustre change in progress answers with an
 //     Azure-AsyncOperation URL under
 //     Microsoft.StorageCache/locations/{location}/ascOperations; a delete

@@ -389,6 +389,9 @@ func withState(res *resource, state string, render func() []byte) []byte {
 // remove deletes res and what it holds. The caller holds s.mu.
 func (s *Server) remove(res *resource) {
 	delete(s.resources, key(res.id))
+	if res.kind == volumeKind {
+		s.removeVolumeSnapshots(res)
+	}
 	switch {
 	case res.nic != nil:
 		s.releaseNIC(res)

@@ -813,3 +813,32 @@ func TestGroupResourceTopLevelMembers(t *testing.T) {
 		t.Errorf("virtual network = %v", vnet)
 	}
 }
+
+func TestNetAppSnapshotShapes(t *testing.T) {
+	s := arm.New()
+	newGroup(t, s)
+	acct := groupPath + "/providers/Microsoft.NetApp/netAppAccounts/a"
+	vol := acct + "/capacityPools/p/volumes/v"
+	subnet := groupPath + "/providers/Microsoft.Network/virtualNetworks/n/subnets/s"
+	for _, put := range [][2]string{
+		{acct, `{"location":"eastus"}`},
+		{acct + "/capacityPools/p", `{"location":"eastus","properties":{"serviceLevel":"Premium","size":4398046511104}}`},
+		{vol, `{"location":"eastus","properties":{"creationToken":"v","subnetId":"` + subnet + `","usageThreshold":107374182400}}`},
+	} {
+		if rec, out := do(t, s, http.MethodPut, put[0], put[1]); rec.Code != http.StatusCreated {
+			t.Fatalf("PUT %s = %d %v", put[0], rec.Code, out)
+		}
+	}
+	if rec, out := do(t, s, http.MethodPut, vol+"/snapshots/s", `{"location":"eastus","tags":{"k":"v"}}`); rec.Code != http.StatusBadRequest {
+		t.Errorf("a snapshot with tags = %d %v", rec.Code, out)
+	}
+	if rec, out := do(t, s, http.MethodPut, vol+"/snapshots/s", `{"location":"eastus","properties":{"snapshotId":"x"}}`); rec.Code != http.StatusCreated {
+		t.Errorf("a snapshot sending a read-only property back = %d %v", rec.Code, out)
+	}
+	if rec, out := do(t, s, http.MethodPut, vol+"/snapshots/s", `{"location":"eastus","properties":{"size":1}}`); rec.Code != http.StatusBadRequest {
+		t.Errorf("a snapshot with an unknown property = %d %v", rec.Code, out)
+	}
+	if rec, out := do(t, s, http.MethodDelete, vol+"?api-version=2024-01-01&forceDelete=maybe", ""); rec.Code != http.StatusBadRequest {
+		t.Errorf("deleting a volume with forceDelete=maybe = %d %v", rec.Code, out)
+	}
+}
