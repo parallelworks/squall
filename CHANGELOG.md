@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.28.0](https://github.com/parallelworks/squall/compare/v0.27.0...v0.28.0) (2026-11-04)
+
+
+### Features
+
+* **azure:** list the resources in a resource group ([#86](https://github.com/parallelworks/squall/issues/86)) ([ba70ae4](https://github.com/parallelworks/squall/commit/ba70ae411ad9c4526752174508ebdffb298fb53d))
+
 ## [0.27.0](https://github.com/parallelworks/squall/compare/v0.26.0...v0.27.0) (2026-11-03)
 
 
