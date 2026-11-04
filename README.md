@@ -26,7 +26,7 @@ failure replays from its seed.
 | [`aws/ec2`](https://pkg.go.dev/github.com/parallelworks/squall/aws/ec2) | Amazon EC2: instances (run with client tokens, describe with filters and pages, start, stop, terminate, change type or which attached volumes terminating deletes), images (describe, register from snapshots, deregister), instance types, EBS volumes (create, describe, attach, detach, delete), EBS snapshots (create, copy across regions, describe with filters and pages, delete), placement groups, tags, Elastic IP addresses (allocate, describe, release, associate with an interface or instance, disassociate), network interfaces (create with client tokens, describe, delete), and VPC networking: VPCs and their DNS attributes, subnets, availability zones, internet gateways (create, attach, detach, delete), NAT gateways on Elastic IP addresses, route tables with their routes and subnet associations, DHCP options, security groups (create, describe groups and rules with filters and pages, authorize and revoke ingress and egress rules, delete) with each VPC's default group, and VPC attachments to transit gateways the test sets up, refusing deletes with dependencies as EC2 does. |
 | [`aws/route53`](https://pkg.go.dev/github.com/parallelworks/squall/aws/route53) | Amazon Route 53: private hosted zones (create with caller references, get, list by name with pages, delete), their VPC associations, tags, and record sets (change in atomic batches with CREATE, UPSERT and DELETE, list with pages), and changes (get). |
 | [`aws/s3`](https://pkg.go.dev/github.com/parallelworks/squall/aws/s3) | Amazon S3: general purpose buckets (create, head, list with pages and filters, delete), their tags, versioning, policy and CORS rules, and objects (put, delete one or many, list with pages, prefixes and delimiters, list versions and delete markers). |
-| [`azure/arm`](https://pkg.go.dev/github.com/parallelworks/squall/azure/arm) | Azure Resource Manager: resource groups (get, create or update, list with tag filters, list the resources in one, delete with everything in them that nothing outside uses), virtual machines (create or update, get, list, instance view, deallocate, start, delete) and their extensions (create or update, get, list, delete), Uniform scale sets (create or update, update, get, list, delete, delete instances) and their VMs, managed disks (VM OS disks included) and snapshots, with cross-region incremental snapshot copies whose completionPercent climbs to 100, Azure Compute Gallery galleries, image definitions and image versions with their replication status, virtual networks and their subnets, NAT gateways, public load balancers with backend pools and outbound rules, network security groups, network interfaces and public IP addresses, the IP configurations of scale set VMs, private DNS zones, virtual network links and A record sets, resource provider registration, Cost Management exports at a subscription's scope, Log Analytics workspaces (create or update, recover, get, list, delete with soft deletion) and the default workspace Application Insights makes for a component that names none, Cognitive Services deployments with partner model attestations, and long-running operations to poll. |
+| [`azure/arm`](https://pkg.go.dev/github.com/parallelworks/squall/azure/arm) | Azure Resource Manager: resource groups (get, create or update, list with tag filters, list the resources in one, delete with everything in them that nothing outside uses), virtual machines (create or update, get, list, instance view, deallocate, start, delete) and their extensions (create or update, get, list, delete), Uniform scale sets (create or update, update, get, list, delete, delete instances) and their VMs, managed disks (VM OS disks included) and snapshots, with cross-region incremental snapshot copies whose completionPercent climbs to 100, Azure Compute Gallery galleries, image definitions and image versions with their replication status, virtual networks and their subnets, NAT gateways, public load balancers with backend pools and outbound rules, network security groups, network interfaces and public IP addresses, the IP configurations of scale set VMs, private DNS zones, virtual network links and A record sets, resource provider registration, storage accounts with their blob containers (soft-deleted ones listed, legal holds and immutability policies that block deletes), file shares with usage stats, queues and tables, the Blob service's data plane (containers, and block blobs put, listed with versions, snapshots, soft-deleted and uncommitted blobs, and deleted) with RBAC data actions and account network rules, Cost Management exports at a subscription's scope, Log Analytics workspaces (create or update, recover, get, list, delete with soft deletion) and the default workspace Application Insights makes for a component that names none, Cognitive Services deployments with partner model attestations, and long-running operations to poll. |
 | [`azure/graph`](https://pkg.go.dev/github.com/parallelworks/squall/azure/graph) | Microsoft Graph: the organization (list), a directory's domains (list) and users (create with Microsoft Entra's name and password rules, get by ID or user principal name, delete, permanently delete once deleted), with application permissions checked as Graph documents them. |
 | [`gcp/bigquery`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/bigquery) | BigQuery: datasets (insert with the API's ID and label rules, get, list with pages, patch friendly name, description and labels with etag checks, delete refusing a dataset that holds tables unless `deleteContents`), optionally refused in a project where a `gcp/serviceusage` server has not enabled the API. |
 | [`gcp/compute`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/compute) | Compute Engine: instances (bulkInsert, insert, get, list, aggregatedList, delete, stop, start, setLabels, setMachineType, addAccessConfig, attachDisk, detachDisk), disks (get, list, aggregatedList, insert, delete), snapshots (insert, get, list, delete), zones, regional addresses (get, list, insert, delete, setLabels), resource policies, instance templates, routes, custom mode VPC networks with their default route, subnetworks with secondary ranges, routers with Cloud NAT (insert, get, patch, delete, list, aggregatedList), firewalls, global addresses including ranges for private services access, and zone, region and global operations (get, wait). |
@@ -614,9 +614,83 @@ For Azure Resource Manager:
   Values are not checked, and a partner model deployed without it is not
   failed, though those sources report Azure failing it with
   `AnthropicOrganizationCreationFailed`. `Deployments` shows it.
+- The Blob service is `srv.Blob()`, an `http.Handler` of its own: serve it
+  with `httptest` and make the azblob client with `{its URL}/{account}`, as
+  for the storage emulator, any token credential and
+  `InsecureAllowCredentialWithHTTP`; a host name such as
+  `{account}.blob.core.windows.net` (or `{account}.privatelink.blob...`)
+  names the account too. Container names are lower case, 3 to 63 letters,
+  digits and hyphens, through ARM as through the Blob service, or `$root`
+  and `$web` (not `$logs`); a blob in the root container is addressed with
+  `$root` in the path (with no `/` in its blob names), and implicit root
+  addressing answers 400. It shares the ARM
+  server's accounts, containers, blob service properties, faults and policy,
+  so deleting a container or account through ARM deletes its blobs. A missing
+  account answers 404 `ResourceNotFound`, where Azure's host name would not
+  resolve. Blobs keep their size, MD5 and properties, not data (Get Blob is
+  not served). Versioning, blob and container soft delete, snapshots and
+  uncommitted blocks follow the blob service properties (versions written
+  while versioning was on are kept after it is turned off, and a snapshot of
+  a versioned blob makes a version); permanent delete,
+  undelete, leases, tags, tiers and page or append blobs are not supported.
+  Calls need the RBAC data actions Microsoft lists (403
+  `AuthorizationPermissionMismatch`), which a grant of `*` covers here though
+  a role's `*` does not in Azure; `networkAcls` that deny by default, or
+  disabled public network access, answer 403 `AuthorizationFailure` unless an
+  IP rule allows the caller.
+- Version-level immutability policies are not modeled: a non-empty default
+  policy on an account's version-level settings, or an immutability policy
+  on a version-level immutable container, answers 400, as do changing a
+  locked container policy, legal holds on a version-level immutable
+  container and `allowProtectedAppendWritesAll`; deleting or extending a
+  policy is not served (404). A container's policy can be read back (404
+  when it has none, inferred, as Azure's spec lists only 200; prefer the
+  container's `hasImmutabilityPolicy`). Locking takes the policy's ETag,
+  not `*`, and locking a locked policy changes nothing. A container takes 1 to 10 legal hold tags, which
+  are lower-cased so case variants count once.
+- Container legal holds block overwrites, snapshots and deletes of their
+  blobs, and deleting the container itself, even empty, until the hold is
+  cleared (inferred: the container-level WORM table says container deletion
+  fails while a legal hold is in effect, its Deletion section that the
+  container must be empty). An immutability policy blocks deletes for its
+  days, and overwrites and snapshots for as long as it exists; a container
+  under one can be deleted through ARM once empty. Deleting an account with
+  a container under a locked policy or a legal hold fails with 409
+  `AccountProtectedFromDeletion`, as Azure answers. A legal hold protects
+  the account even on an empty container, as Microsoft's data protection
+  overview says, though the container-level WORM table adds "at least one
+  blob" and its note says unlocked policies "and/or legal hold" don't
+  provide delete protection (failing closed is inferred). Uncommitted
+  blocks alone are not a blob, here or in `Blobs()`. A blocked group delete
+  leaves the account whole, shares, queues and tables included. Soft-deleted
+  containers do not protect their account (inferred from the soft delete
+  page: "Container soft delete doesn't protect against the deletion of a
+  storage account"), while soft-deleted blobs count as data for holds,
+  policies and version-level immutability (inferred).
+- A container with version-level immutability can be deleted only through
+  ARM once empty (`ContainerImmutableStorageWithVersioningEnabled`
+  otherwise, with the message Azure shows on Microsoft Q&A 5656033 and
+  1300488; using it for the Blob service is inferred). An account with it
+  enabled cannot be deleted while any container exists, and one without it
+  cannot while it has such a container; an account with it and no
+  container can be deleted (inferred, as the version-level WORM page says
+  both "it can't be deleted until it's empty" and that deletion fails "if
+  it's enabled for the account", and the setting cannot be turned off).
+  Account version-level immutability is set only at creation, kept across
+  updates and implies versioning; a container takes it only with
+  versioning on, and versioning cannot then be turned off ("Conflicting
+  feature 'VersionLevelWorm' is enabled. Please disable it and retry.", as
+  on Q&A 5656033; that a soft-deleted container's counts is inferred).
+  Blob-level immutability policies and legal holds are not supported
+  (400), and version-level immutability with a hierarchical namespace, on
+  the account or a container, answers 400. Retention days run against the
+  server's clock, so a test of expiry should make the server with
+  `arm.WithClock` and move the clock rather than wait.
 - Fault method names are the Azure RBAC action, such as
   `Microsoft.Compute/virtualMachines/write`, and a rule's `Resource` is the
-  resource ID in the call's path.
+  resource ID in the call's path. Blob service faults name the operation,
+  such as `PutBlob` or `ListBlobs`, and `{account}/{container}/{blob}`;
+  calls the Blob service refuses as not served never match a fault.
 
 For Microsoft Graph:
 

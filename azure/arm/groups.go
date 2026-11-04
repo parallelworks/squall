@@ -143,7 +143,8 @@ func (s *Server) emptyGroup(g *group, gk string) *apiError {
 	}
 	var left []*resource
 	for _, res := range s.resources {
-		if res.inGroup(gk) {
+		// Azure names the storage account its protection keeps, not what the account holds.
+		if res.inGroup(gk) && s.storageParent(res) == nil {
 			left = append(left, res)
 		}
 	}

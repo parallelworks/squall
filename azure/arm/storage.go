@@ -1,9 +1,11 @@
 package arm
 
 import (
+	"bytes"
 	"cmp"
 	"crypto/sha256"
 	"encoding/base64"
+	"io"
 	"maps"
 	"net/http"
 	"regexp"
@@ -51,6 +53,22 @@ var (
 		},
 		etag: quotedETag,
 	}
+	queueServiceKind = &kind{
+		typ: "Microsoft.Storage/storageAccounts/queueServices", plural: "queueServices", typeName: "QueueServiceProperties",
+		props: []string{"cors"},
+	}
+	tableServiceKind = &kind{
+		typ: "Microsoft.Storage/storageAccounts/tableServices", plural: "tableServices", typeName: "TableServiceProperties",
+		props: []string{"cors"},
+	}
+	queueKind = &kind{
+		typ: "Microsoft.Storage/storageAccounts/queueServices/queues", plural: "queues", typeName: "StorageQueue",
+		props: []string{"metadata"}, readOnly: []string{"approximateMessageCount"},
+	}
+	tableKind = &kind{
+		typ: "Microsoft.Storage/storageAccounts/tableServices/tables", plural: "tables", typeName: "Table",
+		props: []string{"signedIdentifiers"}, readOnly: []string{"tableName"},
+	}
 	containerKind = &kind{
 		typ: "Microsoft.Storage/storageAccounts/blobServices/containers", plural: "containers", typeName: "BlobContainer",
 		props: []string{
@@ -69,6 +87,8 @@ var (
 type accountState struct {
 	// services are the properties of the account's services, by their path.
 	services map[string]map[string]any
+	// deleted are the account's soft-deleted blob containers.
+	deleted []*deletedContainer
 }
 
 // accountName is the form Azure requires of a storage account name.
@@ -96,12 +116,13 @@ func (s *Server) registerStorageRoutes() {
 	s.add("GET", account, accountKind.action("read"), false, s.getAccount)
 	s.add("DELETE", account, accountKind.action("delete"), false, s.deleteAccount)
 	s.add("POST", account+"/listKeys", accountKind.action("listKeys/action"), false, s.listKeys)
-	for _, svc := range []*service{blobService, fileService} {
+	for _, svc := range []*service{blobService, fileService, queueService, tableService} {
 		path := account + "/" + svc.path + "/default"
 		s.add("PUT", path, svc.kind.action("write"), false, s.putService(svc))
 		s.add("GET", path, svc.kind.action("read"), false, s.getService(svc))
 	}
-	for _, ch := range []*child{containers, shares} {
+	s.registerWormRoutes()
+	for _, ch := range []*child{containers, shares, queues, tables} {
 		path := account + "/" + ch.service.path + "/default/" + ch.kind.plural
 		s.add("GET", path, ch.kind.action("read"), false, s.listChildren(ch))
 		s.add("PUT", path+"/{name}", ch.kind.action("write"), false, s.putChild(ch))
@@ -127,11 +148,46 @@ func (s *Server) putAccount(c *call) (*reply, *apiError) {
 				}
 				return nil, newError(http.StatusConflict, "StorageAccountAlreadyTaken", "The storage account named %s is already taken.", res.name)
 			}
+			const vlw = "immutableStorageWithVersioning"
+			created := res.account == nil
+			m, _ := p.props[vlw].(map[string]any)
+			if pol := m["immutabilityPolicy"]; pol != nil {
+				if pm, ok := pol.(map[string]any); !ok || len(pm) > 0 {
+					return nil, unsupported("a default version-level immutability policy is not supported")
+				}
+			}
+			if m != nil {
+				m = maps.Clone(m)
+				delete(m, "immutabilityPolicy")
+				p.props[vlw] = m
+			}
+			_, given := boolean(m, "enabled")
+			was := res.props[vlw]
+			if hns, _ := boolean(p.props, "isHnsEnabled"); hns && (versionLevelWORM(p.props) || !created && s.versionLevelAnywhere(res)) {
+				return nil, unsupported("version-level immutability on an account with a hierarchical namespace is not supported")
+			}
+			if !created && given && versionLevelWORM(p.props) != versionLevelWORM(res.props) {
+				return nil, newError(http.StatusBadRequest, "PropertyIsImmutable",
+					"Version-level immutability can be enabled only when a storage account is created, and cannot be disabled.")
+			}
 			return func() {
-				if res.account == nil {
+				if created {
 					res.account = &accountState{services: map[string]map[string]any{}}
+					if versionLevelWORM(p.props) {
+						res.account.services[blobService.path] = map[string]any{"isVersioningEnabled": true}
+					}
 				}
 				s.update(res, p)
+				if !created && !given {
+					if res.props == nil {
+						res.props = map[string]any{}
+					}
+					if was != nil {
+						res.props[vlw] = was
+					} else {
+						delete(res.props, vlw)
+					}
+				}
 			}, nil
 		},
 	})(c)
@@ -187,6 +243,7 @@ func (s *Server) account(c *call) (*resource, *apiError) {
 	if res == nil || res.kind != accountKind {
 		return nil, resourceNotFound(accountKind.typ, c.val("account"), c.val("rg"))
 	}
+	s.deletedContainers(res)
 	return res, nil
 }
 
@@ -200,6 +257,7 @@ func (s *Server) writableAccount(c *call, k *kind) (*resource, *apiError) {
 	if res == nil || res.kind != accountKind {
 		return nil, parentNotFound(k, accountID(c))
 	}
+	s.deletedContainers(res)
 	return res, nil
 }
 
@@ -239,6 +297,9 @@ func (s *Server) deleteAccount(c *call) (*reply, *apiError) {
 	res := s.settled(accountID(c))
 	if res == nil || res.kind != accountKind {
 		return &reply{status: http.StatusNoContent}, nil
+	}
+	if err := s.accountProtected(res); err != nil {
+		return nil, err
 	}
 	s.remove(res)
 	return &reply{status: http.StatusOK}, nil
@@ -300,8 +361,10 @@ type service struct {
 }
 
 var (
-	blobService = &service{kind: blobServiceKind, path: "blobServices"}
-	fileService = &service{kind: fileServiceKind, path: "fileServices", replace: true}
+	blobService  = &service{kind: blobServiceKind, path: "blobServices"}
+	fileService  = &service{kind: fileServiceKind, path: "fileServices", replace: true}
+	queueService = &service{kind: queueServiceKind, path: "queueServices"}
+	tableService = &service{kind: tableServiceKind, path: "tableServices"}
 )
 
 func (svc *service) id(c *call) string { return accountID(c) + "/" + svc.path + "/default" }
@@ -317,6 +380,10 @@ func (s *Server) putService(svc *service) handler {
 		res, err := s.writableAccount(c, svc.kind)
 		if err != nil {
 			return nil, err
+		}
+		if on, ok := boolean(p.props, "isVersioningEnabled"); ok && !on && svc == blobService && s.versionLevelAnywhere(res) {
+			return nil, newError(http.StatusBadRequest, "InvalidRequestPropertyValue",
+				"Conflicting feature 'VersionLevelWorm' is enabled. Please disable it and retry.")
 		}
 		if svc.replace || res.account.services[svc.path] == nil {
 			res.account.services[svc.path] = map[string]any{}
@@ -361,6 +428,9 @@ type child struct {
 	// one that exists and a read of one that does not.
 	exists, notFound func() *apiError
 	render           func(*resource) map[string]any
+	// upsert children take a PUT of one that exists as an update, and
+	// answer 200 to every PUT and 204 to every DELETE.
+	upsert bool
 }
 
 var (
@@ -371,6 +441,18 @@ var (
 		},
 		notFound: func() *apiError {
 			return newError(http.StatusNotFound, "ContainerNotFound", "The specified container does not exist.")
+		},
+	}
+	queues = &child{
+		kind: queueKind, service: queueService, render: renderQueue, upsert: true,
+		notFound: func() *apiError {
+			return newError(http.StatusNotFound, "QueueNotFound", "The specified queue does not exist.")
+		},
+	}
+	tables = &child{
+		kind: tableKind, service: tableService, render: renderTable, upsert: true,
+		notFound: func() *apiError {
+			return newError(http.StatusNotFound, "TableNotFound", "The table specified does not exist.")
 		},
 	}
 	shares = &child{
@@ -390,22 +472,50 @@ func (ch *child) id(c *call) string { return ch.prefix(c) + c.val("name") }
 
 func (s *Server) putChild(ch *child) handler {
 	return func(c *call) (*reply, *apiError) {
+		if ch == tables {
+			// A table create may come with no body.
+			body, _ := io.ReadAll(io.LimitReader(c.r.Body, maxBody))
+			if len(bytes.TrimSpace(body)) == 0 {
+				body = []byte("{}")
+			}
+			c.r.Body = io.NopCloser(bytes.NewReader(body))
+		}
 		p, err := parseBody(c, ch.kind)
 		if err != nil {
 			return nil, err
 		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		if _, err := s.writableAccount(c, ch.kind); err != nil {
+		acct, err := s.writableAccount(c, ch.kind)
+		if err != nil {
 			return nil, err
 		}
+		if ch == containers {
+			if err := containerNameError(c.val("name")); err != nil {
+				return nil, err
+			}
+			if hns, _ := boolean(acct.props, "isHnsEnabled"); hns && versionLevelWORM(p.props) {
+				return nil, unsupported("version-level immutability on an account with a hierarchical namespace is not supported")
+			}
+			if versionLevelWORM(p.props) && !settingsOf(acct).versioning {
+				return nil, newError(http.StatusBadRequest, "InvalidRequestPropertyValue",
+					"Version-level immutability needs blob versioning enabled on the storage account.")
+			}
+		}
 		id := ch.id(c)
-		if s.resources[key(id)] != nil {
-			return nil, ch.exists()
+		if existing := s.resources[key(id)]; existing != nil {
+			if !ch.upsert {
+				return nil, ch.exists()
+			}
+			s.update(existing, p)
+			return ok200(s.renderChild(ch, existing)), nil
 		}
 		res := s.newResource(c, ch.kind, id, p)
 		s.resources[key(id)] = res
-		return &reply{status: http.StatusCreated, body: encode(ch.render(res))}, nil
+		if ch.upsert {
+			return ok200(s.renderChild(ch, res)), nil
+		}
+		return &reply{status: http.StatusCreated, body: encode(s.renderChild(ch, res))}, nil
 	}
 }
 
@@ -420,7 +530,15 @@ func (s *Server) getChild(ch *child) handler {
 		if res == nil {
 			return nil, ch.notFound()
 		}
-		return ok200(ch.render(res)), nil
+		m := s.renderChild(ch, res)
+		expand := c.query("$expand")
+		switch {
+		case ch == shares && slices.Contains(strings.Split(expand, ","), "stats"):
+			m["properties"].(map[string]any)["shareUsageBytes"] = res.usage
+		case ch.upsert && expand != "":
+			return nil, unsupported("$expand=%s is not supported", expand)
+		}
+		return ok200(m), nil
 	}
 }
 
@@ -428,18 +546,42 @@ func (s *Server) listChildren(ch *child) handler {
 	return func(c *call) (*reply, *apiError) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		if _, err := s.account(c); err != nil {
+		acct, err := s.account(c)
+		if err != nil {
 			return nil, err
 		}
+		// Containers and shares ignore the parameters they do not model, as they always have; queues and tables refuse them.
+		include, filter := "", ""
+		switch {
+		case ch == containers:
+			include, filter = c.query("$include"), c.query("$filter")
+		case ch.upsert && c.query("$filter") != "":
+			return nil, unsupported("$filter is not supported")
+		}
 		prefix := key(ch.prefix(c))
-		var items []*resource
+		var items []map[string]any
 		for k, res := range s.resources {
-			if res.kind == ch.kind && strings.HasPrefix(k, prefix) {
-				items = append(items, res)
+			if res.kind == ch.kind && strings.HasPrefix(k, prefix) && strings.HasPrefix(res.name, filter) {
+				items = append(items, s.renderChild(ch, res))
 			}
 		}
-		slices.SortFunc(items, func(a, b *resource) int { return cmp.Compare(key(a.name), key(b.name)) })
-		return ok(listBody(items, func(res *resource) any { return ch.render(res) })), nil
+		if include == "deleted" {
+			now := s.now()
+			for _, d := range s.deletedContainers(acct) {
+				if !strings.HasPrefix(d.res.name, filter) {
+					continue
+				}
+				m := s.renderChild(ch, d.res)
+				props := m["properties"].(map[string]any)
+				props["deleted"], props["deletedTime"], props["version"] = true, timestamp(d.deleted), d.version
+				props["remainingRetentionDays"] = daysLeft(d.deleted, now, d.keep)
+				items = append(items, m)
+			}
+		}
+		slices.SortStableFunc(items, func(a, b map[string]any) int {
+			return cmp.Or(cmp.Compare(key(a["name"].(string)), key(b["name"].(string))), compareDeleted(a, b))
+		})
+		return ok(listBody(items, func(m map[string]any) any { return m })), nil
 	}
 }
 
@@ -447,14 +589,25 @@ func (s *Server) deleteChild(ch *child) handler {
 	return func(c *call) (*reply, *apiError) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		if _, err := s.writableAccount(c, ch.kind); err != nil {
+		acct, err := s.writableAccount(c, ch.kind)
+		if err != nil {
 			return nil, err
 		}
 		res := s.resources[key(ch.id(c))]
-		if res == nil {
+		if ch.upsert && res != nil {
+			s.remove(res)
+		}
+		if res == nil || ch.upsert {
 			return &reply{status: http.StatusNoContent}, nil
 		}
-		s.remove(res)
+		if ch == containers {
+			if err := s.containerProtected(res, false); err != nil {
+				return nil, err
+			}
+			s.deleteContainer(acct, res)
+		} else {
+			s.remove(res)
+		}
 		return &reply{status: http.StatusOK}, nil
 	}
 }
@@ -471,14 +624,71 @@ func renderLeased(res *resource) (map[string]any, map[string]any) {
 	return m, props
 }
 
+// renderChild renders res, a child ch holds; a container shows the
+// version-level immutability it takes from its account, which is inferred.
+// The caller holds s.mu.
+func (s *Server) renderChild(ch *child, res *resource) map[string]any {
+	m := ch.render(res)
+	if ch == containers && s.containerVersionLevel(res) {
+		props, _ := m["properties"].(map[string]any)
+		vlw, _ := props["immutableStorageWithVersioning"].(map[string]any)
+		vlw = maps.Clone(vlw)
+		if vlw == nil {
+			vlw = map[string]any{}
+		}
+		vlw["enabled"] = true
+		props["immutableStorageWithVersioning"] = vlw
+	}
+	return m
+}
+
 func renderContainer(res *resource) map[string]any {
 	m, props := renderLeased(res)
 	if _, ok := props["publicAccess"]; !ok {
 		props["publicAccess"] = "None"
 	}
-	props["hasImmutabilityPolicy"] = false
-	props["hasLegalHold"] = false
+	renderWorm(res, props)
 	return m
+}
+
+// compareDeleted orders a live container before deleted ones of its name.
+func compareDeleted(a, b map[string]any) int {
+	deleted := func(m map[string]any) bool { v, _ := m["properties"].(map[string]any)["deleted"].(bool); return v }
+	switch {
+	case deleted(a) == deleted(b):
+		return 0
+	case deleted(a):
+		return 1
+	}
+	return -1
+}
+
+func renderQueue(res *resource) map[string]any {
+	m, props := envelope(res)
+	delete(props, "provisioningState")
+	props["approximateMessageCount"] = 0
+	return m
+}
+
+func renderTable(res *resource) map[string]any {
+	m, props := envelope(res)
+	delete(props, "provisioningState")
+	props["tableName"] = res.name
+	return m
+}
+
+// SetShareUsage sets how many bytes the file share with ID id holds, which
+// its shareUsageBytes shows when it is read with $expand=stats, as the server
+// holds no file data. It reports whether the share exists.
+func (s *Server) SetShareUsage(id string, bytes int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res := s.resources[key(id)]
+	if res == nil || res.kind != shareKind {
+		return false
+	}
+	res.usage = bytes
+	return true
 }
 
 func renderShare(res *resource) map[string]any {

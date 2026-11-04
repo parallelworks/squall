@@ -77,3 +77,58 @@ func BenchmarkListGroupResources(b *testing.B) {
 		})
 	}
 }
+
+func blobServe(b *testing.B, h http.Handler, method, target, body string) *httptest.ResponseRecorder {
+	b.Helper()
+	req := httptest.NewRequestWithContext(b.Context(), method, target, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer token")
+	req.Header.Set("x-ms-blob-type", "BlockBlob")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func blobStorage(b *testing.B, props string) (*arm.Server, http.Handler) {
+	b.Helper()
+	s := arm.New()
+	serve(b, s, http.MethodPut, groupPath, `{"location":"eastus"}`)
+	account := groupPath + "/providers/Microsoft.Storage/storageAccounts/acct"
+	serve(b, s, http.MethodPut, account, `{"location":"eastus","sku":{"name":"Standard_LRS"},"kind":"StorageV2"}`)
+	serve(b, s, http.MethodPut, account+"/blobServices/default", `{"properties":`+props+`}`)
+	serve(b, s, http.MethodPut, account+"/blobServices/default/containers/data", `{}`)
+	return s, s.Blob()
+}
+
+func BenchmarkPutListDeleteBlob(b *testing.B) {
+	_, h := blobStorage(b, `{"isVersioningEnabled":true,"deleteRetentionPolicy":{"enabled":true,"days":7}}`)
+	i := 0
+	for b.Loop() {
+		name := fmt.Sprintf("/acct/data/blob-%d", i)
+		i++
+		for _, call := range [][2]string{
+			{http.MethodPut, name},
+			{http.MethodGet, "/acct/data?restype=container&comp=list&include=versions,deleted&maxresults=10&prefix=" + name[len("/acct/data/"):]},
+			{http.MethodDelete, name},
+		} {
+			if rec := blobServe(b, h, call[0], call[1], "data"); rec.Code >= 300 {
+				b.Fatalf("%s %s = %d %s", call[0], call[1], rec.Code, rec.Body)
+			}
+		}
+	}
+}
+
+func BenchmarkListBlobs(b *testing.B) {
+	_, h := blobStorage(b, `{"isVersioningEnabled":true}`)
+	for i := range 1000 {
+		blobServe(b, h, http.MethodPut, fmt.Sprintf("/acct/data/dir-%d/blob-%d", i%10, i), "data")
+	}
+	for _, bc := range [][2]string{{"page", "&maxresults=100"}, {"versions", "&include=versions,deleted,snapshots,metadata"}, {"delimiter", "&delimiter=/"}} {
+		b.Run(bc[0], func(b *testing.B) {
+			for b.Loop() {
+				if rec := blobServe(b, h, http.MethodGet, "/acct/data?restype=container&comp=list"+bc[1], ""); rec.Code != http.StatusOK {
+					b.Fatal(rec.Body)
+				}
+			}
+		})
+	}
+}

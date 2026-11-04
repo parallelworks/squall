@@ -530,6 +530,12 @@ func (s *Server) checkUnused(res *resource) *apiError {
 		if res.disk.vm != "" {
 			return diskAttached(res.name, res.disk.vm)
 		}
+	case accountKind:
+		return s.accountProtected(res)
+	}
+	// A protected account keeps everything in it whole when its group is deleted.
+	if acct := s.storageParent(res); acct != nil {
+		return s.accountProtected(acct)
 	}
 	return nil
 }

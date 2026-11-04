@@ -62,6 +62,12 @@ type resource struct {
 	vm      *vmState
 	scale   *scaleSet
 	account *accountState
+	// blobs are a blob container's blobs, by name.
+	blobs map[string]*blobName
+	// worm is a blob container's legal hold and immutability policy.
+	worm *worm
+	// usage is the bytes a file share holds.
+	usage   int64
 	pe      *peState
 	vnet    *vnetState
 	subnet  *subnetState
