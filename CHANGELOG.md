@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.29.0](https://github.com/parallelworks/squall/compare/v0.28.0...v0.29.0) (2026-11-04)
+
+
+### Features
+
+* **azure:** serve the Blob service's data plane and storage container protections ([#88](https://github.com/parallelworks/squall/issues/88)) ([dc16a04](https://github.com/parallelworks/squall/commit/dc16a049480d37f246df660940708c1ed05b84c6))
+
 ## [0.28.0](https://github.com/parallelworks/squall/compare/v0.27.0...v0.28.0) (2026-11-04)
 
 
