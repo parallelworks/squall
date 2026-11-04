@@ -245,7 +245,7 @@ func TestStorageManagementRejectsWhatItDoesNotModel(t *testing.T) {
 		accountPath + "/fileServices/default/shares?api-version=1&$filter=x&$expand=deleted", containers + "/data?api-version=1&$expand=stats",
 	} {
 		if rec, body := do(t, s, http.MethodGet, path, ""); rec.Code != http.StatusOK {
-			t.Errorf("GET %s, which containers and shares have always ignored = %d %v", path, rec.Code, body)
+			t.Errorf("GET %s, which containers and shares take or ignore = %d %v", path, rec.Code, body)
 		}
 	}
 	do(t, s, http.MethodPut, accountPath+"/queueServices/default/queues/jobs", `{}`)

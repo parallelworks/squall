@@ -8,8 +8,12 @@ import (
 	"time"
 )
 
-// maxShareSnapshots is how many snapshots a file share holds at most.
-const maxShareSnapshots = 200
+const (
+	// maxShareSnapshots is how many snapshots a file share holds at most.
+	maxShareSnapshots = 200
+	// snapshotTick is the resolution of snapshot times, which Azure writes with 7 fractional digits.
+	snapshotTick = 100 * time.Nanosecond
+)
 
 // shareSnapshot is a snapshot of a file share: the share as it was when taken.
 type shareSnapshot struct {
@@ -48,7 +52,7 @@ func snapshotHeader(c *call) (time.Time, *apiError) {
 }
 
 func shareSnapshotNotFound() *apiError {
-	return newError(http.StatusNotFound, "ShareSnapshotNotFound", "The specified share snapshot does not exist.")
+	return newError(http.StatusNotFound, "ShareSnapshotNotFound", "The specified share snapshot was not found.")
 }
 
 // shareSnapshotAt returns the index of the snapshot of share res taken at at, or -1.
@@ -92,9 +96,9 @@ func (s *Server) snapshotShare(c *call, p *parsed) (*reply, *apiError) {
 	if len(p.tags) > 0 || len(p.top) > 0 {
 		return nil, unsupported("a share snapshot takes only metadata")
 	}
-	at := s.now().UTC()
+	at := s.now().UTC().Truncate(snapshotTick)
 	if n := len(res.shareSnapshots); n > 0 && !at.After(res.shareSnapshots[n-1].at) {
-		at = res.shareSnapshots[n-1].at.Add(100 * time.Nanosecond)
+		at = res.shareSnapshots[n-1].at.Add(snapshotTick)
 	}
 	sn, err := s.addShareSnapshot(res, at, p.props["metadata"])
 	if err != nil {
@@ -106,7 +110,7 @@ func (s *Server) snapshotShare(c *call, p *parsed) (*reply, *apiError) {
 func renderShareSnapshot(sn *shareSnapshot, stats bool) map[string]any {
 	m := renderShare(sn.res)
 	props := m["properties"].(map[string]any)
-	props["snapshotTime"] = timestamp(sn.at)
+	props["snapshotTime"] = sn.at.Format("2006-01-02T15:04:05.0000000Z")
 	if stats {
 		props["shareUsageBytes"] = sn.res.usage
 	}
@@ -203,18 +207,19 @@ func (s *Server) shareOf(id string) (*resource, *resource) {
 	return res, acct
 }
 
-// SnapshotShare adds a snapshot taken at at to the file share with ID id, as
-// a create of it with $expand=snapshots does. It reports whether the share
-// exists and could take the snapshot: it has no other taken at at, and fewer
-// than 200.
+// SnapshotShare adds a snapshot taken at at, truncated to 100ns, to the file
+// share with ID id, as a create of it with $expand=snapshots does. It
+// reports whether the share exists and could take the snapshot: it has no
+// other taken at that time, and fewer than 200.
 func (s *Server) SnapshotShare(id string, at time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	at = at.UTC().Truncate(snapshotTick)
 	res, _ := s.shareOf(id)
 	if res == nil || at.IsZero() || shareSnapshotAt(res, at) >= 0 {
 		return false
 	}
-	_, err := s.addShareSnapshot(res, at.UTC(), nil)
+	_, err := s.addShareSnapshot(res, at, nil)
 	return err == nil
 }
 

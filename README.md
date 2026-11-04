@@ -691,10 +691,13 @@ For Azure Resource Manager:
   reads one, and lists take `$expand=deleted,snapshots` and a name-prefix
   `$filter`. A DELETE takes its snapshots too unless `$include=none` (409
   `ShareHasSnapshots` then), and keeps the share as deleted while the file
-  service's `shareDeleteRetentionPolicy` is on; restore brings it back.
-  Leases are not modeled. The create's 201 with `snapshotTime`, the error
-  codes (the Files service's), unique snapshot times and not listing a
-  deleted share's snapshots are inferred. `SnapshotShare` and
+  service's `shareDeleteRetentionPolicy` is on, which it is for 7 days on a
+  new account, as in Azure: disable it to delete shares for good. Restore
+  brings a deleted share back. Snapshot times have 100ns resolution, as
+  Azure's do. Leases are not modeled. The create's 201 with `snapshotTime`,
+  a missing share's 404 there, a snapshot's usage, the error codes (the
+  Files service's), unique snapshot times and not listing a deleted share's
+  snapshots are inferred. `SnapshotShare` and
   `SoftDeleteShare` set either up directly. Deleting the account deletes
   both; snapshots do not protect it, as Microsoft documents, nor do
   soft-deleted shares (inferred).

@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"io"
 	"maps"
 	"net/http"
@@ -175,7 +176,9 @@ func (s *Server) putAccount(c *call) (*reply, *apiError) {
 			}
 			return func() {
 				if created {
-					res.account = &accountState{services: map[string]map[string]any{}}
+					res.account = &accountState{services: map[string]map[string]any{
+						fileService.path: {"shareDeleteRetentionPolicy": map[string]any{"enabled": true, "days": json.Number("7")}},
+					}}
 					if versionLevelWORM(p.props) {
 						res.account.services[blobService.path] = map[string]any{"isVersioningEnabled": true}
 					}

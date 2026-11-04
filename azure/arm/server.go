@@ -400,16 +400,21 @@
 //     storage account, or its group, deletes its containers and blobs,
 //     deleted ones included.
 //   - A create of a file share with $expand=snapshots snapshots the share,
-//     which must exist (404 ShareNotFound otherwise), and answers 201 with
-//     the snapshot and its snapshotTime; the status, and showing
+//     which must exist (404 ShareNotFound otherwise, inferred), and answers
+//     201 with the snapshot and its snapshotTime; the status, and showing
 //     snapshotTime there, are inferred, as the spec documents snapshotTime
-//     only for a list. The snapshot keeps the share's properties and usage
-//     as they were, with the body's metadata in place of the share's, as
-//     Microsoft documents for share snapshots; other properties answer 400.
-//     A share holds up to 200 snapshots (409 ShareSnapshotCountExceeded, the
-//     Files code, inferred for ARM). Snapshot times are unique per share: a
-//     snapshot taken at or before the last one's time is given that time
-//     plus 100ns, which is inferred. A GET with x-ms-snapshot answers that
+//     only for a list. The snapshot keeps the share's properties as they
+//     were, with the body's metadata in place of the share's, as Microsoft
+//     documents for share snapshots; other properties answer 400. It also
+//     keeps the share's usage, which $expand=stats shows on it, which is
+//     inferred, as Microsoft documents snapshots as incremental and says
+//     nothing of their shareUsageBytes. A share holds up to 200 snapshots
+//     (409 ShareSnapshotCountExceeded, the Files code, inferred for ARM).
+//     Snapshot times have Azure's 100ns resolution, written with 7
+//     fractional digits as Microsoft's examples show
+//     (2024-12-09T17:44:51.0000000Z), and are unique per share: a snapshot
+//     taken at or before the last one's time is given that time plus 100ns,
+//     which is inferred. A GET with x-ms-snapshot answers that
 //     snapshot, or 404 ShareSnapshotNotFound (the Files code, inferred). A
 //     list with $expand=snapshots shows each snapshot as an item of its own,
 //     with the share's ID and name and its snapshotTime, after the share, as
@@ -424,11 +429,23 @@
 //     inferred for ARM); leases are not modeled, so leased-snapshots
 //     deletes as snapshots does, and other values answer 400. A DELETE with
 //     x-ms-snapshot deletes that snapshot only, and answers 204 when there
-//     is none, as for a missing share (inferred). While the file service's
-//     shareDeleteRetentionPolicy is enabled, deleting a share keeps it, with
-//     its snapshots, as deleted for that many days (7 when days is not set,
-//     Microsoft's documented default); one deleted while the policy was off
-//     is gone. A list with $expand=deleted shows each with deleted,
+//     is none, as for a missing share (inferred). A new storage account's
+//     file service has shareDeleteRetentionPolicy enabled for 7 days, as
+//     Microsoft documents ("New storage accounts have soft delete enabled
+//     by default", and "Soft delete for Azure file shares is now on by
+//     default for new storage accounts", which tells anyone who automates
+//     creating accounts and deleting shares to disable it explicitly);
+//     setting the file service's properties without the policy turns it
+//     off, as that replaces them all. While the policy is enabled, deleting
+//     a share keeps it, with its snapshots, as deleted for that many days (7
+//     when days is not set, Microsoft's documented default); one deleted
+//     while the policy was off is gone. A share is kept for the days set
+//     when it was deleted, and one deleted before the policy was turned off
+//     can still be restored, as Microsoft documents ("Shares deleted before
+//     the retention period update expire based on the retention period
+//     that was configured when that data was deleted", "If you disable soft
+//     delete, any file shares deleted before disabling soft delete can still
+//     be undeleted"). A list with $expand=deleted shows each with deleted,
 //     deletedTime, remainingRetentionDays and version, and an ID of the
 //     share's ID, an underscore and the version, as the spec's example
 //     does; its snapshots are not listed, which is inferred. A share can be

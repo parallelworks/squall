@@ -174,6 +174,13 @@ func TestFileShareSnapshots(t *testing.T) {
 	c := setup(t, arm.WithClock(func() time.Time { return now }))
 	c.createGroup(t, group, nil)
 	c.createAccount(t, group, "files1")
+	if _, err := c.files.SetServiceProperties(t.Context(), group, "files1", armstorage.FileServiceProperties{
+		FileServiceProperties: &armstorage.FileServicePropertiesProperties{
+			ShareDeleteRetentionPolicy: &armstorage.DeleteRetentionPolicy{Enabled: new(false)},
+		},
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
 	snapshots := &armstorage.FileSharesClientCreateOptions{Expand: new("snapshots")}
 	if _, err := c.shares.Create(t.Context(), group, "files1", "data", armstorage.FileShare{}, snapshots); code(err) != "ShareNotFound" {
 		t.Fatalf("a snapshot of a missing share = %v", err)
@@ -380,5 +387,70 @@ func TestFileShareSoftDelete(t *testing.T) {
 	c.createAccount(t, group, "files1")
 	if names, _ := c.shareItems(t, "files1", &armstorage.FileSharesClientListOptions{Expand: new("deleted,snapshots")}); len(names) != 0 {
 		t.Fatalf("shares of an account made again = %v", names)
+	}
+}
+
+func TestFileShareSoftDeleteIsOnByDefault(t *testing.T) {
+	c := setup(t)
+	c.createGroup(t, group, nil)
+	c.createAccount(t, group, "files1")
+	got, err := c.files.GetServiceProperties(t.Context(), group, "files1", nil)
+	if p := got.FileServiceProperties.FileServiceProperties.ShareDeleteRetentionPolicy; err != nil || p == nil || !*p.Enabled || *p.Days != 7 {
+		t.Fatalf("a new account's file service = %s, %v", dump(got), err)
+	}
+	for _, name := range []string{"data", "logs"} {
+		if _, err := c.shares.Create(t.Context(), group, "files1", name, armstorage.FileShare{}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := c.shares.Delete(t.Context(), group, "files1", "data", nil); err != nil {
+		t.Fatal(err)
+	}
+	_, items := c.shareItems(t, "files1", &armstorage.FileSharesClientListOptions{Expand: new("deleted")})
+	if len(items) != 2 || !*items[0].Properties.Deleted || *items[0].Properties.RemainingRetentionDays != 7 {
+		t.Fatalf("a share deleted on a new account = %s", dump(items))
+	}
+	if _, err := c.files.SetServiceProperties(t.Context(), group, "files1", armstorage.FileServiceProperties{
+		FileServiceProperties: &armstorage.FileServicePropertiesProperties{
+			ShareDeleteRetentionPolicy: &armstorage.DeleteRetentionPolicy{Enabled: new(false)},
+		},
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.shares.Delete(t.Context(), group, "files1", "logs", nil); err != nil {
+		t.Fatal(err)
+	}
+	if names, _ := c.shareItems(t, "files1", &armstorage.FileSharesClientListOptions{Expand: new("deleted")}); len(names) != 1 || !strings.HasPrefix(names[0], "data deleted ") {
+		t.Fatalf("shares once soft delete is disabled = %v", names)
+	}
+}
+
+func TestFileShareSnapshotTimes(t *testing.T) {
+	now := time.Date(2026, 3, 4, 5, 6, 7, 123456789, time.UTC)
+	c := setup(t, arm.WithClock(func() time.Time { return now }))
+	c.createGroup(t, group, nil)
+	c.createAccount(t, group, "files1")
+	share, err := c.shares.Create(t.Context(), group, "files1", "data", armstorage.FileShare{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := c.shares.Create(t.Context(), group, "files1", "data", armstorage.FileShare{}, &armstorage.FileSharesClientCreateOptions{Expand: new("snapshots")})
+	want := time.Date(2026, 3, 4, 5, 6, 7, 123456700, time.UTC)
+	if err != nil || !snap.FileShareProperties.SnapshotTime.Equal(want) {
+		t.Fatalf("a snapshot taken at %v = %s, %v", now, dump(snap), err)
+	}
+	if !c.server.SnapshotShare(*share.ID, now.Add(time.Second)) {
+		t.Fatal("SnapshotShare")
+	}
+	for _, stamp := range []string{"2026-03-04T05:06:07.1234567Z", "2026-03-04T05:06:08.1234567Z"} {
+		if got, err := c.shares.Get(t.Context(), group, "files1", "data", &armstorage.FileSharesClientGetOptions{XMSSnapshot: &stamp}); err != nil || got.FileShareProperties.SnapshotTime == nil {
+			t.Fatalf("the snapshot at %s = %s, %v", stamp, dump(got), err)
+		}
+		if _, err := c.shares.Delete(t.Context(), group, "files1", "data", &armstorage.FileSharesClientDeleteOptions{XMSSnapshot: &stamp}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.shares.Get(t.Context(), group, "files1", "data", &armstorage.FileSharesClientGetOptions{XMSSnapshot: &stamp}); code(err) != "ShareSnapshotNotFound" {
+			t.Fatalf("the snapshot at %s once deleted = %v", stamp, err)
+		}
 	}
 }
