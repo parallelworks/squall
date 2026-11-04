@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.30.0](https://github.com/parallelworks/squall/compare/v0.29.0...v0.30.0) (2026-11-04)
+
+
+### Features
+
+* **azure:** resources report when they were last modified, and Managed Lustre file systems report systemData ([#90](https://github.com/parallelworks/squall/issues/90)) ([02d5bfa](https://github.com/parallelworks/squall/commit/02d5bfa7a71dcf172afe369c58a2d0db920db4c7))
+
 ## [0.29.0](https://github.com/parallelworks/squall/compare/v0.28.0...v0.29.0) (2026-11-04)
 
 
