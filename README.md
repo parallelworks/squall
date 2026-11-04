@@ -624,17 +624,23 @@ For Azure Resource Manager:
   account answers 404 `ResourceNotFound`, where Azure's host name would not
   resolve. Blobs keep their size, MD5 and properties, not data (Get Blob is
   not served). Versioning, blob and container soft delete, snapshots and
-  uncommitted blocks follow the blob service properties; permanent delete,
+  uncommitted blocks follow the blob service properties (versions written
+  while versioning was on are kept after it is turned off, and a snapshot of
+  a versioned blob makes a version); permanent delete,
   undelete, leases, tags, tiers and page or append blobs are not supported.
   Calls need the RBAC data actions Microsoft lists (403
   `AuthorizationPermissionMismatch`), which a grant of `*` covers here though
   a role's `*` does not in Azure; `networkAcls` that deny by default, or
   disabled public network access, answer 403 `AuthorizationFailure` unless an
   IP rule allows the caller.
-- Container legal holds block overwrites and deletes of their blobs, and an
-  immutability policy does for its days; deleting an account with a
+- Container legal holds block overwrites, snapshots and deletes of their
+  blobs. An immutability policy blocks deletes for its days, and overwrites
+  and snapshots for as long as it exists. Deleting an account with a
   container under a locked policy, or a legal hold and a blob, fails with
-  409 `AccountProtectedFromDeletion`, as Azure answers.
+  409 `AccountProtectedFromDeletion`, as Azure answers; uncommitted blocks
+  alone are not a blob, here or in `Blobs()`. Version-level immutability
+  blocks deleting a container or account that holds blobs; blob-level
+  immutability policies and legal holds are not supported (400).
 - Fault method names are the Azure RBAC action, such as
   `Microsoft.Compute/virtualMachines/write`, and a rule's `Resource` is the
   resource ID in the call's path. Blob service faults name the operation,

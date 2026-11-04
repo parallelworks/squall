@@ -388,8 +388,9 @@
 //     exists, which is inferred; a missing one answers 404 QueueNotFound or
 //     TableNotFound, the data plane's codes, inferred for ARM. Listing
 //     containers takes $include=deleted and a $filter that is a name prefix,
-//     and returns every container on one page; shares and queues take
-//     neither.
+//     and returns every container on one page; containers and shares ignore
+//     the other parameters, and queues and tables refuse $filter and
+//     $expand.
 //   - Deleting a blob container through ARM or the Blob service, while the
 //     blob service's containerDeleteRetentionPolicy is enabled, keeps it with
 //     its blobs as deleted for that many days (7 when days is not set, which
@@ -402,12 +403,17 @@
 //     and is Unlocked until locked with its current ETag in If-Match; a
 //     locked one cannot be changed (409 ContainerImmutabilityPolicyLocked) and
 //     extending or deleting a policy is not served. While a container has a
-//     legal hold, its blobs can be created but not overwritten or deleted (409
-//     BlobImmutableDueToLegalHold); a policy blocks overwrites and deletes of
-//     a blob for its days since the blob was created (409
-//     BlobImmutableDueToPolicy), as Microsoft documents container-level WORM.
-//     Deleting a container that has a legal hold or a policy fails through
-//     ARM while it holds a blob, and always through the Blob service, as
+//     legal hold, its blobs can be created but not overwritten, snapshotted
+//     or deleted (409 BlobImmutableDueToLegalHold). A policy blocks deletes
+//     of a blob for its days since the blob was created, and overwrites and
+//     snapshots for as long as the policy exists, even once those days are
+//     over (409 BlobImmutableDueToPolicy), as Microsoft documents
+//     container-level WORM. A container holds a blob when it has one that is
+//     current, soft-deleted, a version or a snapshot; uncommitted blocks
+//     alone do not count, which is inferred, and [Server.Blobs] leaves them
+//     out too. Deleting a container that has a legal hold or a policy fails
+//     through ARM while it holds a blob, and always through the Blob
+//     service, as
 //     Microsoft documents, with 409 ContainerHasLegalHold,
 //     ContainerImmutabilityPolicyLocked or, for an unlocked policy,
 //     BlobImmutableDueToPolicy; those codes are the Blob service's and are
@@ -418,7 +424,15 @@
 //     as Azure answers; the status, and the message for a legal hold, are
 //     inferred. Deleting its group fails with ResourceGroupDeletionBlocked
 //     with that error as the account's detail, and leaves the account and its
-//     containers.
+//     containers. Version-level immutability (immutableStorageWithVersioning
+//     on the account or a container) blocks deleting a container, through
+//     ARM or the Blob service, while it holds a blob (409
+//     BlobImmutableDueToPolicy), and deleting the account while any
+//     container holds one (409 AccountProtectedFromDeletion), as Microsoft
+//     documents; the codes are inferred. Blob-level immutability policies
+//     and legal holds are not supported: Put Blob with
+//     x-ms-immutability-policy-until-date, x-ms-immutability-policy-mode or
+//     x-ms-legal-hold fails with 400 BadRequest.
 //   - The Blob service takes the account from a host name such as
 //     {account}.blob.core.windows.net, or else from the first path segment,
 //     as the storage emulator does, so an azblob client made with
@@ -439,13 +453,23 @@
 //     data, up to 16 MiB a call, and Get Blob is not served. Metadata names
 //     are lower-cased. Put Blob takes block blobs only and checks Content-MD5,
 //     If-Match and If-None-Match. With isVersioningEnabled, each write gets a
-//     version ID and keeps the version it replaces, and deleting the blob
-//     keeps its current version as a previous one. Otherwise, with
+//     version ID and keeps the version it replaces, Snapshot Blob makes a new
+//     version and answers x-ms-version-id, and deleting the blob keeps its
+//     current version as a previous one. A blob written while versioning was
+//     on keeps that version on its next overwrite or delete after versioning
+//     is turned off, as Microsoft documents. Otherwise, with
 //     deleteRetentionPolicy enabled, an overwrite keeps the blob as a
 //     soft-deleted snapshot and a delete soft-deletes it, as Microsoft
 //     documents. With it enabled, deleting a previous version or snapshot
-//     soft-deletes it, whether or not versioning is on. Soft-deleted entries are dropped after the policy's days. Deleting a
-//     blob with snapshots needs x-ms-delete-snapshots (409 SnapshotsPresent).
+//     soft-deletes it, whether or not versioning is on. Soft-deleted entries
+//     are dropped after the policy's days. Put Block on a soft-deleted blob
+//     starts a new one, keeping the soft-deleted one as a soft-deleted
+//     snapshot, and block IDs of one blob must have one length (400
+//     InvalidBlobOrBlock). Deleting a blob with snapshots needs
+//     x-ms-delete-snapshots (409 SnapshotsPresent), and
+//     x-ms-delete-snapshots: only with none deletes nothing and answers 202.
+//     Expired soft-deleted containers are purged on any call that reaches
+//     their account.
 //     Permanent deletion, deleting the current version by its version ID,
 //     undelete, leases, tags, tiers, copies, page and append blobs are not
 //     supported.
@@ -684,8 +708,10 @@
 // the data actions Microsoft lists for each operation, such as
 // Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read for
 // List Blobs (and blobs/tags/read with include=tags), blobs/add/action or
-// blobs/write to create a blob and blobs/write to overwrite one, blobs/delete
-// (and blobs/deleteBlobVersion/action for a version) to delete, and
+// blobs/write to create a blob and blobs/write to overwrite one, blobs/write
+// for Put Block, blobs/write or blobs/add/action for Snapshot Blob,
+// blobs/delete to delete a blob or snapshot, blobs/deleteBlobVersion/action
+// alone to delete a previous version, and
 // containers/read, containers/write or containers/delete for containers, and
 // fail without one with 403 AuthorizationPermissionMismatch; Shared Key calls
 // are not checked. Azure keeps data actions apart from actions, so a role's

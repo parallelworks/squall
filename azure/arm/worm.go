@@ -238,25 +238,49 @@ func legalHoldPresent() *apiError {
 	return newError(http.StatusConflict, "ContainerHasLegalHold", "The requested operation is not allowed as the container has one or more legal holds.")
 }
 
-// blobImmutable fails a delete or overwrite of a blob made at created that
-// the container res keeps immutable at now, or returns nil.
-func blobImmutable(res *resource, created, now time.Time) *apiError {
+// blobImmutable fails a delete, or with change an overwrite or snapshot, of a
+// blob made at created that the container res keeps immutable at now, or
+// returns nil. A policy allows deletes once its days are over, but never
+// changes, as Microsoft documents container-level WORM.
+func blobImmutable(res *resource, created, now time.Time, change bool) *apiError {
 	switch {
 	case res.worm.held():
 		return newError(http.StatusConflict, "BlobImmutableDueToLegalHold",
 			"This operation is not permitted as the blob is immutable due to one or more legal holds.")
-	case res.worm.protects(created, now):
-		return newError(http.StatusConflict, "BlobImmutableDueToPolicy", "This operation is not permitted as the blob is immutable due to a policy.")
+	case change && res.worm != nil && res.worm.policy != nil, res.worm.protects(created, now):
+		return immutableDueToPolicy()
 	}
 	return nil
 }
 
+func immutableDueToPolicy() *apiError {
+	return newError(http.StatusConflict, "BlobImmutableDueToPolicy", "This operation is not permitted as the blob is immutable due to a policy.")
+}
+
+// versionLevelWORM reports whether props enable version-level immutability.
+func versionLevelWORM(props map[string]any) bool {
+	m, _ := props["immutableStorageWithVersioning"].(map[string]any)
+	on, _ := boolean(m, "enabled")
+	return on
+}
+
+// accountOf returns the storage account holding the container res, or nil. The caller holds s.mu.
+func (s *Server) accountOf(res *resource) *resource {
+	id, _, _ := strings.Cut(res.id, "/"+blobService.path+"/")
+	return s.resources[key(id)]
+}
+
 // containerProtected fails a deletion of the container res, or returns nil.
 // Through ARM, a container under a legal hold or a policy can be deleted once
-// it is empty; through the Blob service, not at all.
+// it is empty; through the Blob service, not at all. One with version-level
+// immutability, its own or its account's, can be deleted only once empty.
 // The caller holds s.mu.
 func (s *Server) containerProtected(res *resource, dataPlane bool) *apiError {
-	if !dataPlane && !s.holdsBlobs(res) {
+	empty := !s.holdsBlobs(res)
+	if acct := s.accountOf(res); !empty && (versionLevelWORM(res.props) || acct != nil && versionLevelWORM(acct.props)) {
+		return immutableDueToPolicy()
+	}
+	if !dataPlane && empty {
 		return nil
 	}
 	switch {
@@ -265,7 +289,7 @@ func (s *Server) containerProtected(res *resource, dataPlane bool) *apiError {
 	case res.worm.locked():
 		return policyLocked()
 	case res.worm != nil && res.worm.policy != nil:
-		return newError(http.StatusConflict, "BlobImmutableDueToPolicy", "This operation is not permitted as the blob is immutable due to a policy.")
+		return immutableDueToPolicy()
 	}
 	return nil
 }
@@ -274,21 +298,25 @@ func (s *Server) containerProtected(res *resource, dataPlane bool) *apiError {
 // container's locked policy, or legal hold on blobs it holds, protects, or
 // returns nil. The caller holds s.mu.
 func (s *Server) accountProtected(acct *resource) *apiError {
-	var locked, held []string
+	var locked, held, all, versioned []string
 	prefix := key(acct.id) + "/"
 	for k, res := range s.resources {
 		if res.kind != containerKind || !strings.HasPrefix(k, prefix) {
 			continue
 		}
+		all = append(all, res.name)
 		switch {
 		case res.worm.locked():
 			locked = append(locked, res.name)
 		case res.worm.held() && s.holdsBlobs(res):
 			held = append(held, res.name)
+		case versionLevelWORM(res.props) && s.holdsBlobs(res):
+			versioned = append(versioned, res.name)
 		}
 	}
-	slices.Sort(locked)
-	slices.Sort(held)
+	for _, list := range [][]string{locked, held, all, versioned} {
+		slices.Sort(list)
+	}
 	switch {
 	case len(locked) > 0:
 		return newError(http.StatusConflict, "AccountProtectedFromDeletion",
@@ -296,6 +324,15 @@ func (s *Server) accountProtected(acct *resource) *apiError {
 	case len(held) > 0:
 		return newError(http.StatusConflict, "AccountProtectedFromDeletion",
 			"%s is protected from deletion.The container(s) %s have a legal hold.", acct.name, strings.Join(held, ", "))
+	case len(versioned) > 0:
+		return versionLevelProtected(acct, versioned)
+	case versionLevelWORM(acct.props) && len(all) > 0:
+		return versionLevelProtected(acct, all)
 	}
 	return nil
+}
+
+func versionLevelProtected(acct *resource, names []string) *apiError {
+	return newError(http.StatusConflict, "AccountProtectedFromDeletion",
+		"%s is protected from deletion.The container(s) %s have version-level immutability and must be deleted first.", acct.name, strings.Join(names, ", "))
 }

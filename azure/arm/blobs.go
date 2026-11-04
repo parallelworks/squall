@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/parallelworks/squall/access"
 )
 
 // blobName is everything a container holds under one blob name.
@@ -61,12 +63,17 @@ type blobHeaders struct {
 }
 
 func (e *blobEntry) expired(now time.Time) bool {
-	return !e.deleted.IsZero() && !now.Before(e.deleted.AddDate(0, 0, e.keep))
+	return !e.deleted.IsZero() && daysLeft(e.deleted, now, e.keep) == 0
 }
 
-// remainingDays is how many days a soft-deleted entry has left, counting the current one.
-func (e *blobEntry) remainingDays(now time.Time) int {
-	return e.keep - int(now.Sub(e.deleted)/(24*time.Hour))
+// daysLeft is how many days, counting a part of one, something deleted at
+// deleted and kept for keep days has left at now; 0 means it is gone.
+func daysLeft(deleted, now time.Time, keep int) int {
+	left := deleted.AddDate(0, 0, keep).Sub(now)
+	if left <= 0 {
+		return 0
+	}
+	return int((left + 24*time.Hour - 1) / (24 * time.Hour))
 }
 
 // blobSettings are the blob service properties that decide what writes and deletes keep.
@@ -108,9 +115,7 @@ type deletedContainer struct {
 	keep    int
 }
 
-func (d *deletedContainer) expired(now time.Time) bool {
-	return !now.Before(d.deleted.AddDate(0, 0, d.keep))
-}
+func (d *deletedContainer) expired(now time.Time) bool { return daysLeft(d.deleted, now, d.keep) == 0 }
 
 // deleteContainer deletes the container res of the account acct, keeping it
 // with its blobs as deleted when the blob service keeps deleted containers.
@@ -144,6 +149,7 @@ func (s *Server) containerOf(c *blobCall) (*resource, *resource, *apiError) {
 	if acct == nil {
 		return nil, nil, newError(http.StatusNotFound, "ResourceNotFound", "The specified resource does not exist.")
 	}
+	s.deletedContainers(acct)
 	res := s.resources[key(containerID(acct, c.container))]
 	if res == nil {
 		return acct, nil, containers.notFound()
@@ -183,11 +189,17 @@ func purgeBlob(res *resource, name string, now time.Time) bool {
 	return true
 }
 
-// holdsBlobs reports whether container res holds anything, deleted blobs
-// and versions included. The caller holds s.mu.
+// holdsBlobs reports whether container res holds a blob, soft-deleted
+// blobs, versions and snapshots included; blocks never committed do not
+// count. The caller holds s.mu.
 func (s *Server) holdsBlobs(res *resource) bool {
 	s.purgeBlobs(res)
-	return len(res.blobs) > 0
+	for _, b := range res.blobs {
+		if b.current != nil || b.deleted != nil || len(b.versions) > 0 || len(b.snapshots) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func blobNotFound() *apiError {
@@ -237,9 +249,23 @@ func writeNeeds(s *Server, c *blobCall, acct *resource) []string {
 
 func deleteNeeds(_ *Server, c *blobCall, _ *resource) []string {
 	if c.query.Has("versionid") {
-		return []string{blobAction + "delete", blobAction + "deleteBlobVersion/action"}
+		return []string{blobAction + "deleteBlobVersion/action"}
 	}
 	return []string{blobAction + "delete"}
+}
+
+// recheck checks a write's needs again under s.mu, as the blob may have been
+// made since the call was admitted, which turns a create into an overwrite.
+// The caller holds s.mu.
+func (s *Server) recheck(c *blobCall, acct *resource) *apiError {
+	if c.sharedKey || s.policy == nil || c.op == nil {
+		return nil
+	}
+	needs := c.op.needs(s, c, acct)
+	if slices.Equal(needs, c.needs) || s.policy.Check(access.Call{Method: c.op.name, Resource: c.resource(), Needs: needs}) == nil {
+		return nil
+	}
+	return permissionMismatch()
 }
 
 func listBlobsNeeds(_ *Server, c *blobCall, _ *resource) []string {
@@ -345,6 +371,9 @@ func (s *Server) putBlob(c *blobCall) (*blobReply, *apiError) {
 	if aerr != nil {
 		return nil, aerr
 	}
+	if err := s.recheck(c, acct); err != nil {
+		return nil, err
+	}
 	if err := s.checkOverwrite(c, cont); err != nil {
 		return nil, err
 	}
@@ -369,12 +398,27 @@ func writeHeaders(e *blobEntry) http.Header {
 // checkOverwrite checks a write's conditions, and that the blob it replaces,
 // if any, is not immutable. The caller holds s.mu.
 func (s *Server) checkOverwrite(c *blobCall, cont *resource) *apiError {
+	if err := blobLevelWORM(c.r); err != nil {
+		return err
+	}
 	cur := current(cont, c.blobName)
 	if err := checkConditions(c.r, cur); err != nil {
 		return err
 	}
 	if cur != nil {
-		return blobImmutable(cont, cur.created, s.now())
+		return blobImmutable(cont, cur.created, s.now(), true)
+	}
+	return nil
+}
+
+// blobLevelWORM rejects the headers that set a blob's own immutability
+// policy or legal hold, which version-level immutability takes and the
+// server does not model.
+func blobLevelWORM(r *http.Request) *apiError {
+	for _, h := range []string{"x-ms-immutability-policy-until-date", "x-ms-immutability-policy-mode", "x-ms-legal-hold"} {
+		if r.Header.Get(h) != "" {
+			return unsupported("blob-level immutability (%s) is not supported", h)
+		}
 	}
 	return nil
 }
@@ -409,7 +453,7 @@ func (s *Server) write(acct, cont *resource, name string, e *blobEntry) {
 	if old := b.current; old != nil {
 		e.created = old.created
 		switch {
-		case set.versioning:
+		case set.versioning || old.versionID != "":
 			if old.versionID == "" {
 				old.versionID = stamp(old.modified)
 			}
@@ -420,12 +464,18 @@ func (s *Server) write(acct, cont *resource, name string, e *blobEntry) {
 			old.snapshot = stamp(s.tick())
 		}
 	}
+	s.retireDeleted(b)
+	b.current, b.uncommitted = e, nil
+}
+
+// retireDeleted keeps b's soft-deleted blob, if any, as a soft-deleted
+// snapshot, as a new blob of its name does. The caller holds s.mu.
+func (s *Server) retireDeleted(b *blobName) {
 	if old := b.deleted; old != nil {
 		old.snapshot = stamp(s.tick())
 		b.snapshots = append(b.snapshots, old)
 		b.deleted = nil
 	}
-	b.current, b.uncommitted = e, nil
 }
 
 var blockIDs = regexp.MustCompile(`^[A-Za-z0-9+/]*={0,2}$`)
@@ -457,14 +507,30 @@ func (s *Server) putBlock(c *blobCall) (*blobReply, *apiError) {
 		b = &blobName{}
 		cont.blobs[c.blobName] = b
 	}
+	if !sameLength(b, id) {
+		return nil, newError(http.StatusBadRequest, "InvalidBlobOrBlock", "The specified blob or block content is invalid.")
+	}
 	if b.uncommitted == nil {
 		b.uncommitted = map[string]int64{}
 	}
+	s.retireDeleted(b)
 	b.uncommitted[id] = int64(len(body))
 	h := http.Header{}
 	h.Set("Content-MD5", base64.StdEncoding.EncodeToString(sum[:]))
 	h.Set("x-ms-request-server-encrypted", "true")
 	return &blobReply{status: http.StatusCreated, header: h}, nil
+}
+
+// sameLength reports whether id is as long as the IDs of b's blocks, as the
+// Blob service requires of one blob's blocks.
+func sameLength(b *blobName, id string) bool {
+	for other := range b.uncommitted {
+		return len(other) == len(id)
+	}
+	if b.current != nil && len(b.current.blocks) > 0 {
+		return len(b.current.blocks[0].id) == len(id)
+	}
+	return true
 }
 
 type blockList struct {
@@ -501,6 +567,9 @@ func (s *Server) putBlockList(c *blobCall) (*blobReply, *apiError) {
 			}
 		}
 	}
+	if err := s.recheck(c, acct); err != nil {
+		return nil, err
+	}
 	if err := s.checkOverwrite(c, cont); err != nil {
 		return nil, err
 	}
@@ -536,13 +605,16 @@ func (s *Server) putBlockList(c *blobCall) (*blobReply, *apiError) {
 func (s *Server) snapshotBlob(c *blobCall) (*blobReply, *apiError) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, cont, aerr := s.containerOf(c)
+	acct, cont, aerr := s.containerOf(c)
 	if aerr != nil {
 		return nil, aerr
 	}
 	cur := current(cont, c.blobName)
 	if cur == nil {
 		return nil, blobNotFound()
+	}
+	if err := blobImmutable(cont, cur.created, s.now(), true); err != nil {
+		return nil, err
 	}
 	snap := *cur
 	snap.snapshot, snap.versionID = stamp(s.tick()), ""
@@ -555,7 +627,14 @@ func (s *Server) snapshotBlob(c *blobCall) (*blobReply, *apiError) {
 	h.Set("x-ms-snapshot", snap.snapshot)
 	h.Set("ETag", quote(snap.etag))
 	h.Set("Last-Modified", snap.modified.Format(http.TimeFormat))
-	h.Set("x-ms-request-server-encrypted", "false")
+	h.Set("x-ms-request-server-encrypted", "true")
+	if settingsOf(acct).versioning {
+		next := *cur
+		next.versionID = stamp(s.tick())
+		b.versions = append(b.versions, cur)
+		b.current = &next
+		h.Set("x-ms-version-id", next.versionID)
+	}
 	return &blobReply{status: http.StatusCreated, header: h}, nil
 }
 
@@ -682,7 +761,7 @@ func (s *Server) deleteBlob(c *blobCall) (*blobReply, *apiError) {
 		case list == nil:
 			return nil, unsupported("deleting the current version by its versionid is not supported")
 		}
-		if err := blobImmutable(cont, e.created, now); err != nil {
+		if err := blobImmutable(cont, e.created, now, false); err != nil {
 			return nil, err
 		}
 		discard(e, list)
@@ -694,12 +773,12 @@ func (s *Server) deleteBlob(c *blobCall) (*blobReply, *apiError) {
 		if len(live) > 0 && which == "" {
 			return nil, newError(http.StatusConflict, "SnapshotsPresent", "This operation is not permitted while the blob has snapshots.")
 		}
-		if b.current != nil || len(live) > 0 {
-			created := b.current
-			if created == nil || which == "only" {
-				created = live[0]
-			}
-			if err := blobImmutable(cont, created.created, now); err != nil {
+		doomed := live
+		if which != "only" && b.current != nil {
+			doomed = append(doomed, b.current)
+		}
+		if len(doomed) > 0 {
+			if err := blobImmutable(cont, doomed[0].created, now, false); err != nil {
 				return nil, err
 			}
 		}
@@ -707,7 +786,7 @@ func (s *Server) deleteBlob(c *blobCall) (*blobReply, *apiError) {
 			discard(e, &b.snapshots)
 		}
 		if which != "only" {
-			if b.current != nil && (set.versioning || set.keep > 0) {
+			if cur := b.current; cur != nil && (set.versioning || set.keep > 0 || cur.versionID != "") {
 				permanent = false
 			}
 			s.deleteCurrent(b, set, now)
@@ -721,15 +800,16 @@ func (s *Server) deleteBlob(c *blobCall) (*blobReply, *apiError) {
 	return &blobReply{status: http.StatusAccepted, header: h}, nil
 }
 
-// deleteCurrent deletes the current version of b: with versioning it becomes
-// a previous version, with soft delete it is kept as deleted, and otherwise
-// it is gone. The caller holds s.mu.
+// deleteCurrent deletes the current version of b: with versioning, or when it
+// is a version made while versioning was on, it becomes a previous version;
+// with soft delete it is kept as deleted; and otherwise it is gone. The
+// caller holds s.mu.
 func (s *Server) deleteCurrent(b *blobName, set blobSettings, now time.Time) {
 	cur := b.current
 	b.current, b.uncommitted = nil, nil
 	switch {
 	case cur == nil:
-	case set.versioning:
+	case set.versioning || cur.versionID != "":
 		if cur.versionID == "" {
 			cur.versionID = stamp(cur.modified)
 		}

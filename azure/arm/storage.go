@@ -11,7 +11,6 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"time"
 )
 
 var (
@@ -209,6 +208,7 @@ func (s *Server) account(c *call) (*resource, *apiError) {
 	if res == nil || res.kind != accountKind {
 		return nil, resourceNotFound(accountKind.typ, c.val("account"), c.val("rg"))
 	}
+	s.deletedContainers(res)
 	return res, nil
 }
 
@@ -222,6 +222,7 @@ func (s *Server) writableAccount(c *call, k *kind) (*resource, *apiError) {
 	if res == nil || res.kind != accountKind {
 		return nil, parentNotFound(k, accountID(c))
 	}
+	s.deletedContainers(res)
 	return res, nil
 }
 
@@ -478,11 +479,11 @@ func (s *Server) getChild(ch *child) handler {
 			return nil, ch.notFound()
 		}
 		m := ch.render(res)
-		switch expand := c.query("$expand"); {
-		case expand == "":
-		case ch == shares && expand == "stats":
+		expand := c.query("$expand")
+		switch {
+		case ch == shares && slices.Contains(strings.Split(expand, ","), "stats"):
 			m["properties"].(map[string]any)["shareUsageBytes"] = res.usage
-		default:
+		case ch.upsert && expand != "":
 			return nil, unsupported("$expand=%s is not supported", expand)
 		}
 		return ok200(m), nil
@@ -497,13 +498,12 @@ func (s *Server) listChildren(ch *child) handler {
 		if err != nil {
 			return nil, err
 		}
-		include, expand, filter := c.query("$include"), c.query("$expand"), c.query("$filter")
+		// Containers and shares ignore the parameters they do not model, as they always have; queues and tables refuse them.
+		include, filter := "", ""
 		switch {
-		case include != "" && (ch != containers || include != "deleted"):
-			return nil, unsupported("$include=%s is not supported", include)
-		case expand != "":
-			return nil, unsupported("$expand=%s is not supported", expand)
-		case filter != "" && ch != containers:
+		case ch == containers:
+			include, filter = c.query("$include"), c.query("$filter")
+		case ch.upsert && c.query("$filter") != "":
 			return nil, unsupported("$filter is not supported")
 		}
 		prefix := key(ch.prefix(c))
@@ -522,7 +522,7 @@ func (s *Server) listChildren(ch *child) handler {
 				m := ch.render(d.res)
 				props := m["properties"].(map[string]any)
 				props["deleted"], props["deletedTime"], props["version"] = true, timestamp(d.deleted), d.version
-				props["remainingRetentionDays"] = d.keep - int(now.Sub(d.deleted)/(24*time.Hour))
+				props["remainingRetentionDays"] = daysLeft(d.deleted, now, d.keep)
 				items = append(items, m)
 			}
 		}

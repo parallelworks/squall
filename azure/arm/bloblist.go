@@ -250,7 +250,7 @@ func renderBlob(e *blobEntry, inc includes, now time.Time) *blobXML {
 	} else {
 		x.Deleted = true
 		x.Properties.DeletedTime = e.deleted.Format(http.TimeFormat)
-		days := e.remainingDays(now)
+		days := daysLeft(e.deleted, now, e.keep)
 		x.Properties.RemainingRetentionDays = &days
 	}
 	if inc.metadata && len(e.metadata) > 0 {

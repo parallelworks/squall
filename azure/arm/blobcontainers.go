@@ -9,7 +9,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // containerNames are the names the Blob service takes for a container.
@@ -206,7 +205,7 @@ func (s *Server) listContainersData(c *blobCall) (*blobReply, *apiError) {
 			x.Properties.LeaseStatus = ""
 			x.Properties.LeaseState = "expired"
 			x.Properties.DeletedTime = d.deleted.UTC().Format(http.TimeFormat)
-			days := d.keep - int(now.Sub(d.deleted)/(24*time.Hour))
+			days := daysLeft(d.deleted, now, d.keep)
 			x.Properties.RemainingRetentionDays = &days
 			all = append(all, entry{d.res.name + "\x00" + d.version, x})
 		}

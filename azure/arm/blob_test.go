@@ -241,8 +241,17 @@ func TestStorageManagementRejectsWhatItDoesNotModel(t *testing.T) {
 	newStorage(t, s, "")
 	containers := accountPath + "/blobServices/default/containers"
 	for _, path := range []string{
-		containers + "?api-version=1&$include=bogus", containers + "?api-version=1&$expand=x",
-		accountPath + "/fileServices/default/shares?api-version=1&$filter=x", containers + "/data?api-version=1&$expand=stats",
+		containers + "?api-version=1&$include=bogus", containers + "?api-version=1&$maxpagesize=1",
+		accountPath + "/fileServices/default/shares?api-version=1&$filter=x&$expand=deleted", containers + "/data?api-version=1&$expand=stats",
+	} {
+		if rec, body := do(t, s, http.MethodGet, path, ""); rec.Code != http.StatusOK {
+			t.Errorf("GET %s, which containers and shares have always ignored = %d %v", path, rec.Code, body)
+		}
+	}
+	do(t, s, http.MethodPut, accountPath+"/queueServices/default/queues/jobs", `{}`)
+	for _, path := range []string{
+		accountPath + "/queueServices/default/queues?api-version=1&$filter=x",
+		accountPath + "/queueServices/default/queues/jobs?api-version=1&$expand=x",
 	} {
 		if rec, body := do(t, s, http.MethodGet, path, ""); rec.Code != http.StatusBadRequest {
 			t.Errorf("GET %s = %d %v", path, rec.Code, body)

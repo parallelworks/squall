@@ -41,6 +41,9 @@ type blobCall struct {
 	account, container, blobName string
 	// sharedKey calls are authorized with the account key rather than a token.
 	sharedKey bool
+	// op is the call's operation, and needs the RBAC actions it was admitted with.
+	op    *blobOp
+	needs []string
 }
 
 // resource names what the call acts on, for faults and the policy.
@@ -74,9 +77,9 @@ var (
 	containerProps   = &blobOp{name: "GetContainerProperties", needs: always(containerAction + "read"), h: (*Server).containerProperties}
 	listBlobsOp      = &blobOp{name: "ListBlobs", needs: listBlobsNeeds, h: (*Server).listBlobs}
 	putBlobOp        = &blobOp{name: "PutBlob", needs: writeNeeds, h: (*Server).putBlob}
-	putBlockOp       = &blobOp{name: "PutBlock", needs: always(blobAction + "write|" + blobAction + "add/action"), h: (*Server).putBlock}
+	putBlockOp       = &blobOp{name: "PutBlock", needs: always(blobAction + "write"), h: (*Server).putBlock}
 	putBlockListOp   = &blobOp{name: "PutBlockList", needs: writeNeeds, h: (*Server).putBlockList}
-	snapshotBlobOp   = &blobOp{name: "SnapshotBlob", needs: always(blobAction + "write"), h: (*Server).snapshotBlob}
+	snapshotBlobOp   = &blobOp{name: "SnapshotBlob", needs: always(blobAction + "write|" + blobAction + "add/action"), h: (*Server).snapshotBlob}
 	blobPropsOp      = &blobOp{name: "GetBlobProperties", needs: always(blobAction + "read"), h: (*Server).blobProperties}
 	deleteBlobOp     = &blobOp{name: "DeleteBlob", needs: deleteNeeds, h: (*Server).deleteBlob}
 )
@@ -158,9 +161,9 @@ func (s *Server) serveBlob(w http.ResponseWriter, r *http.Request) {
 		s.writeBlobError(w, r, err)
 		return
 	}
+	c.op, c.needs = op, needs
 	if !c.sharedKey && s.policy.Check(access.Call{Method: op.name, Resource: c.resource(), Needs: needs}) != nil {
-		s.writeBlobError(w, r, newError(http.StatusForbidden, "AuthorizationPermissionMismatch",
-			"This request is not authorized to perform this operation using this permission."))
+		s.writeBlobError(w, r, permissionMismatch())
 		return
 	}
 	f, _ := s.faults.Decide(fault.Call{Method: op.name, Resource: c.resource()})
@@ -172,6 +175,10 @@ func (s *Server) serveBlob(w http.ResponseWriter, r *http.Request) {
 		}
 		return func() { s.writeBlobReply(w, r, rep) }, true
 	})
+}
+
+func permissionMismatch() *apiError {
+	return newError(http.StatusForbidden, "AuthorizationPermissionMismatch", "This request is not authorized to perform this operation using this permission.")
 }
 
 // authenticate reads how c is authorized: a bearer token, which is not
@@ -202,6 +209,7 @@ func (s *Server) admit(c *blobCall, op *blobOp) ([]string, *apiError) {
 	if acct == nil {
 		return nil, newError(http.StatusNotFound, "ResourceNotFound", "The specified resource does not exist.")
 	}
+	s.deletedContainers(acct)
 	if !reachable(acct, c.r) {
 		return nil, newError(http.StatusForbidden, "AuthorizationFailure", "This request is not authorized to perform this operation.")
 	}
