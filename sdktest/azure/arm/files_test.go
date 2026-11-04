@@ -41,9 +41,9 @@ func TestFileShares(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := c.files.GetServiceProperties(t.Context(), group, "files1", nil)
-	if err != nil || len(got.FileServiceProperties.FileServiceProperties.Cors.CorsRules) != 0 ||
+	if err != nil || len(got.FileServiceProperties.FileServiceProperties.Cors.CorsRules) != 1 ||
 		!*got.FileServiceProperties.FileServiceProperties.ShareDeleteRetentionPolicy.Enabled {
-		t.Fatalf("setting file service properties replaces them = %+v, %v", got, err)
+		t.Fatalf("setting file service properties keeps the ones left out = %+v, %v", got, err)
 	}
 
 	if _, err := c.shares.Get(t.Context(), group, "files1", "data", nil); code(err) != "ShareNotFound" || status(err) != http.StatusNotFound {
@@ -439,6 +439,10 @@ func TestFileShareSnapshotTimes(t *testing.T) {
 	if err != nil || !snap.FileShareProperties.SnapshotTime.Equal(want) {
 		t.Fatalf("a snapshot taken at %v = %s, %v", now, dump(snap), err)
 	}
+	fine := "2026-03-04T05:06:07.123456789Z"
+	if _, err := c.shares.Get(t.Context(), group, "files1", "data", &armstorage.FileSharesClientGetOptions{XMSSnapshot: &fine}); code(err) != "InvalidHeaderValue" || status(err) != http.StatusBadRequest {
+		t.Fatalf("a snapshot time finer than 100ns = %v", err)
+	}
 	if !c.server.SnapshotShare(*share.ID, now.Add(time.Second)) {
 		t.Fatal("SnapshotShare")
 	}
@@ -452,5 +456,42 @@ func TestFileShareSnapshotTimes(t *testing.T) {
 		if _, err := c.shares.Get(t.Context(), group, "files1", "data", &armstorage.FileSharesClientGetOptions{XMSSnapshot: &stamp}); code(err) != "ShareSnapshotNotFound" {
 			t.Fatalf("the snapshot at %s once deleted = %v", stamp, err)
 		}
+	}
+}
+
+func TestFileServiceKeepsSettingsLeftOut(t *testing.T) {
+	c := setup(t)
+	c.createGroup(t, group, nil)
+	c.createAccount(t, group, "files1")
+	cors := &armstorage.CorsRules{CorsRules: []*armstorage.CorsRule{{
+		AllowedHeaders: []*string{new("*")}, AllowedOrigins: []*string{new("*")}, ExposedHeaders: []*string{new("*")},
+		AllowedMethods: []*armstorage.CorsRuleAllowedMethodsItem{new(armstorage.CorsRuleAllowedMethodsItemGET)}, MaxAgeInSeconds: new(int32(60)),
+	}}}
+	set, err := c.files.SetServiceProperties(t.Context(), group, "files1", armstorage.FileServiceProperties{
+		FileServiceProperties: &armstorage.FileServicePropertiesProperties{Cors: cors},
+	}, nil)
+	if p := set.FileServiceProperties.FileServiceProperties; err != nil || p.ShareDeleteRetentionPolicy == nil || !*p.ShareDeleteRetentionPolicy.Enabled || *p.ShareDeleteRetentionPolicy.Days != 7 {
+		t.Fatalf("a CORS-only update of a new account = %s, %v", dump(set), err)
+	}
+	if _, err := c.files.SetServiceProperties(t.Context(), group, "files1", armstorage.FileServiceProperties{
+		FileServiceProperties: &armstorage.FileServicePropertiesProperties{ProtocolSettings: &armstorage.ProtocolSettings{
+			Smb: &armstorage.SmbSetting{Multichannel: &armstorage.Multichannel{Enabled: new(true)}},
+		}},
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.files.GetServiceProperties(t.Context(), group, "files1", nil)
+	if p := got.FileServiceProperties.FileServiceProperties; err != nil || len(p.Cors.CorsRules) != 1 || !*p.ProtocolSettings.Smb.Multichannel.Enabled ||
+		!*p.ShareDeleteRetentionPolicy.Enabled {
+		t.Fatalf("after a protocol-only update = %s, %v", dump(got), err)
+	}
+	if _, err := c.shares.Create(t.Context(), group, "files1", "data", armstorage.FileShare{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.shares.Delete(t.Context(), group, "files1", "data", nil); err != nil {
+		t.Fatal(err)
+	}
+	if names, _ := c.shareItems(t, "files1", &armstorage.FileSharesClientListOptions{Expand: new("deleted")}); len(names) != 1 || !strings.HasPrefix(names[0], "data deleted ") {
+		t.Fatalf("a share deleted after partial file service updates = %v", names)
 	}
 }

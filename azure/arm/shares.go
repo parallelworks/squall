@@ -45,7 +45,7 @@ func snapshotHeader(c *call) (time.Time, *apiError) {
 		return time.Time{}, nil
 	}
 	at, err := time.Parse(time.RFC3339Nano, v)
-	if err != nil || at.IsZero() {
+	if err != nil || at.IsZero() || at.Nanosecond()%int(snapshotTick) != 0 {
 		return time.Time{}, invalidHeaderValue("x-ms-snapshot", v)
 	}
 	return at, nil

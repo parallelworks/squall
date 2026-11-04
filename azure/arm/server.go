@@ -378,9 +378,12 @@
 //     fails with 409 StorageAccountInAnotherResourceGroup in the same
 //     subscription and StorageAccountAlreadyTaken in another, and a name that
 //     is not 3 to 24 lower-case letters and digits fails with
-//     AccountNameInvalid. Setting blob service properties keeps the ones the
-//     call leaves out, inferred from the Blob service's own Set Blob Service
-//     Properties; setting file service properties replaces them all, also
+//     AccountNameInvalid. Setting blob or file service properties keeps the
+//     ones the call leaves out, inferred from the data plane's Set Blob
+//     Service Properties and Set File Service Properties ("If you omit a
+//     root element, the existing settings for the service for that
+//     functionality are preserved"). Each property the call gives replaces
+//     the one kept whole, so protocolSettings.smb replaces nfs too, which is
 //     inferred. Account keys are derived from the account and never change.
 //     File data is not served: [Server.SetShareUsage] sets the
 //     shareUsageBytes a share shows with $expand=stats. Queues show an
@@ -414,9 +417,10 @@
 //     fractional digits as Microsoft's examples show
 //     (2024-12-09T17:44:51.0000000Z), and are unique per share: a snapshot
 //     taken at or before the last one's time is given that time plus 100ns,
-//     which is inferred. A GET with x-ms-snapshot answers that
-//     snapshot, or 404 ShareSnapshotNotFound (the Files code, inferred). A
-//     list with $expand=snapshots shows each snapshot as an item of its own,
+//     which is inferred. A GET with x-ms-snapshot answers that snapshot, or
+//     404 ShareSnapshotNotFound (the Files code, inferred); an x-ms-snapshot
+//     finer than 100ns answers 400 InvalidHeaderValue, also inferred. A list
+//     with $expand=snapshots shows each snapshot as an item of its own,
 //     with the share's ID and name and its snapshotTime, after the share, as
 //     the spec's example does; a plain list leaves them out. Lists also take
 //     $expand=deleted, comma-separated with snapshots, and a $filter that is
@@ -435,8 +439,8 @@
 //     by default", and "Soft delete for Azure file shares is now on by
 //     default for new storage accounts", which tells anyone who automates
 //     creating accounts and deleting shares to disable it explicitly);
-//     setting the file service's properties without the policy turns it
-//     off, as that replaces them all. While the policy is enabled, deleting
+//     setting the file service's properties without the policy keeps it.
+//     While the policy is enabled, deleting
 //     a share keeps it, with its snapshots, as deleted for that many days (7
 //     when days is not set, Microsoft's documented default); one deleted
 //     while the policy was off is gone. A share is kept for the days set

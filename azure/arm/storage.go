@@ -361,14 +361,11 @@ type service struct {
 	kind *kind
 	// path is the service's segment of its ID, such as blobServices.
 	path string
-	// replace is whether setting the properties replaces them all, rather
-	// than keeping the ones the call leaves out.
-	replace bool
 }
 
 var (
 	blobService  = &service{kind: blobServiceKind, path: "blobServices"}
-	fileService  = &service{kind: fileServiceKind, path: "fileServices", replace: true}
+	fileService  = &service{kind: fileServiceKind, path: "fileServices"}
 	queueService = &service{kind: queueServiceKind, path: "queueServices"}
 	tableService = &service{kind: tableServiceKind, path: "tableServices"}
 )
@@ -391,7 +388,7 @@ func (s *Server) putService(svc *service) handler {
 			return nil, newError(http.StatusBadRequest, "InvalidRequestPropertyValue",
 				"Conflicting feature 'VersionLevelWorm' is enabled. Please disable it and retry.")
 		}
-		if svc.replace || res.account.services[svc.path] == nil {
+		if res.account.services[svc.path] == nil {
 			res.account.services[svc.path] = map[string]any{}
 		}
 		maps.Copy(res.account.services[svc.path], p.props)
