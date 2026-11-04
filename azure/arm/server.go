@@ -42,8 +42,9 @@
 //     blob, file, queue and table services' properties (set and get), blob
 //     containers (create, get, list with soft-deleted ones and delete), their
 //     legal holds (set and clear) and immutability policies (create or update
-//     and lock), file shares (create, get with usage stats, list and
-//     delete), and queues and tables (create, get, list and delete);
+//     and lock), file shares (create, snapshot, get with usage stats or
+//     as a snapshot, list with snapshots and soft-deleted ones, delete and
+//     restore), and queues and tables (create, get, list and delete);
 //   - the Blob service's data plane, which [Server.Blob] serves: List
 //     Containers, Create Container, Delete Container, Get Container
 //     Properties, List Blobs, Put Blob, Put Block, Put Block List, Snapshot
@@ -388,9 +389,9 @@
 //     exists, which is inferred; a missing one answers 404 QueueNotFound or
 //     TableNotFound, the data plane's codes, inferred for ARM. Listing
 //     containers takes $include=deleted and a $filter that is a name prefix,
-//     and returns every container on one page; containers and shares ignore
-//     the other parameters, and queues and tables refuse $filter and
-//     $expand.
+//     and returns every container or share on one page; containers and
+//     shares ignore the other parameters, such as $maxpagesize, and queues
+//     and tables refuse $filter and $expand.
 //   - Deleting a blob container through ARM or the Blob service, while the
 //     blob service's containerDeleteRetentionPolicy is enabled, keeps it with
 //     its blobs as deleted for that many days (7 when days is not set, which
@@ -398,6 +399,50 @@
 //     remainingRetentionDays and version, but not restored. Deleting a
 //     storage account, or its group, deletes its containers and blobs,
 //     deleted ones included.
+//   - A create of a file share with $expand=snapshots snapshots the share,
+//     which must exist (404 ShareNotFound otherwise), and answers 201 with
+//     the snapshot and its snapshotTime; the status, and showing
+//     snapshotTime there, are inferred, as the spec documents snapshotTime
+//     only for a list. The snapshot keeps the share's properties and usage
+//     as they were, with the body's metadata in place of the share's, as
+//     Microsoft documents for share snapshots; other properties answer 400.
+//     A share holds up to 200 snapshots (409 ShareSnapshotCountExceeded, the
+//     Files code, inferred for ARM). Snapshot times are unique per share: a
+//     snapshot taken at or before the last one's time is given that time
+//     plus 100ns, which is inferred. A GET with x-ms-snapshot answers that
+//     snapshot, or 404 ShareSnapshotNotFound (the Files code, inferred). A
+//     list with $expand=snapshots shows each snapshot as an item of its own,
+//     with the share's ID and name and its snapshotTime, after the share, as
+//     the spec's example does; a plain list leaves them out. Lists also take
+//     $expand=deleted, comma-separated with snapshots, and a $filter that is
+//     a name prefix, as documented; other $expand values, on a list, a GET
+//     (which takes stats) or a create, answer 400. [Server.SnapshotShare]
+//     takes a snapshot at a given time.
+//   - A DELETE of a share deletes its snapshots too unless $include is
+//     none, as Azure documents for ARM, where it fails with 409
+//     ShareHasSnapshots while the share has any (the Files code and message,
+//     inferred for ARM); leases are not modeled, so leased-snapshots
+//     deletes as snapshots does, and other values answer 400. A DELETE with
+//     x-ms-snapshot deletes that snapshot only, and answers 204 when there
+//     is none, as for a missing share (inferred). While the file service's
+//     shareDeleteRetentionPolicy is enabled, deleting a share keeps it, with
+//     its snapshots, as deleted for that many days (7 when days is not set,
+//     Microsoft's documented default); one deleted while the policy was off
+//     is gone. A list with $expand=deleted shows each with deleted,
+//     deletedTime, remainingRetentionDays and version, and an ID of the
+//     share's ID, an underscore and the version, as the spec's example
+//     does; its snapshots are not listed, which is inferred. A share can be
+//     created under the name of a deleted one (inferred). Restore takes the
+//     deleted share back, snapshots included, as Microsoft documents; it
+//     fails with 409 ShareAlreadyExists while a share has its name and 404
+//     ShareNotFound for a version that is not kept (both inferred), and
+//     restoring under another name answers 400 as not supported.
+//     [Server.SoftDeleteShare] deletes a share as if at a given time, kept
+//     for a given number of days. Snapshots do not protect their account,
+//     as Microsoft documents ("Share snapshots don't prevent accidental
+//     deletion of a file share or storage account"), nor do soft-deleted
+//     shares, which is inferred, as for containers; deleting the account or
+//     its group deletes both.
 //   - A legal hold takes 1 or more tags of 3 to 23 letters and digits,
 //     lower-cased as Azure does, so tags that differ only in case count
 //     once, and a container holds at most 10, as Microsoft documents; the

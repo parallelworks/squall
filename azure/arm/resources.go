@@ -82,6 +82,8 @@ type resource struct {
 	held *heldAddress
 	// restoring marks a Log Analytics workspace a create recovers.
 	restoring bool
+	// shareSnapshots are a file share's snapshots, oldest first.
+	shareSnapshots []*shareSnapshot
 }
 
 // inGroup reports whether r is in the group with key gk.

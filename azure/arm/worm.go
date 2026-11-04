@@ -352,7 +352,7 @@ func (s *Server) versionLevelAnywhere(acct *resource) bool {
 			return true
 		}
 	}
-	return slices.ContainsFunc(s.deletedContainers(acct), func(d *deletedContainer) bool { return versionLevelWORM(d.res.props) })
+	return slices.ContainsFunc(s.deletedContainers(acct), func(d *deletedChild) bool { return versionLevelWORM(d.res.props) })
 }
 
 // storageParent returns the storage account holding res when res is not

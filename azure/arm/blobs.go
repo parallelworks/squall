@@ -107,15 +107,15 @@ func retentionDays(props map[string]any, name string) int {
 	return 7
 }
 
-// deletedContainer is a soft-deleted blob container.
-type deletedContainer struct {
+// deletedChild is a soft-deleted blob container or file share.
+type deletedChild struct {
 	res     *resource
 	version string
 	deleted time.Time
 	keep    int
 }
 
-func (d *deletedContainer) expired(now time.Time) bool { return daysLeft(d.deleted, now, d.keep) == 0 }
+func (d *deletedChild) expired(now time.Time) bool { return daysLeft(d.deleted, now, d.keep) == 0 }
 
 // deleteContainer deletes the container res of the account acct, keeping it
 // with its blobs as deleted when the blob service keeps deleted containers.
@@ -123,18 +123,21 @@ func (d *deletedContainer) expired(now time.Time) bool { return daysLeft(d.delet
 func (s *Server) deleteContainer(acct, res *resource) {
 	delete(s.resources, key(res.id))
 	if keep := settingsOf(acct).keepContainers; keep > 0 {
-		s.seq++
-		acct.account.deleted = append(acct.account.deleted, &deletedContainer{
-			res: res, version: fmt.Sprintf("%016X", s.seq), deleted: s.now(), keep: keep,
-		})
+		acct.account.deleted = append(acct.account.deleted, s.newDeletedChild(res, s.now(), keep))
 	}
+}
+
+// newDeletedChild keeps res as deleted at at for keep days, under a new version. The caller holds s.mu.
+func (s *Server) newDeletedChild(res *resource, at time.Time, keep int) *deletedChild {
+	s.seq++
+	return &deletedChild{res: res, version: fmt.Sprintf("%016X", s.seq), deleted: at, keep: keep}
 }
 
 // deletedContainers returns the account's soft-deleted containers that are
 // still kept, dropping the rest. The caller holds s.mu.
-func (s *Server) deletedContainers(acct *resource) []*deletedContainer {
+func (s *Server) deletedContainers(acct *resource) []*deletedChild {
 	now := s.now()
-	acct.account.deleted = slices.DeleteFunc(acct.account.deleted, func(d *deletedContainer) bool { return d.expired(now) })
+	acct.account.deleted = slices.DeleteFunc(acct.account.deleted, func(d *deletedChild) bool { return d.expired(now) })
 	return acct.account.deleted
 }
 
