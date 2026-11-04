@@ -12,8 +12,8 @@
 // It covers:
 //
 //   - resource groups: get, check existence, create or update, list (with
-//     tag filters) and delete, which deletes everything in the group that
-//     nothing outside it uses;
+//     tag filters), list the resources in one (with tag filters) and delete,
+//     which deletes everything in the group that nothing outside it uses;
 //   - Microsoft.Network: virtual networks, NAT gateways, load balancers,
 //     network security groups, network interfaces, public IP addresses and
 //     private endpoints (create or update, update tags, get, delete and list
@@ -105,6 +105,22 @@
 //     deleting it alone answers, such as NicInUse, as Azure reports it. The
 //     status, and that everything else is deleted before the operation
 //     fails, are inferred.
+//   - Listing a group's resources lists those of the types ARM tracks, the
+//     ones with a location, nested ones such as VM extensions, gallery image
+//     versions and virtual network links included, ordered by ID. Proxy types
+//     such as subnets, record sets, blob containers, Cognitive Services
+//     deployments and role assignments are left out. Each entry shows the
+//     id, type, location, tags, extendedLocation, kind, plan, sku, identity
+//     and managedBy that a GET of the resource shows, and with $expand its
+//     provisioningState, so an Application Insights component's id and type
+//     are in lower case, as its GET shows them. It takes the tag $filter a
+//     group list takes, and with a tagValue clause leaves out each entry's
+//     tags, as Azure does, and an $expand of createdTime and
+//     provisioningState. Other filters, such as on name, location or
+//     resourceType, or with substringof or startswith, and changedTime fail
+//     with 400.
+//   - Listing groups or a group's resources with $top returns at most that
+//     many, with no nextLink; Azure may page them instead.
 //   - Resource names, subscription IDs and locations are not validated, and
 //     names match without regard to case. Tags are not validated. Fields the
 //     server only records keep the JSON the caller sent; fields it does not
@@ -758,6 +774,7 @@ func (s *Server) registerRoutes() {
 	s.add("HEAD", rg, groupAction+"read", false, s.checkGroup)
 	s.add("PUT", rg, groupAction+"write", false, s.putGroup)
 	s.add("DELETE", rg, groupAction+"delete", true, s.deleteGroup)
+	s.add("GET", rg+"/resources", groupAction+"resources/read", false, s.listGroupResources)
 	s.add("GET", sub+"/operationresults/{op}", "Microsoft.Resources/subscriptions/operationresults/read", false, s.operationResult)
 
 	s.add("GET", sub+"/providers/Microsoft.Compute/locations/{loc}/operations/{op}", "Microsoft.Compute/locations/operations/read", false,

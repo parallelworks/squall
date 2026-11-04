@@ -727,3 +727,89 @@ func TestDeploymentModelProviderData(t *testing.T) {
 		t.Fatalf("an unknown member = %d %v", rec.Code, body)
 	}
 }
+
+func TestGroupResourceShapes(t *testing.T) {
+	s := arm.New()
+	newGroup(t, s)
+	list := groupPath + "/resources?api-version=2025-04-01"
+	if rec, body := do(t, s, http.MethodGet, list, ""); rec.Code != http.StatusOK || fmt.Sprint(body["value"]) != "[]" {
+		t.Fatalf("empty group = %d %v", rec.Code, body)
+	}
+	zone := groupPath + "/providers/Microsoft.Network/privateDnsZones/example.internal"
+	for _, put := range [][2]string{
+		{zone, `{"location":"global","tags":{"env":"test"}}`},
+		{zone + "/virtualNetworkLinks/link", `{"location":"global","properties":{"virtualNetwork":{"id":"/subscriptions/s/resourceGroups/net/providers/Microsoft.Network/virtualNetworks/vnet"},"registrationEnabled":false}}`},
+		{zone + "/A/www", `{"properties":{"ttl":300,"aRecords":[{"ipv4Address":"10.0.0.4"}]}}`},
+	} {
+		if rec, got := do(t, s, http.MethodPut, put[0], put[1]); rec.Code >= 300 {
+			t.Fatalf("PUT %s = %d %v", put[0], rec.Code, got)
+		}
+	}
+	rec, body := do(t, s, http.MethodGet, list+"&$expand=createdTime,provisioningState", "")
+	value, _ := body["value"].([]any)
+	if rec.Code != http.StatusOK || len(value) != 2 {
+		t.Fatalf("list = %d %v", rec.Code, body)
+	}
+	z, _ := value[0].(map[string]any)
+	l, _ := value[1].(map[string]any)
+	if z["id"] != zone || z["name"] != "example.internal" || z["type"] != "Microsoft.Network/privateDnsZones" || z["location"] != "global" ||
+		fmt.Sprint(z["tags"]) != "map[env:test]" || z["provisioningState"] != "Succeeded" || z["createdTime"] == nil || z["properties"] != nil {
+		t.Errorf("zone = %v", z)
+	}
+	if l["id"] != zone+"/virtualNetworkLinks/link" || l["name"] != "example.internal/link" ||
+		l["type"] != "Microsoft.Network/privateDnsZones/virtualNetworkLinks" {
+		t.Errorf("link = %v", l)
+	}
+	_, body = do(t, s, http.MethodGet, list+"&$filter="+url.QueryEscape("tagName eq 'env'"), "")
+	if value, _ := body["value"].([]any); len(value) != 1 || value[0].(map[string]any)["tags"] == nil {
+		t.Errorf("tag name filter = %v", body)
+	}
+	_, body = do(t, s, http.MethodGet, list+"&$filter="+url.QueryEscape("tagName eq 'env' and tagValue eq 'test'"), "")
+	if value, _ := body["value"].([]any); len(value) != 1 || value[0].(map[string]any)["tags"] != nil {
+		t.Errorf("tag name and value filter, which leaves out tags = %v", body)
+	}
+	_, body = do(t, s, http.MethodGet, list+"&$top=1", "")
+	if value, _ := body["value"].([]any); len(value) != 1 || value[0].(map[string]any)["id"] != zone || body["nextLink"] != nil {
+		t.Errorf("$top = %v", body)
+	}
+	for _, query := range []string{"$top=0", "$expand=changedTime", "$filter=" + url.QueryEscape("resourceType eq 'Microsoft.Network/privateDnsZones'")} {
+		if rec, body := do(t, s, http.MethodGet, list+"&"+query, ""); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s = %d %v", query, rec.Code, body)
+		}
+	}
+	if _, body := do(t, s, http.MethodGet, list+"&$expand=createdTime,changedTime", ""); !strings.Contains(fmt.Sprint(body), "'changedTime'") {
+		t.Errorf("an $expand with one unsupported part = %v", body)
+	}
+	if rec, body := do(t, s, http.MethodGet, "/subscriptions/s/resourcegroups/nope/resources", ""); rec.Code != http.StatusNotFound || errorCode(body) != "ResourceGroupNotFound" {
+		t.Errorf("missing group = %d %v", rec.Code, body)
+	}
+}
+
+func TestGroupResourceTopLevelMembers(t *testing.T) {
+	s := arm.New()
+	newGroup(t, s)
+	other := "/subscriptions/s2/resourceGroups/rg"
+	for _, put := range [][2]string{
+		{groupPath + "/providers/Microsoft.Network/virtualNetworks/vnet", `{"location":"eastus","extendedLocation":{"name":"edge","type":"EdgeZone"},"properties":{"addressSpace":{"addressPrefixes":["10.0.0.0/16"]}}}`},
+		{groupPath + "/providers/Microsoft.Network/publicIPAddresses/pip", `{"location":"eastus"}`},
+		{other, `{"location":"eastus"}`},
+		{other + "/providers/Microsoft.Network/networkSecurityGroups/elsewhere", `{"location":"eastus"}`},
+	} {
+		if rec, got := do(t, s, http.MethodPut, put[0], put[1]); rec.Code >= 300 {
+			t.Fatalf("PUT %s = %d %v", put[0], rec.Code, got)
+		}
+	}
+	_, body := do(t, s, http.MethodGet, groupPath+"/resources", "")
+	value, _ := body["value"].([]any)
+	if len(value) != 2 {
+		t.Fatalf("list = %v", body)
+	}
+	pip, _ := value[0].(map[string]any)
+	vnet, _ := value[1].(map[string]any)
+	if fmt.Sprint(pip["sku"]) != "map[name:Standard tier:Regional]" || pip["extendedLocation"] != nil {
+		t.Errorf("public IP address = %v", pip)
+	}
+	if fmt.Sprint(vnet["extendedLocation"]) != "map[name:edge type:EdgeZone]" || vnet["sku"] != nil {
+		t.Errorf("virtual network = %v", vnet)
+	}
+}

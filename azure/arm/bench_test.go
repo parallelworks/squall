@@ -55,3 +55,25 @@ func BenchmarkListGroupsFiltered(b *testing.B) {
 		}
 	}
 }
+
+func BenchmarkListGroupResources(b *testing.B) {
+	s := arm.New()
+	serve(b, s, http.MethodPut, groupPath, `{"location":"eastus"}`)
+	for i := range 200 {
+		serve(b, s, http.MethodPut, fmt.Sprintf("%s/providers/Microsoft.Network/networkSecurityGroups/nsg-%d", groupPath, i),
+			fmt.Sprintf(`{"location":"eastus","tags":{"session":"%d"}}`, i%10))
+	}
+	for _, bc := range [][2]string{{"all", ""}, {"filtered", "&%24filter=tagName+eq+%27session%27+and+tagValue+eq+%273%27"}} {
+		b.Run(bc[0], func(b *testing.B) {
+			req := httptest.NewRequestWithContext(b.Context(), http.MethodGet, groupPath+"/resources?api-version=2025-04-01"+bc[1], nil)
+			req.Header.Set("Authorization", "Bearer token")
+			for b.Loop() {
+				rec := httptest.NewRecorder()
+				s.ServeHTTP(rec, req)
+				if rec.Code != http.StatusOK {
+					b.Fatal(rec.Body)
+				}
+			}
+		})
+	}
+}

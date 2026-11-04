@@ -167,17 +167,13 @@ func (s *Server) emptyGroup(g *group, gk string) *apiError {
 }
 
 func (s *Server) listGroups(c *call) (*reply, *apiError) {
-	match, err := parseTagFilter(c.query("$filter"))
+	match, _, err := parseTagFilter(c.query("$filter"))
 	if err != nil {
 		return nil, err
 	}
-	top := -1
-	if v := c.query("$top"); v != "" {
-		n, convErr := strconv.Atoi(v)
-		if convErr != nil || n < 1 {
-			return nil, badRequest("The value '%s' of the $top query parameter is not valid.", v)
-		}
-		top = n
+	top, err := parseTop(c)
+	if err != nil {
+		return nil, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -195,34 +191,184 @@ func (s *Server) listGroups(c *call) (*reply, *apiError) {
 		}
 	}
 	slices.SortFunc(out, func(a, b *group) int { return cmp.Compare(key(a.name), key(b.name)) })
-	if top >= 0 && len(out) > top {
-		out = out[:top]
+	return ok(listBody(firstN(out, top), func(g *group) any { return g.render() })), nil
+}
+
+// parseTop reads the call's $top, or -1 when it has none.
+func parseTop(c *call) (int, *apiError) {
+	v := c.query("$top")
+	if v == "" {
+		return -1, nil
 	}
-	return ok(listBody(out, func(g *group) any { return g.render() })), nil
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return 0, badRequest("The value '%s' of the $top query parameter is not valid.", v)
+	}
+	return n, nil
+}
+
+// firstN returns the first top items, or all of them when top is negative.
+func firstN[T any](items []T, top int) []T {
+	if top >= 0 && len(items) > top {
+		return items[:top]
+	}
+	return items
+}
+
+// listGroupResources lists the resources in a group as ARM tracks them: the
+// types with a location, which leaves out proxy types such as subnets, record
+// sets and blob containers.
+func (s *Server) listGroupResources(c *call) (*reply, *apiError) {
+	match, byValue, err := parseTagFilter(c.query("$filter"))
+	if err != nil {
+		return nil, err
+	}
+	top, err := parseTop(c)
+	if err != nil {
+		return nil, err
+	}
+	var created, provisioning bool
+	if v := c.query("$expand"); v != "" {
+		for part := range strings.SplitSeq(v, ",") {
+			switch part = strings.TrimSpace(part); part {
+			case "createdTime":
+				created = true
+			case "provisioningState":
+				provisioning = true
+			default:
+				return nil, unsupported("the $expand '%s' is not supported; use createdTime, provisioningState or both", part)
+			}
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	gk := groupKey(c)
+	observe := s.observer()
+	if g, ok := s.groups[gk]; ok {
+		observe(g.pending)
+	}
+	if err := s.readableGroup(c); err != nil {
+		return nil, err
+	}
+	for _, res := range s.resources {
+		if res.kind.located && res.inGroup(gk) {
+			observe(res.pending)
+		}
+	}
+	var out []*resource
+	for _, res := range s.resources {
+		if res.kind.located && res.inGroup(gk) && match(res.tags) {
+			out = append(out, res)
+		}
+	}
+	slices.SortFunc(out, func(a, b *resource) int { return cmp.Compare(key(a.id), key(b.id)) })
+	return ok(listBody(firstN(out, top), func(res *resource) any {
+		full := s.renderOne(res)
+		m := genericView(full)
+		m["name"] = genericName(res.id)
+		if byValue {
+			delete(m, "tags")
+		}
+		if created {
+			m["createdTime"] = timestamp(res.created)
+		}
+		if provisioning {
+			props, _ := full["properties"].(map[string]any)
+			m["provisioningState"] = cmp.Or(str(props, "provisioningState"), res.state)
+		}
+		return m
+	})), nil
+}
+
+// genericView picks from a resource as its GET shows it the members ARM's
+// generic resource list shows, other than its name.
+func genericView(full map[string]any) map[string]any {
+	m := map[string]any{}
+	for _, name := range []string{"extendedLocation", "id", "identity", "kind", "location", "managedBy", "plan", "sku", "tags", "type"} {
+		if v, ok := full[name]; ok {
+			m[name] = v
+		}
+	}
+	return m
+}
+
+// renderOne renders res as a GET of it answers, without $expand. The caller holds s.mu.
+func (s *Server) renderOne(res *resource) map[string]any {
+	switch res.kind {
+	case nsgKind, nicKind, pipKind, peKind, vnetKind, natKind, lbKind, subnetKind:
+		return s.renderNetwork(res)
+	case zoneKind:
+		return s.renderZone(res)
+	case linkKind:
+		return s.renderLink(res)
+	case vmKind:
+		return s.renderVM(res, "")
+	case vmExtensionKind:
+		return renderExtension(res)
+	case vmssKind:
+		return s.renderScaleSet(res)
+	case diskKind, snapshotKind:
+		return s.renderDisk(res)
+	case galleryKind, galleryImageKind, galleryVersionKind:
+		return renderGallery(res, false)
+	case accountKind:
+		return s.accountBody(res)
+	case netappAccountKind, poolKind, volumeKind:
+		return renderNetApp(res)
+	case amlfsKind:
+		return renderAmlfs(res)
+	case cognitiveAccountKind:
+		return renderCognitiveAccount(res)
+	case searchKind:
+		return renderSearch(res)
+	case vaultKind:
+		return renderVault(res)
+	case componentKind:
+		return renderComponent(res)
+	case workspaceKind:
+		return renderWorkspace(res)
+	case logWorkspaceKind:
+		return renderLogWorkspace(res)
+	}
+	m, _ := envelope(res)
+	return m
+}
+
+// genericName is the name ARM's generic resource APIs give the resource id: a
+// nested one's names joined with slashes, such as vm/extension.
+func genericName(id string) string {
+	_, path, _ := strings.Cut(id, "/providers/")
+	parts := strings.Split(path, "/")
+	var names []string
+	for i := 2; i < len(parts); i += 2 {
+		names = append(names, parts[i])
+	}
+	return strings.Join(names, "/")
 }
 
 // parseTagFilter parses the resource group list filters ARM takes on tags,
-// "tagName eq 'k'" and "tagName eq 'k' and tagValue eq 'v'". Tag names match
-// without regard to case, values exactly.
-func parseTagFilter(filter string) (func(map[string]string) bool, *apiError) {
+// "tagName eq 'k'" and "tagName eq 'k' and tagValue eq 'v'", reporting
+// whether it has the tagValue clause. Tag names match without regard to case,
+// values exactly.
+func parseTagFilter(filter string) (match func(map[string]string) bool, byValue bool, err *apiError) {
 	if strings.TrimSpace(filter) == "" {
-		return func(map[string]string) bool { return true }, nil
+		return func(map[string]string) bool { return true }, false, nil
 	}
 	name, rest, err := filterClause(filter, "tagName")
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	value, hasValue := "", false
 	if rest = strings.TrimSpace(rest); rest != "" {
 		after, ok := cutWord(rest, "and")
 		if !ok {
-			return nil, unsupportedFilter(filter)
+			return nil, false, unsupportedFilter(filter)
 		}
 		if value, rest, err = filterClause(after, "tagValue"); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if strings.TrimSpace(rest) != "" {
-			return nil, unsupportedFilter(filter)
+			return nil, false, unsupportedFilter(filter)
 		}
 		hasValue = true
 	}
@@ -233,7 +379,7 @@ func parseTagFilter(filter string) (func(map[string]string) bool, *apiError) {
 			}
 		}
 		return false
-	}, nil
+	}, hasValue, nil
 }
 
 func unsupportedFilter(filter string) *apiError {

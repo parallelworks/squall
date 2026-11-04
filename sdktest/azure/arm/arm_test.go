@@ -53,6 +53,7 @@ func (credential) GetToken(context.Context, policy.TokenRequestOptions) (azcore.
 type clients struct {
 	server      *arm.Server
 	groups      *armresources.ResourceGroupsClient
+	resources   *armresources.Client
 	vms         *armcompute.VirtualMachinesClient
 	extensions  *armcompute.VirtualMachineExtensionsClient
 	sets        *armcompute.VirtualMachineScaleSetsClient
@@ -192,7 +193,7 @@ func setupWith(t *testing.T, retry policy.RetryOptions, opts ...arm.Option) *cli
 		t.Fatal(err)
 	}
 	return &clients{
-		server: s, groups: resources.NewResourceGroupsClient(),
+		server: s, groups: resources.NewResourceGroupsClient(), resources: resources.NewClient(),
 		vms: compute.NewVirtualMachinesClient(), extensions: compute.NewVirtualMachineExtensionsClient(), sets: compute.NewVirtualMachineScaleSetsClient(),
 		setVMs: compute.NewVirtualMachineScaleSetVMsClient(), skus: compute.NewResourceSKUsClient(),
 		disks: compute.NewDisksClient(), snapshots: compute.NewSnapshotsClient(), galleries: compute.NewGalleriesClient(),
