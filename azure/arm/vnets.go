@@ -3,6 +3,7 @@ package arm
 import (
 	"bytes"
 	"cmp"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"net/http"
@@ -368,7 +369,7 @@ func (s *Server) prepareVNet(res *resource, p *parsed) (func(), *apiError) {
 					state: stateSucceeded, created: now, modified: now, guid: s.newUUID(), top: map[string]any{},
 				}
 				s.resources[key(id)] = sn
-			} else if !bytes.Equal(encode(sn.props), encode(pl.props)) {
+			} else if subnetChanged(sn, pl.props, pl.st) {
 				sn.modified = now
 			}
 			sn.subnet, sn.props = pl.st, pl.props
@@ -469,12 +470,55 @@ func renderSubnet(res *resource) map[string]any {
 		}
 		props["serviceEndpoints"] = out
 	}
-	for name, value := range map[string]string{"privateEndpointNetworkPolicies": "Disabled", "privateLinkServiceNetworkPolicies": "Enabled"} {
+	for name, value := range subnetPolicyDefaults {
 		if _, ok := props[name]; !ok {
 			props[name] = value
 		}
 	}
 	return m
+}
+
+var subnetPolicyDefaults = map[string]string{"privateEndpointNetworkPolicies": "Disabled", "privateLinkServiceNetworkPolicies": "Enabled"}
+
+// subnetChanged reports whether props and st change the subnet sn, ignoring
+// the read-only members and defaults its GET adds.
+func subnetChanged(sn *resource, props map[string]any, st *subnetState) bool {
+	return sn.subnet == nil || sn.subnet.nat != st.nat || sn.subnet.nsg != st.nsg ||
+		!bytes.Equal(writableSubnet(sn.props), writableSubnet(props))
+}
+
+func writableSubnet(props map[string]any) json.RawMessage {
+	props = maps.Clone(props)
+	if props == nil {
+		props = map[string]any{}
+	}
+	var delegations, endpoints []any
+	ds, _ := objects(props, "delegations")
+	for _, d := range ds {
+		dp, _ := d["properties"].(map[string]any)
+		dp = maps.Clone(dp)
+		if dp == nil {
+			dp = map[string]any{}
+		}
+		delete(dp, "provisioningState")
+		if actions, _ := dp["actions"].([]any); len(actions) == 0 {
+			delete(dp, "actions")
+		}
+		delegations = append(delegations, map[string]any{"name": d["name"], "properties": dp})
+	}
+	es, _ := objects(props, "serviceEndpoints")
+	for _, e := range es {
+		e = maps.Clone(e)
+		delete(e, "provisioningState")
+		endpoints = append(endpoints, e)
+	}
+	props["delegations"], props["serviceEndpoints"] = delegations, endpoints
+	for name, value := range subnetPolicyDefaults {
+		if _, ok := props[name]; !ok {
+			props[name] = value
+		}
+	}
+	return encode(props)
 }
 
 // renderVNet adds what Azure reports for the virtual network res: its subnets and defaults.
