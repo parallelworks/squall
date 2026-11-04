@@ -639,9 +639,15 @@ For Azure Resource Manager:
   container under a locked policy, or a legal hold and a blob, fails with
   409 `AccountProtectedFromDeletion`, as Azure answers; uncommitted blocks
   alone are not a blob, here or in `Blobs()`. A blocked group delete leaves
-  the account whole, shares, queues and tables included. A container with
-  version-level immutability can be deleted only through ARM once empty, and
-  an account only once it has no such container; blob-level immutability
+  the account whole, shares, queues and tables included, and soft-deleted
+  containers keep protecting their account (inferred), as soft-deleted
+  blobs count as data for holds, policies and version-level immutability
+  (inferred). A container with version-level immutability can be deleted
+  only through ARM once empty (`ContainerImmutableStorageWithVersioningEnabled`
+  otherwise). An account with it enabled cannot be deleted while any
+  container exists, and one without it cannot while it has such a
+  container. Account version-level immutability is set only at creation,
+  kept across updates and implies versioning; blob-level immutability
   policies and legal holds are not supported (400).
 - Fault method names are the Azure RBAC action, such as
   `Microsoft.Compute/virtualMachines/write`, and a rule's `Resource` is the

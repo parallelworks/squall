@@ -227,3 +227,56 @@ func TestShareUsage(t *testing.T) {
 		t.Fatalf("share without stats = %+v, %v", got, err)
 	}
 }
+
+func TestVersionLevelImmutability(t *testing.T) {
+	c := setup(t)
+	c.createGroup(t, group, nil)
+	params := accountParams()
+	params.Properties = &armstorage.AccountPropertiesCreateParameters{
+		ImmutableStorageWithVersioning: &armstorage.ImmutableStorageAccount{Enabled: new(true)},
+	}
+	p, err := c.accounts.BeginCreate(t.Context(), group, "vlw1", params, nil)
+	if _, err := wait(t, p, err); err != nil {
+		t.Fatal(err)
+	}
+	svc, err := c.blob.GetServiceProperties(t.Context(), group, "vlw1", nil)
+	if err != nil || svc.BlobServiceProperties.BlobServiceProperties.IsVersioningEnabled == nil || !*svc.BlobServiceProperties.BlobServiceProperties.IsVersioningEnabled {
+		t.Fatalf("blob service of a version-level immutable account = %+v, %v", svc, err)
+	}
+	if _, err := c.containers.Create(t.Context(), group, "vlw1", "data", armstorage.BlobContainer{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	client := c.blobs(t, "vlw1")
+	made := upload(t, client, "a", "x")
+	if _, err := client.DeleteBlob(t.Context(), "data", "a", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.DeleteContainer(t.Context(), "data", nil); code(err) != "ContainerImmutableStorageWithVersioningEnabled" || status(err) != http.StatusConflict {
+		t.Fatalf("deleting the container through the Blob service = %v", err)
+	}
+	if _, err := c.containers.Delete(t.Context(), group, "vlw1", "data", nil); code(err) != "ContainerImmutableStorageWithVersioningEnabled" {
+		t.Fatalf("deleting the container through ARM while it keeps a version = %v", err)
+	}
+	if _, err := c.accounts.Delete(t.Context(), group, "vlw1", nil); code(err) != "AccountProtectedFromDeletion" {
+		t.Fatalf("deleting the account = %v", err)
+	}
+	params.Properties.ImmutableStorageWithVersioning.Enabled = new(false)
+	p, err = c.accounts.BeginCreate(t.Context(), group, "vlw1", params, nil)
+	if _, err := wait(t, p, err); code(err) != "PropertyIsImmutable" || status(err) != http.StatusBadRequest {
+		t.Fatalf("disabling version-level immutability = %v", err)
+	}
+
+	old, err := client.ServiceClient().NewContainerClient("data").NewBlobClient("a").WithVersionID(*made.VersionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Delete(t.Context(), nil); err != nil {
+		t.Fatalf("deleting the previous version = %v", err)
+	}
+	if _, err := c.containers.Delete(t.Context(), group, "vlw1", "data", nil); err != nil {
+		t.Fatalf("deleting the empty container through ARM = %v", err)
+	}
+	if _, err := c.accounts.Delete(t.Context(), group, "vlw1", nil); err != nil {
+		t.Fatalf("deleting the account once it has no container = %v", err)
+	}
+}

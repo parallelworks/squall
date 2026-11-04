@@ -32,6 +32,30 @@ func policy(t *testing.T, s *arm.Server) string {
 	return body["etag"].(string)
 }
 
+func lock(t *testing.T, s *arm.Server, etag string) {
+	t.Helper()
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, containerPath+"/immutabilityPolicies/default/lock?api-version=1", nil)
+	req.Header.Set("Authorization", "Bearer token")
+	req.Header.Set("If-Match", etag)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("lock = %d %s", rec.Code, rec.Body)
+	}
+}
+
+// deleteGroup deletes the group at path and answers as its operation ends.
+func deleteGroup(t *testing.T, s *arm.Server, path string) (*httptest.ResponseRecorder, map[string]any) {
+	t.Helper()
+	rec, body := do(t, s, http.MethodDelete, path, "")
+	if rec.Code == http.StatusAccepted {
+		u, _ := url.Parse(rec.Header().Get("Location"))
+		s.Settle()
+		rec, body = do(t, s, http.MethodGet, u.RequestURI(), "")
+	}
+	return rec, body
+}
+
 func wantStatus(t *testing.T, rec *httptest.ResponseRecorder, body map[string]any, status int, code string) {
 	t.Helper()
 	if rec.Code != status || code != "" && errorCode(body) != code {
@@ -110,8 +134,15 @@ func TestVersionLevelImmutability(t *testing.T) {
 	rec, body := do(t, s, http.MethodDelete, accountPath, "")
 	wantStatus(t, rec, body, http.StatusConflict, "AccountProtectedFromDeletion")
 	rec, body = do(t, s, http.MethodDelete, containerPath, "")
-	wantStatus(t, rec, body, http.StatusConflict, "BlobImmutableDueToPolicy")
+	wantStatus(t, rec, body, http.StatusConflict, "ContainerImmutableStorageWithVersioningEnabled")
 	blobDo(t, s, http.MethodDelete, "/acct/data/a", "")
+	left := s.Blobs()
+	if len(left) != 1 || left[0].Current || left[0].VersionID == "" {
+		t.Fatalf("a delete under version-level immutability should keep a previous version: %+v", left)
+	}
+	rec, body = do(t, s, http.MethodDelete, containerPath, "")
+	wantStatus(t, rec, body, http.StatusConflict, "ContainerImmutableStorageWithVersioningEnabled")
+	blobDo(t, s, http.MethodDelete, "/acct/data/a?versionid="+left[0].VersionID, "")
 	rec, body = do(t, s, http.MethodDelete, containerPath, "")
 	wantStatus(t, rec, body, http.StatusOK, "")
 	rec, body = do(t, s, http.MethodDelete, accountPath, "")
@@ -165,15 +196,7 @@ func TestDeletesAProtectionAllows(t *testing.T) {
 	t.Run("empty container with a locked policy through ARM", func(t *testing.T) {
 		s := arm.New()
 		newStorage(t, s, "")
-		etag := policy(t, s)
-		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, containerPath+"/immutabilityPolicies/default/lock?api-version=1", nil)
-		req.Header.Set("Authorization", "Bearer token")
-		req.Header.Set("If-Match", etag)
-		lock := httptest.NewRecorder()
-		s.ServeHTTP(lock, req)
-		if lock.Code != http.StatusOK {
-			t.Fatalf("lock = %d %s", lock.Code, lock.Body)
-		}
+		lock(t, s, policy(t, s))
 		rec, body := do(t, s, http.MethodDelete, containerPath, "")
 		wantStatus(t, rec, body, http.StatusOK, "")
 	})
@@ -251,7 +274,11 @@ func TestWriteNeedsAreCheckedAgainWhenTheBlobAppears(t *testing.T) {
 	slow := httptest.NewRecorder()
 	var wg sync.WaitGroup
 	wg.Go(func() { s.Blob().ServeHTTP(slow, req) })
-	<-body.reading
+	select {
+	case <-body.reading:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the slow Put Blob never read its body")
+	}
 	if rec := blobDo(t, s, http.MethodPut, "/acct/data/a", "fast"); rec.Code != http.StatusCreated {
 		t.Fatalf("the create that wins = %d %s", rec.Code, rec.Body)
 	}
@@ -316,7 +343,7 @@ func TestEmptyVersionLevelImmutableContainers(t *testing.T) {
 		s := arm.New()
 		newStorage(t, s, "")
 		do(t, s, http.MethodPut, accountPath+"/blobServices/default/containers/worm", `{"properties":{"immutableStorageWithVersioning":{"enabled":true}}}`)
-		wantError(t, blobDo(t, s, http.MethodDelete, "/acct/worm?restype=container", ""), http.StatusConflict, "BlobImmutableDueToPolicy")
+		wantError(t, blobDo(t, s, http.MethodDelete, "/acct/worm?restype=container", ""), http.StatusConflict, "ContainerImmutableStorageWithVersioningEnabled")
 		rec, body := do(t, s, http.MethodDelete, accountPath, "")
 		wantStatus(t, rec, body, http.StatusConflict, "AccountProtectedFromDeletion")
 		rec, body = do(t, s, http.MethodDelete, accountPath+"/blobServices/default/containers/worm", "")
@@ -329,7 +356,7 @@ func TestEmptyVersionLevelImmutableContainers(t *testing.T) {
 		newGroup(t, s)
 		do(t, s, http.MethodPut, accountPath, `{"location":"eastus","sku":{"name":"Standard_LRS"},"kind":"StorageV2","properties":{"immutableStorageWithVersioning":{"enabled":true}}}`)
 		blobDo(t, s, http.MethodPut, "/acct/data?restype=container", "")
-		wantError(t, blobDo(t, s, http.MethodDelete, "/acct/data?restype=container", ""), http.StatusConflict, "BlobImmutableDueToPolicy")
+		wantError(t, blobDo(t, s, http.MethodDelete, "/acct/data?restype=container", ""), http.StatusConflict, "ContainerImmutableStorageWithVersioningEnabled")
 		rec, body := do(t, s, http.MethodDelete, accountPath, "")
 		wantStatus(t, rec, body, http.StatusConflict, "AccountProtectedFromDeletion")
 	})
@@ -346,12 +373,7 @@ func TestBlockedGroupDeleteKeepsTheWholeAccount(t *testing.T) {
 			t.Fatalf("PUT %s = %d %v", path, rec.Code, body)
 		}
 	}
-	rec, body := do(t, s, http.MethodDelete, groupPath, "")
-	if rec.Code == http.StatusAccepted {
-		u, _ := url.Parse(rec.Header().Get("Location"))
-		s.Settle()
-		rec, body = do(t, s, http.MethodGet, u.RequestURI(), "")
-	}
+	rec, body := deleteGroup(t, s, groupPath)
 	wantStatus(t, rec, body, http.StatusConflict, "ResourceGroupDeletionBlocked")
 	if msg, _ := body["error"].(map[string]any)["message"].(string); strings.Contains(msg, "shares") || strings.Contains(msg, "queues") || !strings.Contains(msg, "storageAccounts/acct") {
 		t.Fatalf("the error should name only the account: %s", msg)
@@ -364,4 +386,122 @@ func TestBlockedGroupDeleteKeepsTheWholeAccount(t *testing.T) {
 	if got := s.Blobs(); len(got) != 1 {
 		t.Fatalf("blobs = %+v", got)
 	}
+}
+
+func TestStorageAccountsAsAGroupOrNetworkName(t *testing.T) {
+	const vlwAccount = `{"location":"eastus","sku":{"name":"Standard_LRS"},"kind":"StorageV2","properties":{"immutableStorageWithVersioning":{"enabled":true}}}`
+	t.Run("held container in a group named storageAccounts", func(t *testing.T) {
+		s := arm.New()
+		g := "/subscriptions/s/resourceGroups/storageAccounts"
+		acct := g + "/providers/Microsoft.Storage/storageAccounts/acct"
+		do(t, s, http.MethodPut, g, `{"location":"eastus"}`)
+		do(t, s, http.MethodPut, acct, `{"location":"eastus","sku":{"name":"Standard_LRS"},"kind":"StorageV2"}`)
+		blobDo(t, s, http.MethodPut, "/acct/data?restype=container", "")
+		do(t, s, http.MethodPost, acct+"/blobServices/default/containers/data/setLegalHold", `{"tags":["case1"]}`)
+		blobDo(t, s, http.MethodPut, "/acct/data/a", "1")
+		rec, body := deleteGroup(t, s, g)
+		wantStatus(t, rec, body, http.StatusConflict, "ResourceGroupDeletionBlocked")
+		if rec, body := do(t, s, http.MethodGet, acct+"/blobServices/default/containers/data", ""); rec.Code != http.StatusOK {
+			t.Fatalf("held container after a blocked group delete = %d %v", rec.Code, body)
+		}
+	})
+	t.Run("version-level immutable account in a group named storageaccounts", func(t *testing.T) {
+		s := arm.New()
+		g := "/subscriptions/s/resourceGroups/storageaccounts"
+		do(t, s, http.MethodPut, g, `{"location":"eastus"}`)
+		do(t, s, http.MethodPut, g+"/providers/Microsoft.Storage/storageAccounts/acct", vlwAccount)
+		blobDo(t, s, http.MethodPut, "/acct/data?restype=container", "")
+		wantError(t, blobDo(t, s, http.MethodDelete, "/acct/data?restype=container", ""), http.StatusConflict, "ContainerImmutableStorageWithVersioningEnabled")
+	})
+	t.Run("virtual network named storageaccounts", func(t *testing.T) {
+		s := arm.New()
+		newStorage(t, s, "")
+		hold(t, s)
+		blobDo(t, s, http.MethodPut, "/acct/data/a", "1")
+		vnet := groupPath + "/providers/Microsoft.Network/virtualNetworks/storageaccounts"
+		if rec, body := do(t, s, http.MethodPut, vnet, `{"location":"eastus","properties":{"addressSpace":{"addressPrefixes":["10.0.0.0/16"]},"subnets":[{"name":"acct","properties":{"addressPrefix":"10.0.0.0/24"}}]}}`); rec.Code >= 300 {
+			t.Fatalf("vnet = %d %v", rec.Code, body)
+		}
+		rec, body := deleteGroup(t, s, groupPath)
+		wantStatus(t, rec, body, http.StatusConflict, "ResourceGroupDeletionBlocked")
+		if msg, _ := body["error"].(map[string]any)["message"].(string); strings.Contains(msg, "virtualNetworks") {
+			t.Fatalf("the virtual network should not be kept: %s", msg)
+		}
+		if rec, _ := do(t, s, http.MethodGet, vnet, ""); rec.Code != http.StatusNotFound {
+			t.Fatalf("vnet after the group delete = %d", rec.Code)
+		}
+	})
+}
+
+func TestBlockedGroupDeleteWithTwoAccounts(t *testing.T) {
+	s := arm.New()
+	newStorage(t, s, "")
+	hold(t, s)
+	blobDo(t, s, http.MethodPut, "/acct/data/a", "1")
+	other := groupPath + "/providers/Microsoft.Storage/storageAccounts/other"
+	do(t, s, http.MethodPut, other, `{"location":"eastus","sku":{"name":"Standard_LRS"},"kind":"StorageV2"}`)
+	do(t, s, http.MethodPut, other+"/queueServices/default/queues/jobs", `{}`)
+	blobDo(t, s, http.MethodPut, "/other/c1?restype=container", "")
+	blobDo(t, s, http.MethodPut, "/other/c1/x", "1")
+	rec, body := deleteGroup(t, s, groupPath)
+	wantStatus(t, rec, body, http.StatusConflict, "ResourceGroupDeletionBlocked")
+	if msg, _ := body["error"].(map[string]any)["message"].(string); strings.Contains(msg, "other") || !strings.Contains(msg, "storageAccounts/acct") {
+		t.Fatalf("the error should name only the protected account: %s", msg)
+	}
+	if rec, _ := do(t, s, http.MethodGet, other, ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("the unprotected account after the group delete = %d", rec.Code)
+	}
+	if got := s.Blobs(); len(got) != 1 || got[0].Account != "acct" {
+		t.Fatalf("blobs = %+v", got)
+	}
+}
+
+func TestAccountVersionLevelImmutabilityIsFixedAtCreation(t *testing.T) {
+	const plain = `{"location":"eastus","sku":{"name":"Standard_LRS"},"kind":"StorageV2","properties":{}}`
+	s := arm.New()
+	newGroup(t, s)
+	do(t, s, http.MethodPut, accountPath, `{"location":"eastus","sku":{"name":"Standard_LRS"},"kind":"StorageV2","properties":{"immutableStorageWithVersioning":{"enabled":true}}}`)
+	blobDo(t, s, http.MethodPut, "/acct/data?restype=container", "")
+	rec, body := do(t, s, http.MethodPut, accountPath, `{"location":"eastus","sku":{"name":"Standard_LRS"},"kind":"StorageV2","properties":{"immutableStorageWithVersioning":{"enabled":false}}}`)
+	wantStatus(t, rec, body, http.StatusBadRequest, "PropertyIsImmutable")
+	rec, body = do(t, s, http.MethodPut, accountPath, plain)
+	if props, _ := body["properties"].(map[string]any); rec.Code != http.StatusOK || props["immutableStorageWithVersioning"] == nil {
+		t.Fatalf("an update that leaves it out = %d %v", rec.Code, body)
+	}
+	rec, body = do(t, s, http.MethodDelete, accountPath, "")
+	wantStatus(t, rec, body, http.StatusConflict, "AccountProtectedFromDeletion")
+
+	rec, body = do(t, s, http.MethodGet, accountPath+"/blobServices/default", "")
+	if props, _ := body["properties"].(map[string]any); rec.Code != http.StatusOK || props["isVersioningEnabled"] != true {
+		t.Fatalf("blob service of a version-level immutable account = %d %v", rec.Code, body)
+	}
+	rec, body = do(t, s, http.MethodPut, accountPath+"/blobServices/default", `{"properties":{"isVersioningEnabled":false}}`)
+	wantStatus(t, rec, body, http.StatusBadRequest, "InvalidRequestPropertyValue")
+
+	other := groupPath + "/providers/Microsoft.Storage/storageAccounts/other"
+	do(t, s, http.MethodPut, other, plain)
+	rec, body = do(t, s, http.MethodPut, other, `{"location":"eastus","sku":{"name":"Standard_LRS"},"kind":"StorageV2","properties":{"immutableStorageWithVersioning":{"enabled":true}}}`)
+	wantStatus(t, rec, body, http.StatusBadRequest, "PropertyIsImmutable")
+}
+
+func TestSoftDeletedContainersKeepTheAccountProtected(t *testing.T) {
+	t.Run("locked policy", func(t *testing.T) {
+		s := arm.New()
+		newStorage(t, s, `{"containerDeleteRetentionPolicy":{"enabled":true,"days":7}}`)
+		lock(t, s, policy(t, s))
+		if rec, body := do(t, s, http.MethodDelete, containerPath, ""); rec.Code != http.StatusOK {
+			t.Fatalf("delete the empty container = %d %v", rec.Code, body)
+		}
+		rec, body := do(t, s, http.MethodDelete, accountPath, "")
+		wantStatus(t, rec, body, http.StatusConflict, "AccountProtectedFromDeletion")
+	})
+	t.Run("version-level immutability", func(t *testing.T) {
+		s := arm.New()
+		newStorage(t, s, `{"containerDeleteRetentionPolicy":{"enabled":true,"days":7}}`)
+		worm := accountPath + "/blobServices/default/containers/worm"
+		do(t, s, http.MethodPut, worm, `{"properties":{"immutableStorageWithVersioning":{"enabled":true}}}`)
+		do(t, s, http.MethodDelete, worm, "")
+		rec, body := do(t, s, http.MethodDelete, accountPath, "")
+		wantStatus(t, rec, body, http.StatusConflict, "AccountProtectedFromDeletion")
+	})
 }

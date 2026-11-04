@@ -409,12 +409,12 @@
 //     snapshots for as long as the policy exists, even once those days are
 //     over (409 BlobImmutableDueToPolicy), as Microsoft documents
 //     container-level WORM. A container holds a blob when it has one that is
-//     current, soft-deleted, a version or a snapshot; uncommitted blocks
-//     alone do not count, which is inferred, and [Server.Blobs] leaves them
-//     out too. Deleting a container that has a legal hold or a policy fails
-//     through ARM while it holds a blob, and always through the Blob
-//     service, as
-//     Microsoft documents, with 409 ContainerHasLegalHold,
+//     current, soft-deleted, a version or a snapshot; that soft-deleted
+//     blobs count and uncommitted blocks alone do not is inferred, and
+//     [Server.Blobs] leaves uncommitted blocks out too. Deleting a container
+//     that has a legal hold or a policy fails through ARM while it holds a
+//     blob, and always through the Blob service, as Microsoft documents,
+//     with 409 ContainerHasLegalHold,
 //     ContainerImmutabilityPolicyLocked or, for an unlocked policy,
 //     BlobImmutableDueToPolicy; those codes are the Blob service's and are
 //     inferred for ARM. Deleting a storage account that has a container with
@@ -422,18 +422,28 @@
 //     AccountProtectedFromDeletion, "{account} is protected from
 //     deletion.The container(s) {names} have a locked immutability policy.",
 //     as Azure answers; the status, and the message for a legal hold, are
-//     inferred. Deleting its group fails with ResourceGroupDeletionBlocked
+//     inferred. A soft-deleted container keeps protecting its account as it
+//     did before it was deleted, which is inferred. Deleting its group fails with ResourceGroupDeletionBlocked
 //     with that error as the account's detail, and leaves the account whole:
 //     its containers, shares, queues, tables and services. A container with
 //     version-level immutability (immutableStorageWithVersioning on it or
 //     its account) can be deleted only through ARM, once it holds no blob,
-//     and never through the Blob service (409 BlobImmutableDueToPolicy). An
-//     account cannot be deleted while it has a container with version-level
-//     immutability, or has it enabled itself and any container (409
-//     AccountProtectedFromDeletion, "{account} is protected from
+//     and never through the Blob service, with 409
+//     ContainerImmutableStorageWithVersioningEnabled, the code Azure answers
+//     the Blob service with; its message, and the code for ARM, are
+//     inferred. An account cannot be deleted while it has a container with
+//     version-level immutability, or has it enabled itself and any container
+//     at all (409 AccountProtectedFromDeletion, "{account} is protected from
 //     deletion.The container(s) {names} have version-level immutability and
-//     must be deleted first."), as Microsoft documents; the codes and that
-//     message are inferred. Blob-level immutability policies
+//     must be deleted first."), as Microsoft documents; the message is
+//     inferred. An account takes version-level immutability only when it is
+//     created, and keeps it: an update that leaves it out keeps it, and one
+//     that enables or disables it fails with 400 PropertyIsImmutable, which
+//     is inferred. It turns on blob versioning, which then cannot be turned
+//     off (400 InvalidRequestPropertyValue, inferred), as the portal does.
+//     A container takes it only when created; migrating an existing one is
+//     not served, and a container's own setting does not turn on versioning.
+//     Blob-level immutability policies
 //     and legal holds are not supported: Put Blob with
 //     x-ms-immutability-policy-until-date, x-ms-immutability-policy-mode or
 //     x-ms-legal-hold fails with 400 BadRequest.

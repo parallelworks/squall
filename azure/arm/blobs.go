@@ -87,7 +87,7 @@ func settingsOf(acct *resource) blobSettings {
 	props := acct.account.services[blobService.path]
 	versioning, _ := boolean(props, "isVersioningEnabled")
 	return blobSettings{
-		versioning:     versioning,
+		versioning:     versioning || versionLevelWORM(acct.props),
 		keep:           retentionDays(props, "deleteRetentionPolicy"),
 		keepContainers: retentionDays(props, "containerDeleteRetentionPolicy"),
 	}

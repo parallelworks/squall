@@ -267,14 +267,16 @@ func versionLevelWORM(props map[string]any) bool {
 // accountOf returns the storage account holding res, a container, share,
 // queue, table or service of one, or nil. The caller holds s.mu.
 func (s *Server) accountOf(res *resource) *resource {
-	const seg = "/storageaccounts/"
-	k := key(res.id)
-	i := strings.Index(k, seg)
-	if i < 0 {
+	// subscriptions/{s}/resourcegroups/{g}/providers/microsoft.storage/storageaccounts/{name}
+	segs := strings.Split(strings.TrimPrefix(key(res.id), "/"), "/")
+	if len(segs) < 8 || segs[4] != "providers" || segs[5] != "microsoft.storage" || segs[6] != "storageaccounts" {
 		return nil
 	}
-	name, _, _ := strings.Cut(k[i+len(seg):], "/")
-	return s.resources[k[:i+len(seg)+len(name)]]
+	acct := s.resources["/"+strings.Join(segs[:8], "/")]
+	if acct == nil || acct.kind != accountKind {
+		return nil
+	}
+	return acct
 }
 
 // storageParent returns the storage account holding res when res is not
@@ -294,7 +296,8 @@ func (s *Server) storageParent(res *resource) *resource {
 func (s *Server) containerProtected(res *resource, dataPlane bool) *apiError {
 	empty := !s.holdsBlobs(res)
 	if acct := s.accountOf(res); (dataPlane || !empty) && (versionLevelWORM(res.props) || acct != nil && versionLevelWORM(acct.props)) {
-		return immutableDueToPolicy()
+		return newError(http.StatusConflict, "ContainerImmutableStorageWithVersioningEnabled",
+			"This operation is not permitted on a container with version-level immutability enabled.")
 	}
 	if !dataPlane && empty {
 		return nil
@@ -316,10 +319,17 @@ func (s *Server) containerProtected(res *resource, dataPlane bool) *apiError {
 func (s *Server) accountProtected(acct *resource) *apiError {
 	var locked, held, all, versioned []string
 	prefix := key(acct.id) + "/"
+	conts := make([]*resource, 0, len(acct.account.deleted))
 	for k, res := range s.resources {
-		if res.kind != containerKind || !strings.HasPrefix(k, prefix) {
-			continue
+		if res.kind == containerKind && strings.HasPrefix(k, prefix) {
+			conts = append(conts, res)
 		}
+	}
+	// Soft-deleted containers keep their protection, which is inferred.
+	for _, d := range s.deletedContainers(acct) {
+		conts = append(conts, d.res)
+	}
+	for _, res := range conts {
 		all = append(all, res.name)
 		switch {
 		case res.worm.locked():
@@ -330,9 +340,7 @@ func (s *Server) accountProtected(acct *resource) *apiError {
 			versioned = append(versioned, res.name)
 		}
 	}
-	for _, list := range [][]string{locked, held, all, versioned} {
-		slices.Sort(list)
-	}
+	locked, held, all, versioned = sortedNames(locked), sortedNames(held), sortedNames(all), sortedNames(versioned)
 	switch {
 	case len(locked) > 0:
 		return newError(http.StatusConflict, "AccountProtectedFromDeletion",
@@ -346,6 +354,11 @@ func (s *Server) accountProtected(acct *resource) *apiError {
 		return versionLevelProtected(acct, all)
 	}
 	return nil
+}
+
+func sortedNames(names []string) []string {
+	slices.Sort(names)
+	return slices.Compact(names)
 }
 
 func versionLevelProtected(acct *resource, names []string) *apiError {

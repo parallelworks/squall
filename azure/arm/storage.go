@@ -148,11 +148,27 @@ func (s *Server) putAccount(c *call) (*reply, *apiError) {
 				}
 				return nil, newError(http.StatusConflict, "StorageAccountAlreadyTaken", "The storage account named %s is already taken.", res.name)
 			}
+			const vlw = "immutableStorageWithVersioning"
+			created := res.account == nil
+			was, given := res.props[vlw], p.props[vlw] != nil
+			if !created && given && versionLevelWORM(p.props) != versionLevelWORM(res.props) {
+				return nil, newError(http.StatusBadRequest, "PropertyIsImmutable",
+					"Version-level immutability can be enabled only when a storage account is created, and cannot be disabled.")
+			}
 			return func() {
-				if res.account == nil {
+				if created {
 					res.account = &accountState{services: map[string]map[string]any{}}
+					if versionLevelWORM(p.props) {
+						res.account.services[blobService.path] = map[string]any{"isVersioningEnabled": true}
+					}
 				}
 				s.update(res, p)
+				if !created && !given && was != nil {
+					if res.props == nil {
+						res.props = map[string]any{}
+					}
+					res.props[vlw] = was
+				}
 			}, nil
 		},
 	})(c)
@@ -345,6 +361,10 @@ func (s *Server) putService(svc *service) handler {
 		res, err := s.writableAccount(c, svc.kind)
 		if err != nil {
 			return nil, err
+		}
+		if on, ok := boolean(p.props, "isVersioningEnabled"); ok && !on && svc == blobService && versionLevelWORM(res.props) {
+			return nil, newError(http.StatusBadRequest, "InvalidRequestPropertyValue",
+				"Blob versioning cannot be disabled on a storage account with version-level immutability.")
 		}
 		if svc.replace || res.account.services[svc.path] == nil {
 			res.account.services[svc.path] = map[string]any{}
