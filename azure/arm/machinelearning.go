@@ -86,10 +86,23 @@ func renderWorkspace(res *resource) map[string]any {
 	props["creationTime"] = timestamp(res.created)
 	props["discoveryUrl"] = "https://" + res.loc + ".api.azureml.ms/discovery"
 	props["mlFlowTrackingUri"] = "azureml://" + res.loc + ".api.azureml.ms/mlflow/v1.0" + res.id
-	if identity, _ := res.top["identity"].(map[string]any); strings.Contains(str(identity, "type"), "SystemAssigned") {
-		identity = maps.Clone(identity)
-		identity["principalId"] = derivedUUID(res, "principal")
+	if identity := shownIdentity(res); identity != nil {
 		m["identity"] = identity
 	}
 	return m
+}
+
+// shownIdentity is the identity res shows: what the caller sent, with a
+// principalId for a workspace's system-assigned one.
+func shownIdentity(res *resource) any {
+	identity, ok := res.top["identity"]
+	if !ok {
+		return nil
+	}
+	if m, _ := identity.(map[string]any); res.kind == workspaceKind && strings.Contains(str(m, "type"), "SystemAssigned") {
+		m = maps.Clone(m)
+		m["principalId"] = derivedUUID(res, "principal")
+		return m
+	}
+	return identity
 }

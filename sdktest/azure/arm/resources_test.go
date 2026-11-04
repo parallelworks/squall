@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v8"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/privatedns/armprivatedns"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources/v3"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/storage/armstorage"
@@ -85,8 +86,12 @@ func TestListGroupResources(t *testing.T) {
 	if len(expanded) != 1 || *expanded[0].ID != *acct.ID || *expanded[0].ProvisioningState != "Succeeded" || expanded[0].CreatedTime == nil {
 		t.Errorf("expanded and filtered = %v", names(expanded))
 	}
-	if _, err := c.resources.NewListByResourceGroupPager(group, &armresources.ClientListByResourceGroupOptions{Top: new(int32(1))}).NextPage(t.Context()); status(err) != http.StatusBadRequest {
-		t.Errorf("$top = %v", err)
+	byValue := c.groupResources(t, &armresources.ClientListByResourceGroupOptions{Filter: new("tagName eq 'session-id' and tagValue eq 's-1'")})
+	if len(byValue) != 1 || *byValue[0].ID != *acct.ID || byValue[0].Tags != nil {
+		t.Errorf("filtered by tag value, which leaves out tags = %+v", byValue)
+	}
+	if top := c.groupResources(t, &armresources.ClientListByResourceGroupOptions{Top: new(int32(2))}); !slices.Equal(names(top), want[:2]) {
+		t.Errorf("$top = %v", names(top))
 	}
 }
 
@@ -122,5 +127,55 @@ func TestListGroupResourcesWhileDeleting(t *testing.T) {
 	}
 	if got := c.groupResources(t, expand); !slices.Equal(names(got), []string{"Microsoft.Network/networkSecurityGroups keep"}) {
 		t.Fatalf("after the deletion settles = %v", names(got))
+	}
+}
+
+func TestListGroupResourcesShowsTopLevelMembers(t *testing.T) {
+	c := setup(t)
+	c.createGroup(t, group, nil)
+	body := vmBody(c.createNIC(t, group, "nic", nil).ID)
+	body.Plan = &armcompute.Plan{Name: new("server"), Publisher: new("publisher"), Product: new("product")}
+	p, err := c.vms.BeginCreateOrUpdate(t.Context(), group, "vm", body, nil)
+	vm, err := wait(t, p, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wp, err := c.beginWorkspace(t, "ws")
+	ws, err := wait(t, wp, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byType := map[string]*armresources.GenericResourceExpanded{}
+	for _, r := range c.groupResources(t, nil) {
+		byType[*r.Type] = r
+	}
+	if r := byType["Microsoft.Compute/virtualMachines"]; r == nil || r.Plan == nil || *r.Plan.Name != "server" || *r.Plan.Publisher != "publisher" {
+		t.Errorf("VM = %+v", r)
+	}
+	if r := byType["Microsoft.Compute/disks"]; r == nil || r.ManagedBy == nil || *r.ManagedBy != *vm.ID || r.SKU == nil || *r.SKU.Name != "Premium_LRS" {
+		t.Errorf("OS disk = %+v", r)
+	}
+	if r := byType["Microsoft.MachineLearningServices/workspaces"]; r == nil || r.Identity == nil || *r.Identity.Type != "SystemAssigned" ||
+		*r.Identity.PrincipalID != *ws.Identity.PrincipalID {
+		t.Errorf("workspace = %+v", r)
+	}
+	if r := byType["Microsoft.Network/networkInterfaces"]; r == nil || r.ManagedBy != nil || r.Identity != nil || r.Plan != nil {
+		t.Errorf("NIC = %+v", r)
+	}
+}
+
+func TestListGroupResourcesWhileTheGroupDeletes(t *testing.T) {
+	c := setup(t, arm.WithSettleAfter(1))
+	c.createGroup(t, group, nil)
+	c.createNSG(t, "nsg")
+	c.server.Settle()
+	if _, err := c.groups.BeginDelete(t.Context(), group, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.groupResources(t, nil); !slices.Equal(names(got), []string{"Microsoft.Network/networkSecurityGroups nsg"}) {
+		t.Fatalf("a group being deleted = %v", names(got))
+	}
+	if _, err := c.resources.NewListByResourceGroupPager(group, nil).NextPage(t.Context()); code(err) != "ResourceGroupNotFound" {
+		t.Fatalf("after the deletion settles = %v", err)
 	}
 }

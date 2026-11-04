@@ -432,9 +432,11 @@ For Azure Resource Manager:
 - Listing a group's resources lists the types ARM tracks, those with a
   location, nested ones such as VM extensions and virtual network links
   included, ordered by ID; subnets, record sets, containers and other proxy
-  types are left out. It takes a tag `$filter` and an `$expand` of
-  `createdTime` and `provisioningState`; `$top`, a `resourceType` filter and
-  `changedTime` fail with 400.
+  types are left out. It takes a tag `$filter`, and with a `tagValue` clause
+  leaves out each resource's tags, as Azure does; `$top`, returning at most
+  that many with no `nextLink`; and an `$expand` of `createdTime` and
+  `provisioningState`. Other filters (on name, location or `resourceType`, or
+  with `substringof` or `startswith`) and `changedTime` fail with 400.
 - Resource names, subscription IDs, locations and tags are not validated, and
   names match without regard to case. Fields it does not know are rejected
   with `InvalidRequestContent`; values it does not model, such as a Flexible

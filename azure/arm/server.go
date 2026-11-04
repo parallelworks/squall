@@ -108,12 +108,17 @@
 //   - Listing a group's resources lists those of the types ARM tracks, the
 //     ones with a location, nested ones such as VM extensions, gallery image
 //     versions and virtual network links included, ordered by ID. Proxy types
-//     such as subnets, record sets, blob containers, deployments and role
-//     assignments are left out. Entries show id, name, type, location, tags,
-//     and the extendedLocation, kind, plan, sku and managedBy the server
-//     holds; identity is not shown. It takes the tag $filter a group list
-//     takes and an $expand of createdTime and provisioningState; $top, other
-//     filters and changedTime fail with 400.
+//     such as subnets, record sets, blob containers, Cognitive Services
+//     deployments and role assignments are left out. Entries show id, name,
+//     type, location, tags, and the extendedLocation, kind, plan, sku,
+//     identity and managedBy the server holds, as a GET of each shows them:
+//     identity is what the caller sent, with a principalId only for a Machine
+//     Learning workspace's system-assigned one. It takes the tag $filter a
+//     group list takes, and with a tagValue clause leaves out each entry's
+//     tags, as Azure does; $top, which returns at most that many with no
+//     nextLink; and an $expand of createdTime and provisioningState. Other
+//     filters, such as on name, location or resourceType, or with substringof
+//     or startswith, and changedTime fail with 400.
 //   - Resource names, subscription IDs and locations are not validated, and
 //     names match without regard to case. Tags are not validated. Fields the
 //     server only records keep the JSON the caller sent; fields it does not
