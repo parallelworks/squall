@@ -431,21 +431,30 @@
 //     ContainerImmutabilityPolicyLocked or, for an unlocked policy,
 //     BlobImmutableDueToPolicy; those codes are the Blob service's and are
 //     inferred for ARM. Deleting a storage account that has a container with
-//     a locked policy, or with a legal hold and a blob, fails with 409
+//     a locked policy or a legal hold fails with 409
 //     AccountProtectedFromDeletion, "{account} is protected from
 //     deletion.The container(s) {names} have a locked immutability policy.",
 //     as Azure answers; the status, and the message for a legal hold, are
-//     inferred. Soft-deleted containers do not protect their account, as
-//     Microsoft documents container soft delete. Deleting its group fails
-//     with ResourceGroupDeletionBlocked
-//     with that error as the account's detail, and leaves the account whole:
+//     inferred. A legal hold protects the account even on an empty
+//     container, as Microsoft's data protection overview says ("While a
+//     legal hold or a locked time-based retention policy is in effect at
+//     container scope, the storage account is also protected from
+//     deletion"), though its container-level WORM table adds "at least one
+//     blob"; failing closed is inferred. Soft-deleted containers do not
+//     protect their account, which is inferred from the container soft
+//     delete page: "Container soft delete doesn't protect against the
+//     deletion of a storage account, but only against the deletion of
+//     containers in that account." Deleting its group fails with
+//     ResourceGroupDeletionBlocked with that error as the account's detail, and leaves the account whole:
 //     its containers, shares, queues, tables and services. A container with
 //     version-level immutability (immutableStorageWithVersioning on it or
 //     its account) can be deleted only through ARM, once it holds no blob,
 //     and never through the Blob service, with 409
 //     ContainerImmutableStorageWithVersioningEnabled, the code Azure answers
-//     the Blob service with; its message, and the code for ARM, are
-//     inferred. An account cannot be deleted while it has a container with
+//     the Blob service with, and "The storage account {account} container
+//     {container} is protected from deletion due to
+//     ImmutableStorageWithVersioning.", the message Azure shows; the code
+//     for ARM is inferred. An account cannot be deleted while it has a container with
 //     version-level immutability, or has it enabled itself and any container
 //     at all (409 AccountProtectedFromDeletion, "{account} is protected from
 //     deletion.The container(s) {names} have version-level immutability and
@@ -459,7 +468,9 @@
 //     served. Versioning cannot be turned off while the account or any of
 //     its containers has version-level immutability, as Microsoft
 //     documents; that a soft-deleted container's counts is inferred. Both
-//     fail with 400 InvalidRequestPropertyValue, which is inferred.
+//     fail with 400 InvalidRequestPropertyValue, which is inferred; turning
+//     versioning off answers "Conflicting feature 'VersionLevelWorm' is
+//     enabled. Please disable it and retry.", the message Azure shows.
 //     Version-level immutability policies are not modeled: a non-empty
 //     default policy in an account's immutableStorageWithVersioning (an
 //     empty or null one is no policy and is not echoed), and an immutability
@@ -468,7 +479,8 @@
 //     has no enabled leaves the setting as it was. Version-level
 //     immutability with a hierarchical namespace fails with 400, whether the
 //     account asks for both, an update turns on isHnsEnabled for an account
-//     with it, or a container asks for it on an account with isHnsEnabled;
+//     that has it or has a container with it, soft-deleted ones included,
+//     or a container asks for it on an account with isHnsEnabled;
 //     hierarchical namespaces are otherwise not modeled. ARM container gets
 //     and lists, Get Container Properties and List Containers report
 //     version-level immutability, the container's or its account's; that

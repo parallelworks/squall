@@ -169,14 +169,16 @@ func TestDeletesAProtectionAllows(t *testing.T) {
 		rec, body := do(t, s, http.MethodDelete, accountPath, "")
 		wantStatus(t, rec, body, http.StatusOK, "")
 	})
-	t.Run("account with a legal hold on an empty container", func(t *testing.T) {
+	t.Run("a legal hold on an empty container still protects the account", func(t *testing.T) {
 		s := arm.New()
 		newStorage(t, s, "")
 		hold(t, s)
 		rec, body := do(t, s, http.MethodDelete, accountPath, "")
-		wantStatus(t, rec, body, http.StatusOK, "")
+		wantStatus(t, rec, body, http.StatusConflict, "AccountProtectedFromDeletion")
+		rec, body = deleteGroup(t, s, groupPath)
+		wantStatus(t, rec, body, http.StatusConflict, "ResourceGroupDeletionBlocked")
 	})
-	t.Run("account with a legal hold and only uncommitted blocks", func(t *testing.T) {
+	t.Run("a legal hold with only uncommitted blocks still protects the account", func(t *testing.T) {
 		s := arm.New()
 		newStorage(t, s, "")
 		hold(t, s)
@@ -185,7 +187,7 @@ func TestDeletesAProtectionAllows(t *testing.T) {
 			t.Fatalf("blobs = %+v", got)
 		}
 		rec, body := do(t, s, http.MethodDelete, accountPath, "")
-		wantStatus(t, rec, body, http.StatusOK, "")
+		wantStatus(t, rec, body, http.StatusConflict, "AccountProtectedFromDeletion")
 	})
 	t.Run("empty held container through ARM", func(t *testing.T) {
 		s := arm.New()
@@ -848,5 +850,40 @@ func TestFaultsWithoutAMethodSkipUnservedCalls(t *testing.T) {
 	newStorage(t, s, "")
 	if rec := blobDo(t, s, http.MethodHead, "/acct/a", ""); rec.Code != http.StatusBadRequest {
 		t.Fatalf("a refused call under a catch-all fault = %d", rec.Code)
+	}
+}
+
+func TestTurningOnHNSWithVersionLevelContainers(t *testing.T) {
+	const hns = `{"location":"eastus","sku":{"name":"Standard_LRS"},"kind":"StorageV2","properties":{"isHnsEnabled":true}}`
+	worm := accountPath + "/blobServices/default/containers/worm"
+	t.Run("live", func(t *testing.T) {
+		s := arm.New()
+		newStorage(t, s, `{"isVersioningEnabled":true}`)
+		do(t, s, http.MethodPut, worm, `{"properties":{"immutableStorageWithVersioning":{"enabled":true}}}`)
+		rec, body := do(t, s, http.MethodPut, accountPath, hns)
+		wantStatus(t, rec, body, http.StatusBadRequest, "BadRequest")
+	})
+	t.Run("soft-deleted", func(t *testing.T) {
+		s := arm.New()
+		newStorage(t, s, `{"isVersioningEnabled":true,"containerDeleteRetentionPolicy":{"enabled":true,"days":7}}`)
+		do(t, s, http.MethodPut, worm, `{"properties":{"immutableStorageWithVersioning":{"enabled":true}}}`)
+		do(t, s, http.MethodDelete, worm, "")
+		rec, body := do(t, s, http.MethodPut, accountPath, hns)
+		wantStatus(t, rec, body, http.StatusBadRequest, "BadRequest")
+	})
+}
+
+func TestVersionLevelMessagesAsAzureShowsThem(t *testing.T) {
+	s := arm.New()
+	newStorage(t, s, `{"isVersioningEnabled":true}`)
+	worm := accountPath + "/blobServices/default/containers/worm"
+	do(t, s, http.MethodPut, worm, `{"properties":{"immutableStorageWithVersioning":{"enabled":true}}}`)
+	rec := blobDo(t, s, http.MethodDelete, "/acct/worm?restype=container", "")
+	if !strings.Contains(rec.Body.String(), "The storage account acct container worm is protected from deletion due to ImmutableStorageWithVersioning.") {
+		t.Fatalf("data-plane delete = %d %s", rec.Code, rec.Body)
+	}
+	_, body := do(t, s, http.MethodPut, accountPath+"/blobServices/default", `{"properties":{"isVersioningEnabled":false}}`)
+	if msg, _ := body["error"].(map[string]any)["message"].(string); msg != "Conflicting feature 'VersionLevelWorm' is enabled. Please disable it and retry." {
+		t.Fatalf("disabling versioning = %v", body)
 	}
 }

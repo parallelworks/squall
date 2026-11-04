@@ -163,7 +163,7 @@ func (s *Server) putAccount(c *call) (*reply, *apiError) {
 			}
 			_, given := boolean(m, "enabled")
 			was := res.props[vlw]
-			if hns, _ := boolean(p.props, "isHnsEnabled"); hns && (versionLevelWORM(p.props) || !given && versionLevelWORM(res.props)) {
+			if hns, _ := boolean(p.props, "isHnsEnabled"); hns && (versionLevelWORM(p.props) || !created && s.versionLevelAnywhere(res)) {
 				return nil, unsupported("version-level immutability on an account with a hierarchical namespace is not supported")
 			}
 			if !created && given && versionLevelWORM(p.props) != versionLevelWORM(res.props) {
@@ -383,7 +383,7 @@ func (s *Server) putService(svc *service) handler {
 		}
 		if on, ok := boolean(p.props, "isVersioningEnabled"); ok && !on && svc == blobService && s.versionLevelAnywhere(res) {
 			return nil, newError(http.StatusBadRequest, "InvalidRequestPropertyValue",
-				"Blob versioning cannot be disabled while the storage account or one of its containers has version-level immutability.")
+				"Conflicting feature 'VersionLevelWorm' is enabled. Please disable it and retry.")
 		}
 		if svc.replace || res.account.services[svc.path] == nil {
 			res.account.services[svc.path] = map[string]any{}

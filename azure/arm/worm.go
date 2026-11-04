@@ -372,8 +372,13 @@ func (s *Server) storageParent(res *resource) *resource {
 func (s *Server) containerProtected(res *resource, dataPlane bool) *apiError {
 	empty := !s.holdsBlobs(res)
 	if (dataPlane || !empty) && s.containerVersionLevel(res) {
+		acct := s.accountOf(res)
+		name := ""
+		if acct != nil {
+			name = acct.name
+		}
 		return newError(http.StatusConflict, "ContainerImmutableStorageWithVersioningEnabled",
-			"This operation is not permitted on a container with version-level immutability enabled.")
+			"The storage account %s container %s is protected from deletion due to ImmutableStorageWithVersioning.", name, res.name)
 	}
 	if !dataPlane && empty {
 		return nil
@@ -404,7 +409,7 @@ func (s *Server) accountProtected(acct *resource) *apiError {
 		switch {
 		case res.worm.locked():
 			locked = append(locked, res.name)
-		case res.worm.held() && s.holdsBlobs(res):
+		case res.worm.held():
 			held = append(held, res.name)
 		case versionLevelWORM(res.props):
 			versioned = append(versioned, res.name)

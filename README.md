@@ -651,12 +651,16 @@ For Azure Resource Manager:
 - Container legal holds block overwrites, snapshots and deletes of their
   blobs. An immutability policy blocks deletes for its days, and overwrites
   and snapshots for as long as it exists. Deleting an account with a
-  container under a locked policy, or a legal hold and a blob, fails with
-  409 `AccountProtectedFromDeletion`, as Azure answers; uncommitted blocks
-  alone are not a blob, here or in `Blobs()`. A blocked group delete leaves
-  the account whole, shares, queues and tables included. Soft-deleted
-  containers do not protect their account, as Microsoft documents, while
-  soft-deleted blobs count as data for holds, policies and version-level
+  container under a locked policy or a legal hold fails with 409
+  `AccountProtectedFromDeletion`, as Azure answers. A legal hold protects
+  the account even on an empty container, as Microsoft's data protection
+  overview says, though its container-level WORM table adds "at least one
+  blob" (failing closed is inferred). Uncommitted blocks alone are not a
+  blob, here or in `Blobs()`. A blocked group delete leaves the account
+  whole, shares, queues and tables included. Soft-deleted containers do
+  not protect their account (inferred from the soft delete page:
+  "Container soft delete doesn't protect against the deletion of a storage
+  account"), while soft-deleted blobs count as data for holds, policies and version-level
   immutability (inferred). A container with version-level immutability can be deleted
   only through ARM once empty (`ContainerImmutableStorageWithVersioningEnabled`
   otherwise). An account with it enabled cannot be deleted while any
