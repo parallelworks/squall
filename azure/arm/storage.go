@@ -391,8 +391,25 @@ func (s *Server) putService(svc *service) handler {
 		if res.account.services[svc.path] == nil {
 			res.account.services[svc.path] = map[string]any{}
 		}
-		maps.Copy(res.account.services[svc.path], p.props)
+		if svc == fileService {
+			mergeProps(res.account.services[svc.path], p.props)
+		} else {
+			maps.Copy(res.account.services[svc.path], p.props)
+		}
 		return ok200(svc.body(c, res)), nil
+	}
+}
+
+// mergeProps merges src into dst: objects merge member by member, and arrays and other values replace.
+func mergeProps(dst, src map[string]any) {
+	for k, v := range src {
+		old, ok := dst[k].(map[string]any)
+		if m, isMap := v.(map[string]any); isMap && ok {
+			merged := maps.Clone(old)
+			mergeProps(merged, m)
+			v = merged
+		}
+		dst[k] = v
 	}
 }
 

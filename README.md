@@ -694,8 +694,10 @@ For Azure Resource Manager:
   service's `shareDeleteRetentionPolicy` is on, which it is for 7 days on a
   new account, as in Azure: disable it to delete shares for good. Setting
   file service properties keeps the ones the call leaves out, as Microsoft
-  documents for the data plane; a property given, such as
-  `protocolSettings`, replaces the old one whole (inferred). Restore
+  documents for the data plane, and merges within objects, so setting only
+  SMB versions keeps multichannel (inferred from the
+  `Update-AzStorageFileServiceProperty` examples); arrays and values
+  replace, so `corsRules: []` clears the rules. Restore
   brings a deleted share back. Snapshot times have 100ns resolution, as
   Azure's do. Leases are not modeled. The create's 201 with `snapshotTime`,
   a missing share's 404 there, a snapshot's usage, the error codes (the

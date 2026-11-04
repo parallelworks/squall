@@ -495,3 +495,38 @@ func TestFileServiceKeepsSettingsLeftOut(t *testing.T) {
 		t.Fatalf("a share deleted after partial file service updates = %v", names)
 	}
 }
+
+func TestFileServiceMergesProtocolSettings(t *testing.T) {
+	c := setup(t)
+	c.createGroup(t, group, nil)
+	c.createAccount(t, group, "files1")
+	set := func(p armstorage.FileServicePropertiesProperties) {
+		t.Helper()
+		if _, err := c.files.SetServiceProperties(t.Context(), group, "files1", armstorage.FileServiceProperties{FileServiceProperties: &p}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	set(armstorage.FileServicePropertiesProperties{ProtocolSettings: &armstorage.ProtocolSettings{
+		Smb: &armstorage.SmbSetting{Multichannel: &armstorage.Multichannel{Enabled: new(true)}},
+	}})
+	set(armstorage.FileServicePropertiesProperties{ProtocolSettings: &armstorage.ProtocolSettings{
+		Smb: &armstorage.SmbSetting{Versions: new("SMB3.1.1")},
+	}})
+	got, err := c.files.GetServiceProperties(t.Context(), group, "files1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps := got.FileServiceProperties.FileServiceProperties.ProtocolSettings
+	if *ps.Smb.Versions != "SMB3.1.1" || ps.Smb.Multichannel == nil || !*ps.Smb.Multichannel.Enabled {
+		t.Fatalf("protocol settings after an SMB versions update = %s", dump(ps))
+	}
+	cors := &armstorage.CorsRules{CorsRules: []*armstorage.CorsRule{{
+		AllowedHeaders: []*string{new("*")}, AllowedOrigins: []*string{new("*")}, ExposedHeaders: []*string{new("*")},
+		AllowedMethods: []*armstorage.CorsRuleAllowedMethodsItem{new(armstorage.CorsRuleAllowedMethodsItemGET)}, MaxAgeInSeconds: new(int32(60)),
+	}}}
+	set(armstorage.FileServicePropertiesProperties{Cors: cors})
+	set(armstorage.FileServicePropertiesProperties{Cors: &armstorage.CorsRules{CorsRules: []*armstorage.CorsRule{}}})
+	if got, err := c.files.GetServiceProperties(t.Context(), group, "files1", nil); err != nil || len(got.FileServiceProperties.FileServiceProperties.Cors.CorsRules) != 0 {
+		t.Fatalf("CORS once cleared = %s, %v", dump(got), err)
+	}
+}

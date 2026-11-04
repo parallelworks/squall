@@ -382,9 +382,14 @@
 //     ones the call leaves out, inferred from the data plane's Set Blob
 //     Service Properties and Set File Service Properties ("If you omit a
 //     root element, the existing settings for the service for that
-//     functionality are preserved"). Each property the call gives replaces
-//     the one kept whole, so protocolSettings.smb replaces nfs too, which is
-//     inferred. Account keys are derived from the account and never change.
+//     functionality are preserved"). File service properties also merge
+//     within objects, so a PUT of protocolSettings.smb.versions keeps
+//     smb.multichannel and nfs, while arrays and values replace, so
+//     corsRules [] clears the rules and enabled false disables a policy;
+//     the merge within objects is inferred from Microsoft's
+//     Update-AzStorageFileServiceProperty examples 2 to 4, whose output
+//     keeps multichannel enabled after updates that leave it out. Account
+//     keys are derived from the account and never change.
 //     File data is not served: [Server.SetShareUsage] sets the
 //     shareUsageBytes a share shows with $expand=stats. Queues show an
 //     approximateMessageCount of 0. A PUT of a queue or table that exists
@@ -427,43 +432,41 @@
 //     a name prefix, as documented; other $expand values, on a list, a GET
 //     (which takes stats) or a create, answer 400. [Server.SnapshotShare]
 //     takes a snapshot at a given time.
-//   - A DELETE of a share deletes its snapshots too unless $include is
-//     none, as Azure documents for ARM, where it fails with 409
-//     ShareHasSnapshots while the share has any (the Files code and message,
-//     inferred for ARM); leases are not modeled, so leased-snapshots
-//     deletes as snapshots does, and other values answer 400. A DELETE with
-//     x-ms-snapshot deletes that snapshot only, and answers 204 when there
-//     is none, as for a missing share (inferred). A new storage account's
-//     file service has shareDeleteRetentionPolicy enabled for 7 days, as
-//     Microsoft documents ("New storage accounts have soft delete enabled
-//     by default", and "Soft delete for Azure file shares is now on by
-//     default for new storage accounts", which tells anyone who automates
-//     creating accounts and deleting shares to disable it explicitly);
-//     setting the file service's properties without the policy keeps it.
-//     While the policy is enabled, deleting
-//     a share keeps it, with its snapshots, as deleted for that many days (7
-//     when days is not set, Microsoft's documented default); one deleted
-//     while the policy was off is gone. A share is kept for the days set
-//     when it was deleted, and one deleted before the policy was turned off
-//     can still be restored, as Microsoft documents ("Shares deleted before
-//     the retention period update expire based on the retention period
+//   - A DELETE of a share deletes its snapshots too unless $include is none,
+//     as Azure documents for ARM, where it fails with 409 ShareHasSnapshots
+//     while the share has any (the Files code and message, inferred for ARM);
+//     leases are not modeled, so leased-snapshots deletes as snapshots does,
+//     and other values answer 400. A DELETE with x-ms-snapshot deletes that
+//     snapshot only, and answers 204 when there is none, as for a missing
+//     share (inferred). A new storage account's file service has
+//     shareDeleteRetentionPolicy enabled for 7 days, as Microsoft documents
+//     ("New storage accounts have soft delete enabled by default", and "Soft
+//     delete for Azure file shares is now on by default for new storage
+//     accounts", which tells anyone who automates creating accounts and
+//     deleting shares to disable it explicitly); setting the file service's
+//     properties without the policy keeps it. While the policy is enabled,
+//     deleting a share keeps it, with its snapshots, as deleted for that many
+//     days (7 when days is not set, Microsoft's documented default); one
+//     deleted while the policy was off is gone. A share is kept for the days
+//     set when it was deleted, and one deleted before the policy was turned
+//     off can still be restored, as Microsoft documents ("Shares deleted
+//     before the retention period update expire based on the retention period
 //     that was configured when that data was deleted", "If you disable soft
 //     delete, any file shares deleted before disabling soft delete can still
 //     be undeleted"). A list with $expand=deleted shows each with deleted,
 //     deletedTime, remainingRetentionDays and version, and an ID of the
-//     share's ID, an underscore and the version, as the spec's example
-//     does; its snapshots are not listed, which is inferred. A share can be
-//     created under the name of a deleted one (inferred). Restore takes the
-//     deleted share back, snapshots included, as Microsoft documents; it
-//     fails with 409 ShareAlreadyExists while a share has its name and 404
-//     ShareNotFound for a version that is not kept (both inferred), and
-//     restoring under another name answers 400 as not supported.
-//     [Server.SoftDeleteShare] deletes a share as if at a given time, kept
-//     for a given number of days. Snapshots do not protect their account,
-//     as Microsoft documents ("Share snapshots don't prevent accidental
-//     deletion of a file share or storage account"), nor do soft-deleted
-//     shares, which is inferred, as for containers; deleting the account or
-//     its group deletes both.
+//     share's ID, an underscore and the version, as the spec's example does;
+//     its snapshots are not listed, which is inferred. A share can be created
+//     under the name of a deleted one (inferred). Restore takes the deleted
+//     share back, snapshots included, as Microsoft documents; it fails with
+//     409 ShareAlreadyExists while a share has its name and 404 ShareNotFound
+//     for a version that is not kept (both inferred), and restoring under
+//     another name answers 400 as not supported. [Server.SoftDeleteShare]
+//     deletes a share as if at a given time, kept for a given number of days.
+//     Snapshots do not protect their account, as Microsoft documents ("Share
+//     snapshots don't prevent accidental deletion of a file share or storage
+//     account"), nor do soft-deleted shares, which is inferred, as for
+//     containers; deleting the account or its group deletes both.
 //   - A legal hold takes 1 or more tags of 3 to 23 letters and digits,
 //     lower-cased as Azure does, so tags that differ only in case count
 //     once, and a container holds at most 10, as Microsoft documents; the

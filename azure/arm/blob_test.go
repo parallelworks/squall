@@ -293,3 +293,24 @@ func TestQueueAndTableShapes(t *testing.T) {
 		}
 	}
 }
+
+func TestFileServiceKeepsNFSAcrossAnSMBUpdate(t *testing.T) {
+	s := arm.New()
+	newStorage(t, s, "")
+	path := accountPath + "/fileServices/default"
+	for _, body := range []string{
+		`{"properties":{"protocolSettings":{"nfs":{"encryptionInTransit":{"required":true}}}}}`,
+		`{"properties":{"protocolSettings":{"smb":{"versions":"SMB3.1.1"}}}}`,
+	} {
+		if rec, got := do(t, s, http.MethodPut, path, body); rec.Code != http.StatusOK {
+			t.Fatalf("PUT %s = %d %v", body, rec.Code, got)
+		}
+	}
+	_, got := do(t, s, http.MethodGet, path, "")
+	ps, _ := got["properties"].(map[string]any)["protocolSettings"].(map[string]any)
+	nfs, _ := ps["nfs"].(map[string]any)
+	smb, _ := ps["smb"].(map[string]any)
+	if eit, _ := nfs["encryptionInTransit"].(map[string]any); eit["required"] != true || smb["versions"] != "SMB3.1.1" {
+		t.Fatalf("protocol settings = %v", ps)
+	}
+}
