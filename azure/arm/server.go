@@ -598,9 +598,10 @@
 //     mgsAddress, with a mount command, once created; until then they are
 //     empty and its health is Transitioning. Its throughput is its capacity
 //     times the MB/s per TiB its SKU names, such as 250 for
-//     AMLFS-Durable-Premium-250. An update answers 200 and shows Updating,
-//     where Azure answers 201 and shows Creating. A subnet check answers 200
-//     for any subnet.
+//     AMLFS-Durable-Premium-250. Its systemData has createdAt and
+//     lastModifiedAt, from the server's clock, but not who made the change.
+//     An update answers 200 and shows Updating, where Azure answers 201 and
+//     shows Creating. A subnet check answers 200 for any subnet.
 //   - A Cognitive Services account change in progress answers with an
 //     Azure-AsyncOperation URL under
 //     Microsoft.CognitiveServices/locations/{location}/operationResults, whose

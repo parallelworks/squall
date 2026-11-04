@@ -4,6 +4,7 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/storagecache/armstoragecache/v3"
@@ -83,6 +84,42 @@ func TestManagedLustre(t *testing.T) {
 	if _, err := c.lustre.Get(t.Context(), group, "fs", nil); code(err) != "ResourceNotFound" {
 		t.Fatalf("a deleted file system = %v", err)
 	}
+}
+
+func TestManagedLustreSystemData(t *testing.T) {
+	created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	now := created
+	c := setup(t, arm.WithClock(func() time.Time { return now }))
+	c.createGroup(t, group, nil)
+	check := func(fs *armstoragecache.AmlFilesystem, modified time.Time) {
+		t.Helper()
+		if sd := fs.SystemData; sd == nil || sd.CreatedAt == nil || !sd.CreatedAt.Equal(created) ||
+			sd.LastModifiedAt == nil || !sd.LastModifiedAt.Equal(modified) {
+			t.Fatalf("systemData = %+v, want created at %v and last modified at %v", sd, created, modified)
+		}
+	}
+	p, err := c.beginFilesystem(t, "fs")
+	res, err := wait(t, p, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(&res.AmlFilesystem, created)
+
+	now = created.Add(time.Hour)
+	p, err = c.beginFilesystem(t, "fs")
+	if _, err = wait(t, p, err); err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.lustre.Get(t.Context(), group, "fs", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(&got.AmlFilesystem, now)
+	page, err := c.lustre.NewListByResourceGroupPager(group, nil).NextPage(t.Context())
+	if err != nil || len(page.Value) != 1 {
+		t.Fatalf("listed file systems = %+v, %v", page.Value, err)
+	}
+	check(page.Value[0], now)
 }
 
 func TestManagedLustrePollingNeedsAscOperations(t *testing.T) {

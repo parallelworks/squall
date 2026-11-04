@@ -62,6 +62,8 @@ type resource struct {
 	vm      *vmState
 	scale   *scaleSet
 	account *accountState
+	// modified is when its last create or update was accepted.
+	modified time.Time
 	// blobs are a blob container's blobs, by name.
 	blobs map[string]*blobName
 	// worm is a blob container's legal hold and immutability policy.
@@ -286,6 +288,7 @@ func (s *Server) newResource(c *call, k *kind, id string, p *parsed) *resource {
 		kind: k, id: id, name: id[strings.LastIndex(id, "/")+1:], sub: c.val("sub"), group: c.val("rg"),
 		loc: p.location, tags: p.tags, top: p.top, props: p.props, state: stateSucceeded, created: s.now(), guid: s.newUUID(),
 	}
+	res.modified = res.created
 	s.touch(res)
 	return res
 }
@@ -320,6 +323,12 @@ func envelope(res *resource) (map[string]any, map[string]any) {
 	props["provisioningState"] = res.state
 	m["properties"] = props
 	return m, props
+}
+
+// systemData renders the creation and last modification times ARM reports
+// for res.
+func systemData(res *resource) map[string]any {
+	return map[string]any{"createdAt": timestamp(res.created), "lastModifiedAt": timestamp(res.modified)}
 }
 
 // change starts an operation on res that shows it in state until it

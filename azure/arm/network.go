@@ -184,6 +184,9 @@ func (s *Server) put(spec putSpec) handler {
 				}
 			}
 		}
+		if existing != nil {
+			res.modified = s.now()
+		}
 		render := func() []byte { return encode(spec.render(res)) }
 		answer := func(op *operation, render func() []byte) *reply {
 			if spec.bodyPolled {
