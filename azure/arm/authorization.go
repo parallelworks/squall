@@ -47,7 +47,6 @@ func (s *Server) putRoleAssignment(c *call) (*reply, *apiError) {
 				"Tenant ID, application ID, principal ID, and scope are not allowed to be updated.")
 		}
 		s.update(existing, p)
-		existing.modified = s.now()
 		return ok200(renderRoleAssignment(existing)), nil
 	}
 	gk := groupKey(c)
@@ -93,6 +92,6 @@ func renderRoleAssignment(res *resource) map[string]any {
 	m, props := envelope(res)
 	delete(props, "provisioningState")
 	props["scope"] = "/subscriptions/" + res.sub + "/resourceGroups/" + res.group
-	props["createdOn"], props["updatedOn"] = timestamp(res.created), timestamp(res.created)
+	props["createdOn"], props["updatedOn"] = timestamp(res.created), timestamp(res.modified)
 	return m
 }

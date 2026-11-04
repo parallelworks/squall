@@ -377,9 +377,6 @@ func (s *Server) putScaleSet(c *call) (*reply, *apiError) {
 	}
 	sc.nics, sc.prefix, sc.profile, sc.userData = b.nics, cmp.Or(sc.prefix, b.prefix, c.val("name")), b.profile, b.userData
 	s.update(res, b.parsed)
-	if status == http.StatusOK {
-		res.modified = s.now()
-	}
 	s.resources[key(id)] = res
 	return s.rescale(c, res, capacity, status, putState(status)), nil
 }

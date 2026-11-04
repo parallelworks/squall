@@ -303,6 +303,7 @@ func (s *Server) touch(res *resource) {
 // update records p as the new body of res. The caller holds s.mu.
 func (s *Server) update(res *resource, p *parsed) {
 	res.tags, res.top, res.props = p.tags, p.top, p.props
+	res.modified = s.now()
 	s.touch(res)
 }
 
@@ -325,10 +326,13 @@ func envelope(res *resource) (map[string]any, map[string]any) {
 	return m, props
 }
 
-// systemData renders the creation and last modification times ARM reports
-// for res.
+// systemData renders who created and last modified res, and when, naming
+// the caller as refusals do.
 func systemData(res *resource) map[string]any {
-	return map[string]any{"createdAt": timestamp(res.created), "lastModifiedAt": timestamp(res.modified)}
+	return map[string]any{
+		"createdBy": clientID, "createdByType": "Application", "createdAt": timestamp(res.created),
+		"lastModifiedBy": clientID, "lastModifiedByType": "Application", "lastModifiedAt": timestamp(res.modified),
+	}
 }
 
 // change starts an operation on res that shows it in state until it

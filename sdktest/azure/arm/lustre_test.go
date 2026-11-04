@@ -99,8 +99,11 @@ func TestManagedLustreSystemData(t *testing.T) {
 	c.createGroup(t, group, nil)
 	check := func(fs *armstoragecache.AmlFilesystem, modified time.Time) {
 		t.Helper()
+		const caller = "00000000-0000-0000-0000-000000000000"
+		app := armstoragecache.CreatedByTypeApplication
 		if sd := fs.SystemData; sd == nil || sd.CreatedAt == nil || !sd.CreatedAt.Equal(created) ||
-			sd.LastModifiedAt == nil || !sd.LastModifiedAt.Equal(modified) {
+			sd.LastModifiedAt == nil || !sd.LastModifiedAt.Equal(modified) ||
+			*sd.CreatedBy != caller || *sd.CreatedByType != app || *sd.LastModifiedBy != caller || *sd.LastModifiedByType != app {
 			t.Fatalf("systemData = %+v, want created at %v and last modified at %v", sd, created, modified)
 		}
 	}

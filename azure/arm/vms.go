@@ -227,9 +227,6 @@ func (s *Server) putVM(c *call) (*reply, *apiError) {
 		return accepted(c, op, status, status, false, func() []byte { return withState(res, putState(status), render) }), nil
 	}
 	s.applyVM(res, b)
-	if status == http.StatusOK {
-		res.modified = s.now()
-	}
 	s.resources[key(id)] = res
 	op := s.change(c, res, paths, 0, putState(status), func() {
 		if res.vm.power == powerStarting {

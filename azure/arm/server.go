@@ -598,8 +598,9 @@
 //     mgsAddress, with a mount command, once created; until then they are
 //     empty and its health is Transitioning. Its throughput is its capacity
 //     times the MB/s per TiB its SKU names, such as 250 for
-//     AMLFS-Durable-Premium-250. Its systemData has createdAt and
-//     lastModifiedAt, from the server's clock, but not who made the change.
+//     AMLFS-Durable-Premium-250. Its systemData takes its times from the
+//     server's clock and names every caller as the application
+//     00000000-0000-0000-0000-000000000000, as refusals do.
 //     An update answers 200 and shows Updating, where Azure answers 201 and
 //     shows Creating. A subnet check answers 200 for any subnet.
 //   - A Cognitive Services account change in progress answers with an

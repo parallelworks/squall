@@ -68,7 +68,7 @@ func (s *Server) createContainerData(c *blobCall) (*blobReply, *apiError) {
 	s.resources[key(res.id)] = res
 	h := http.Header{}
 	h.Set("ETag", quote(res.etag))
-	h.Set("Last-Modified", res.created.UTC().Format(http.TimeFormat))
+	h.Set("Last-Modified", res.modified.UTC().Format(http.TimeFormat))
 	return &blobReply{status: http.StatusCreated, header: h}, nil
 }
 
@@ -95,7 +95,7 @@ func (s *Server) containerProperties(c *blobCall) (*blobReply, *apiError) {
 	}
 	h := http.Header{}
 	h.Set("ETag", quote(cont.etag))
-	h.Set("Last-Modified", cont.created.UTC().Format(http.TimeFormat))
+	h.Set("Last-Modified", cont.modified.UTC().Format(http.TimeFormat))
 	h.Set("x-ms-lease-status", "unlocked")
 	h.Set("x-ms-lease-state", "available")
 	h.Set("x-ms-has-immutability-policy", strconv.FormatBool(cont.worm != nil && cont.worm.policy != nil))
@@ -149,7 +149,7 @@ type containerXML struct {
 func (s *Server) renderContainerXML(res *resource, metadata bool) containerXML {
 	var x containerXML
 	x.Name = res.name
-	x.Properties.LastModified = res.created.UTC().Format(http.TimeFormat)
+	x.Properties.LastModified = res.modified.UTC().Format(http.TimeFormat)
 	x.Properties.ETag = quote(res.etag)
 	x.Properties.LeaseStatus, x.Properties.LeaseState = "unlocked", "available"
 	x.Properties.DefaultEncryptionScope = "$account-encryption-key"

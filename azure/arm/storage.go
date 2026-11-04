@@ -508,7 +508,6 @@ func (s *Server) putChild(ch *child) handler {
 				return nil, ch.exists()
 			}
 			s.update(existing, p)
-			existing.modified = s.now()
 			return ok200(s.renderChild(ch, existing)), nil
 		}
 		res := s.newResource(c, ch.kind, id, p)
@@ -618,7 +617,7 @@ func renderLeased(res *resource) (map[string]any, map[string]any) {
 	m, props := envelope(res)
 	delete(props, "provisioningState")
 	props["deleted"] = false
-	props["lastModifiedTime"] = timestamp(res.created)
+	props["lastModifiedTime"] = timestamp(res.modified)
 	props["leaseState"] = "Available"
 	props["leaseStatus"] = "Unlocked"
 	props["remainingRetentionDays"] = 0

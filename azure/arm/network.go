@@ -207,9 +207,6 @@ func (s *Server) put(spec putSpec) handler {
 			return answer(op, func() []byte { return withState(res, state, render) }), nil
 		}
 		commit()
-		if existing != nil {
-			res.modified = s.now()
-		}
 		s.resources[key(id)] = res
 		if spec.sync {
 			return &reply{status: status, body: render()}, nil

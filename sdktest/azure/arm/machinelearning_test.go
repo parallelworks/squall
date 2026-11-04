@@ -4,6 +4,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/applicationinsights/armapplicationinsights"
@@ -170,6 +171,26 @@ func roleAssignment(principal, role string) armauthorization.RoleAssignmentCreat
 		PrincipalType:    new(armauthorization.PrincipalTypeUser),
 		RoleDefinitionID: new("/subscriptions/" + subscription + "/providers/Microsoft.Authorization/roleDefinitions/" + role),
 	}}
+}
+
+func TestRoleAssignmentUpdatedOn(t *testing.T) {
+	const name = "22222222-0000-0000-0000-000000000003"
+	created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	now := created
+	c := setup(t, arm.WithClock(func() time.Time { return now }))
+	c.createGroup(t, group, nil)
+	scope := "/subscriptions/" + subscription + "/resourceGroups/" + group
+	body := roleAssignment("11111111-0000-0000-0000-000000000001", "acdd72a7-3385-48ef-bd42-f606fba81ae7")
+	res, err := c.roles.Create(t.Context(), scope, name, body, nil)
+	if err != nil || !res.Properties.CreatedOn.Equal(created) || !res.Properties.UpdatedOn.Equal(created) {
+		t.Fatalf("a new role assignment = %+v, %v", res.Properties, err)
+	}
+	now = created.Add(time.Hour)
+	body.Properties.Description = new("readers")
+	got, err := c.roles.Create(t.Context(), scope, name, body, nil)
+	if err != nil || !got.Properties.CreatedOn.Equal(created) || !got.Properties.UpdatedOn.Equal(now) {
+		t.Fatalf("an updated role assignment = %+v, %v", got.Properties, err)
+	}
 }
 
 func TestRoleAssignment(t *testing.T) {
