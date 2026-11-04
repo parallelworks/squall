@@ -4,6 +4,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/applicationinsights/armapplicationinsights"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/operationalinsights/armoperationalinsights/v3"
@@ -37,6 +38,23 @@ func (c *clients) deleteLogWorkspace(t *testing.T, name string, force bool) {
 	}
 	if _, err := p.PollUntilDone(t.Context(), nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestLogAnalyticsWorkspaceModifiedDate(t *testing.T) {
+	created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	now := created
+	c := setup(t, arm.WithClock(func() time.Time { return now }))
+	c.createGroup(t, group, nil)
+	ws := c.createLogWorkspace(t, "law")
+	if !ws.Properties.CreatedDate.Equal(created) || !ws.Properties.ModifiedDate.Equal(created) {
+		t.Fatalf("a new workspace = %+v", ws.Properties)
+	}
+	now = created.Add(time.Hour)
+	c.createLogWorkspace(t, "law")
+	got, err := c.logs.Get(t.Context(), group, "law", nil)
+	if err != nil || !got.Properties.CreatedDate.Equal(created) || !got.Properties.ModifiedDate.Equal(now) {
+		t.Fatalf("an updated workspace = %+v, %v", got.Properties, err)
 	}
 }
 

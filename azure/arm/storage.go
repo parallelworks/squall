@@ -617,7 +617,7 @@ func renderLeased(res *resource) (map[string]any, map[string]any) {
 	m, props := envelope(res)
 	delete(props, "provisioningState")
 	props["deleted"] = false
-	props["lastModifiedTime"] = timestamp(res.created)
+	props["lastModifiedTime"] = timestamp(res.modified)
 	props["leaseState"] = "Available"
 	props["leaseStatus"] = "Unlocked"
 	props["remainingRetentionDays"] = 0

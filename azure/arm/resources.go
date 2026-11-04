@@ -62,6 +62,8 @@ type resource struct {
 	vm      *vmState
 	scale   *scaleSet
 	account *accountState
+	// modified is when it was created or last changed by a write that took effect.
+	modified time.Time
 	// blobs are a blob container's blobs, by name.
 	blobs map[string]*blobName
 	// worm is a blob container's legal hold and immutability policy.
@@ -286,6 +288,7 @@ func (s *Server) newResource(c *call, k *kind, id string, p *parsed) *resource {
 		kind: k, id: id, name: id[strings.LastIndex(id, "/")+1:], sub: c.val("sub"), group: c.val("rg"),
 		loc: p.location, tags: p.tags, top: p.top, props: p.props, state: stateSucceeded, created: s.now(), guid: s.newUUID(),
 	}
+	res.modified = res.created
 	s.touch(res)
 	return res
 }
@@ -300,6 +303,10 @@ func (s *Server) touch(res *resource) {
 // update records p as the new body of res. The caller holds s.mu.
 func (s *Server) update(res *resource, p *parsed) {
 	res.tags, res.top, res.props = p.tags, p.top, p.props
+	// A resource not stored yet is being created and keeps its creation time.
+	if s.resources[key(res.id)] == res {
+		res.modified = s.now()
+	}
 	s.touch(res)
 }
 
@@ -320,6 +327,14 @@ func envelope(res *resource) (map[string]any, map[string]any) {
 	props["provisioningState"] = res.state
 	m["properties"] = props
 	return m, props
+}
+
+// systemData names every caller as clientID, as the server does not read its token.
+func systemData(res *resource) map[string]any {
+	return map[string]any{
+		"createdBy": clientID, "createdByType": "Application", "createdAt": timestamp(res.created),
+		"lastModifiedBy": clientID, "lastModifiedByType": "Application", "lastModifiedAt": timestamp(res.modified),
+	}
 }
 
 // change starts an operation on res that shows it in state until it

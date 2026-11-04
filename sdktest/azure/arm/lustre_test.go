@@ -1,15 +1,18 @@
 package arm_test
 
 import (
+	"net/http"
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/storagecache/armstoragecache/v3"
 
 	"github.com/parallelworks/squall/access"
 	"github.com/parallelworks/squall/azure/arm"
+	"github.com/parallelworks/squall/fault"
 )
 
 func (c *clients) beginFilesystem(t *testing.T, name string) (*runtime.Poller[armstoragecache.AmlFilesystemsClientCreateOrUpdateResponse], error) {
@@ -82,6 +85,74 @@ func TestManagedLustre(t *testing.T) {
 	}
 	if _, err := c.lustre.Get(t.Context(), group, "fs", nil); code(err) != "ResourceNotFound" {
 		t.Fatalf("a deleted file system = %v", err)
+	}
+}
+
+func TestManagedLustreSystemData(t *testing.T) {
+	created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	now := created
+	faults := fault.New().Add(fault.Rule{
+		Method: "Microsoft.StorageCache/amlFilesystems/write", Nth: 3,
+		Fault: fault.Fault{Mode: fault.ModeFailOperation, Status: http.StatusConflict, Reason: "Conflict"},
+	})
+	c := setup(t, arm.WithClock(func() time.Time { return now }), arm.WithFaults(faults))
+	c.createGroup(t, group, nil)
+	check := func(fs *armstoragecache.AmlFilesystem, modified time.Time) {
+		t.Helper()
+		const caller = "00000000-0000-0000-0000-000000000000"
+		app := armstoragecache.CreatedByTypeApplication
+		if sd := fs.SystemData; sd == nil || sd.CreatedAt == nil || !sd.CreatedAt.Equal(created) ||
+			sd.LastModifiedAt == nil || !sd.LastModifiedAt.Equal(modified) ||
+			sd.CreatedBy == nil || *sd.CreatedBy != caller || sd.CreatedByType == nil || *sd.CreatedByType != app ||
+			sd.LastModifiedBy == nil || *sd.LastModifiedBy != caller || sd.LastModifiedByType == nil || *sd.LastModifiedByType != app {
+			t.Fatalf("systemData = %+v, want created at %v and last modified at %v", sd, created, modified)
+		}
+	}
+	p, err := c.beginFilesystem(t, "fs")
+	res, err := wait(t, p, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(&res.AmlFilesystem, created)
+
+	now = created.Add(time.Hour)
+	p, err = c.beginFilesystem(t, "fs")
+	if _, err = wait(t, p, err); err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.lustre.Get(t.Context(), group, "fs", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(&got.AmlFilesystem, now)
+	page, err := c.lustre.NewListByResourceGroupPager(group, nil).NextPage(t.Context())
+	if err != nil || len(page.Value) != 1 {
+		t.Fatalf("listed file systems = %+v, %v", page.Value, err)
+	}
+	check(page.Value[0], now)
+
+	updated := now
+	now = updated.Add(time.Hour)
+	p, err = c.beginFilesystem(t, "fs")
+	if _, err = wait(t, p, err); code(err) != "Conflict" {
+		t.Fatalf("a failed update = %v", err)
+	}
+	if got, err = c.lustre.Get(t.Context(), group, "fs", nil); err != nil {
+		t.Fatal(err)
+	}
+	check(&got.AmlFilesystem, updated)
+}
+
+func TestManagedLustreCreatedIsLastModified(t *testing.T) {
+	c := setup(t)
+	c.createGroup(t, group, nil)
+	p, err := c.beginFilesystem(t, "fs")
+	res, err := wait(t, p, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sd := res.SystemData; sd == nil || sd.CreatedAt == nil || sd.LastModifiedAt == nil || !sd.CreatedAt.Equal(*sd.LastModifiedAt) {
+		t.Fatalf("systemData of a new file system = %+v", sd)
 	}
 }
 

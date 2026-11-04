@@ -92,6 +92,6 @@ func renderRoleAssignment(res *resource) map[string]any {
 	m, props := envelope(res)
 	delete(props, "provisioningState")
 	props["scope"] = "/subscriptions/" + res.sub + "/resourceGroups/" + res.group
-	props["createdOn"], props["updatedOn"] = timestamp(res.created), timestamp(res.created)
+	props["createdOn"], props["updatedOn"] = timestamp(res.created), timestamp(res.modified)
 	return m
 }

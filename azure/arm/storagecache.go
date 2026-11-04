@@ -108,9 +108,11 @@ func (s *Server) deleteAmlfs(c *call) (*reply, *apiError) {
 }
 
 // renderAmlfs adds what Azure reports for a file system: its health, its
-// throughput, which its SKU names per TiB, and, once created, how to mount it.
+// throughput, which its SKU names per TiB, when it was created and last
+// modified, and, once created, how to mount it.
 func renderAmlfs(res *resource) map[string]any {
 	m, props := envelope(res)
+	m["systemData"] = systemData(res)
 	props["health"] = map[string]any{"state": "Available", "statusDescription": "The cluster is available"}
 	if res.state != stateSucceeded {
 		props["health"] = map[string]any{"state": "Transitioning", "statusDescription": "The cluster is in the process of changing states"}

@@ -66,6 +66,7 @@ func (s *Server) preparePE(res *resource, p *parsed) (func(), *apiError) {
 			top: map[string]any{}, props: map[string]any{"privateEndpoint": ref(res.id)},
 			state: stateSucceeded, created: s.now(), guid: s.newUUID(),
 		}
+		nic.modified = nic.created
 		s.touch(nic)
 		ic := &ipConfig{name: "privateEndpointIpConfig." + s.newUUID(), subnet: subnet, primary: true, props: map[string]any{}}
 		ic.address = s.allocPrivate(subnet, nicID+"/ipConfigurations/"+ic.name)
@@ -170,6 +171,7 @@ func (s *Server) patchTags(k *kind) handler {
 		}
 		res.tags = tags
 		s.touch(res)
+		res.modified = s.now()
 		return &reply{status: http.StatusOK, body: encode(s.renderNetwork(res))}, nil
 	}
 }

@@ -562,6 +562,7 @@ func (s *Server) patchScaleSet(c *call) (*reply, *apiError) {
 		res.tags = tags
 	}
 	s.touch(res)
+	res.modified = s.now()
 	return s.rescale(c, res, capacity, http.StatusOK, stateUpdating), nil
 }
 
