@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.31.0](https://github.com/parallelworks/squall/compare/v0.30.0...v0.31.0) (2026-11-04)
+
+
+### Features
+
+* **azure:** file share snapshots and soft-deleted shares ([#92](https://github.com/parallelworks/squall/issues/92)) ([ecce6b0](https://github.com/parallelworks/squall/commit/ecce6b0e48812e6f480e6141136b616b87f83e3a))
+
 ## [0.30.0](https://github.com/parallelworks/squall/compare/v0.29.0...v0.30.0) (2026-11-04)
 
 
