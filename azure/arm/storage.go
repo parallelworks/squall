@@ -508,6 +508,7 @@ func (s *Server) putChild(ch *child) handler {
 				return nil, ch.exists()
 			}
 			s.update(existing, p)
+			existing.modified = s.now()
 			return ok200(s.renderChild(ch, existing)), nil
 		}
 		res := s.newResource(c, ch.kind, id, p)

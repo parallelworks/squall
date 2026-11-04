@@ -63,6 +63,7 @@ func (s *Server) createContainerData(c *blobCall) (*blobReply, *apiError) {
 		kind: containerKind, id: containerID(acct, c.container), name: c.container, sub: acct.sub, group: acct.group,
 		top: map[string]any{}, props: props, state: stateSucceeded, created: s.now(), guid: s.newUUID(),
 	}
+	res.modified = res.created
 	s.touch(res)
 	s.resources[key(res.id)] = res
 	h := http.Header{}

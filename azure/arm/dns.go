@@ -249,6 +249,7 @@ func (s *Server) putRecord(c *call) (*reply, *apiError) {
 		s.resources[key(id)] = res
 	} else {
 		s.update(res, p)
+		res.modified = s.now()
 	}
 	return &reply{status: status, body: encode(renderRecord(res))}, nil
 }

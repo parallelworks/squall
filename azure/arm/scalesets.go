@@ -377,6 +377,9 @@ func (s *Server) putScaleSet(c *call) (*reply, *apiError) {
 	}
 	sc.nics, sc.prefix, sc.profile, sc.userData = b.nics, cmp.Or(sc.prefix, b.prefix, c.val("name")), b.profile, b.userData
 	s.update(res, b.parsed)
+	if status == http.StatusOK {
+		res.modified = s.now()
+	}
 	s.resources[key(id)] = res
 	return s.rescale(c, res, capacity, status, putState(status)), nil
 }
@@ -562,6 +565,7 @@ func (s *Server) patchScaleSet(c *call) (*reply, *apiError) {
 		res.tags = tags
 	}
 	s.touch(res)
+	res.modified = s.now()
 	return s.rescale(c, res, capacity, http.StatusOK, stateUpdating), nil
 }
 

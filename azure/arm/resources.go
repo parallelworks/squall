@@ -62,7 +62,7 @@ type resource struct {
 	vm      *vmState
 	scale   *scaleSet
 	account *accountState
-	// modified is when its last create or update was accepted.
+	// modified is when it was created or last changed by a write that took effect.
 	modified time.Time
 	// blobs are a blob container's blobs, by name.
 	blobs map[string]*blobName

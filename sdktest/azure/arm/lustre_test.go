@@ -1,6 +1,7 @@
 package arm_test
 
 import (
+	"net/http"
 	"net/netip"
 	"strings"
 	"testing"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/parallelworks/squall/access"
 	"github.com/parallelworks/squall/azure/arm"
+	"github.com/parallelworks/squall/fault"
 )
 
 func (c *clients) beginFilesystem(t *testing.T, name string) (*runtime.Poller[armstoragecache.AmlFilesystemsClientCreateOrUpdateResponse], error) {
@@ -89,7 +91,11 @@ func TestManagedLustre(t *testing.T) {
 func TestManagedLustreSystemData(t *testing.T) {
 	created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	now := created
-	c := setup(t, arm.WithClock(func() time.Time { return now }))
+	faults := fault.New().Add(fault.Rule{
+		Method: "Microsoft.StorageCache/amlFilesystems/write", Nth: 3,
+		Fault: fault.Fault{Mode: fault.ModeFailOperation, Status: http.StatusConflict, Reason: "Conflict"},
+	})
+	c := setup(t, arm.WithClock(func() time.Time { return now }), arm.WithFaults(faults))
 	c.createGroup(t, group, nil)
 	check := func(fs *armstoragecache.AmlFilesystem, modified time.Time) {
 		t.Helper()
@@ -120,6 +126,17 @@ func TestManagedLustreSystemData(t *testing.T) {
 		t.Fatalf("listed file systems = %+v, %v", page.Value, err)
 	}
 	check(page.Value[0], now)
+
+	updated := now
+	now = updated.Add(time.Hour)
+	p, err = c.beginFilesystem(t, "fs")
+	if _, err = wait(t, p, err); code(err) != "Conflict" {
+		t.Fatalf("a failed update = %v", err)
+	}
+	if got, err = c.lustre.Get(t.Context(), group, "fs", nil); err != nil {
+		t.Fatal(err)
+	}
+	check(&got.AmlFilesystem, updated)
 }
 
 func TestManagedLustrePollingNeedsAscOperations(t *testing.T) {

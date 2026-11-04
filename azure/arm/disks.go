@@ -427,6 +427,7 @@ func (s *Server) newOSDisk(vm *resource, os map[string]any, id string) *resource
 		props: map[string]any{"osType": os["osType"], "diskSizeGB": cmp.Or(intOf(os["diskSizeGB"]), osDiskSizeGB), "creationData": cd},
 		state: stateSucceeded, created: s.now(), guid: s.newUUID(), disk: &diskState{},
 	}
+	res.modified = res.created
 	if zones, ok := vm.top["zones"]; ok {
 		res.top["zones"] = zones
 	}

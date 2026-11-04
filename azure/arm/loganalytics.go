@@ -206,6 +206,7 @@ func (s *Server) defaultLogWorkspace(sub, location string) string {
 		kind: logWorkspaceKind, id: id, name: id[strings.LastIndex(id, "/")+1:], sub: sub, group: g.name, loc: location,
 		top: map[string]any{}, props: map[string]any{}, state: stateSucceeded, created: s.now(), guid: s.newUUID(),
 	}
+	res.modified = res.created
 	if d := s.deletedLogWorkspace(id); d != nil && d.account.loc == location {
 		delete(s.logWorkspacesDeleted, key(id))
 		res.guid, res.created, res.props = d.account.guid, d.account.created, d.account.props

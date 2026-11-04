@@ -365,7 +365,10 @@ func (s *Server) prepareVNet(res *resource, p *parsed) (func(), *apiError) {
 					kind: subnetKind, id: id, name: pl.name, sub: res.sub, group: res.group,
 					state: stateSucceeded, created: s.now(), guid: s.newUUID(), top: map[string]any{},
 				}
+				sn.modified = sn.created
 				s.resources[key(id)] = sn
+			} else {
+				sn.modified = s.now()
 			}
 			sn.subnet, sn.props = pl.st, pl.props
 			s.touch(sn)

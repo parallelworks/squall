@@ -47,6 +47,7 @@ func (s *Server) putRoleAssignment(c *call) (*reply, *apiError) {
 				"Tenant ID, application ID, principal ID, and scope are not allowed to be updated.")
 		}
 		s.update(existing, p)
+		existing.modified = s.now()
 		return ok200(renderRoleAssignment(existing)), nil
 	}
 	gk := groupKey(c)
