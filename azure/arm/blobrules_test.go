@@ -151,7 +151,7 @@ func TestVersionLevelImmutability(t *testing.T) {
 
 func TestContainerVersionLevelImmutabilityProtectsTheAccount(t *testing.T) {
 	s := arm.New()
-	newStorage(t, s, "")
+	newStorage(t, s, `{"isVersioningEnabled":true}`)
 	do(t, s, http.MethodDelete, containerPath, "")
 	do(t, s, http.MethodPut, containerPath, `{"properties":{"immutableStorageWithVersioning":{"enabled":true}}}`)
 	blobDo(t, s, http.MethodPut, "/acct/data/a", "1")
@@ -341,7 +341,7 @@ func TestSnapshotOfABlobFromBeforeVersioning(t *testing.T) {
 func TestEmptyVersionLevelImmutableContainers(t *testing.T) {
 	t.Run("container", func(t *testing.T) {
 		s := arm.New()
-		newStorage(t, s, "")
+		newStorage(t, s, `{"isVersioningEnabled":true}`)
 		do(t, s, http.MethodPut, accountPath+"/blobServices/default/containers/worm", `{"properties":{"immutableStorageWithVersioning":{"enabled":true}}}`)
 		wantError(t, blobDo(t, s, http.MethodDelete, "/acct/worm?restype=container", ""), http.StatusConflict, "ContainerImmutableStorageWithVersioningEnabled")
 		rec, body := do(t, s, http.MethodDelete, accountPath, "")
@@ -497,11 +497,101 @@ func TestSoftDeletedContainersKeepTheAccountProtected(t *testing.T) {
 	})
 	t.Run("version-level immutability", func(t *testing.T) {
 		s := arm.New()
-		newStorage(t, s, `{"containerDeleteRetentionPolicy":{"enabled":true,"days":7}}`)
+		newStorage(t, s, `{"isVersioningEnabled":true,"containerDeleteRetentionPolicy":{"enabled":true,"days":7}}`)
 		worm := accountPath + "/blobServices/default/containers/worm"
 		do(t, s, http.MethodPut, worm, `{"properties":{"immutableStorageWithVersioning":{"enabled":true}}}`)
 		do(t, s, http.MethodDelete, worm, "")
 		rec, body := do(t, s, http.MethodDelete, accountPath, "")
 		wantStatus(t, rec, body, http.StatusConflict, "AccountProtectedFromDeletion")
+	})
+}
+
+func TestVersionLevelImmutabilityNeedsVersioning(t *testing.T) {
+	const worm = accountPath + "/blobServices/default/containers/worm"
+	const vlw = `{"properties":{"immutableStorageWithVersioning":{"enabled":true}}}`
+	const off = `{"properties":{"isVersioningEnabled":false}}`
+	t.Run("a container on an account without versioning", func(t *testing.T) {
+		s := arm.New()
+		newStorage(t, s, "")
+		rec, body := do(t, s, http.MethodPut, worm, vlw)
+		wantStatus(t, rec, body, http.StatusBadRequest, "InvalidRequestPropertyValue")
+	})
+	t.Run("a live container", func(t *testing.T) {
+		s := arm.New()
+		newStorage(t, s, `{"isVersioningEnabled":true}`)
+		do(t, s, http.MethodPut, worm, vlw)
+		rec, body := do(t, s, http.MethodPut, accountPath+"/blobServices/default", off)
+		wantStatus(t, rec, body, http.StatusBadRequest, "InvalidRequestPropertyValue")
+	})
+	t.Run("a soft-deleted container", func(t *testing.T) {
+		s := arm.New()
+		newStorage(t, s, `{"isVersioningEnabled":true,"containerDeleteRetentionPolicy":{"enabled":true,"days":7}}`)
+		do(t, s, http.MethodPut, worm, vlw)
+		do(t, s, http.MethodDelete, worm, "")
+		rec, body := do(t, s, http.MethodPut, accountPath+"/blobServices/default", off)
+		wantStatus(t, rec, body, http.StatusBadRequest, "InvalidRequestPropertyValue")
+	})
+}
+
+func TestContainerNamesAreLowerCase(t *testing.T) {
+	s := arm.New()
+	newStorage(t, s, "")
+	rec, body := do(t, s, http.MethodPut, accountPath+"/blobServices/default/containers/Logs", "{}")
+	wantStatus(t, rec, body, http.StatusBadRequest, "InvalidResourceName")
+	rec, body = do(t, s, http.MethodPut, accountPath+"/blobServices/default/containers/ab", "{}")
+	wantStatus(t, rec, body, http.StatusBadRequest, "OutOfRangeInput")
+}
+
+func TestBlobsNameTheAccountAsCreated(t *testing.T) {
+	s := arm.New()
+	newStorage(t, s, "")
+	upper := groupPath + "/providers/Microsoft.Storage/storageAccounts/ACCT/blobServices/default/containers/logs"
+	if rec, body := do(t, s, http.MethodPut, upper, "{}"); rec.Code != http.StatusCreated && rec.Code != http.StatusOK {
+		t.Fatalf("create through a differently cased account path = %d %v", rec.Code, body)
+	}
+	blobDo(t, s, http.MethodPut, "/acct/logs/a", "1")
+	if got := s.Blobs(); len(got) != 1 || got[0].Account != "acct" || got[0].Container != "logs" {
+		t.Fatalf("blobs = %+v", got)
+	}
+	wantError(t, blobDo(t, s, http.MethodGet, "/acct/Logs?restype=container&comp=list", ""), http.StatusNotFound, "ContainerNotFound")
+}
+
+func TestSoftDeletedContainerProtectionLapses(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s := arm.New(arm.WithClock(func() time.Time { return now }))
+	newStorage(t, s, `{"containerDeleteRetentionPolicy":{"enabled":true,"days":1}}`)
+	lock(t, s, policy(t, s))
+	do(t, s, http.MethodDelete, containerPath, "")
+	rec, body := do(t, s, http.MethodDelete, accountPath, "")
+	wantStatus(t, rec, body, http.StatusConflict, "AccountProtectedFromDeletion")
+	now = now.Add(48 * time.Hour)
+	rec, body = do(t, s, http.MethodDelete, accountPath, "")
+	wantStatus(t, rec, body, http.StatusOK, "")
+}
+
+func TestBlobServiceEdges(t *testing.T) {
+	t.Run("include takes tags in any case", func(t *testing.T) {
+		p := access.Allow("Microsoft.Resources/*", "Microsoft.Storage/storageAccounts/write", "Microsoft.Storage/storageAccounts/blobServices/containers/write", blobAction+"read")
+		s := arm.New(arm.WithPolicy(p))
+		newStorage(t, s, "")
+		wantError(t, blobDo(t, s, http.MethodGet, "/acct/data?restype=container&comp=list&include=metadata,%20Tags", ""), http.StatusForbidden, "AuthorizationPermissionMismatch")
+	})
+	t.Run("private link host names", func(t *testing.T) {
+		s := arm.New()
+		newStorage(t, s, "")
+		blobDo(t, s, http.MethodPut, "/acct/data/a", "x")
+		rec := blobDo(t, s, http.MethodGet, "https://acct.privatelink.blob.core.windows.net/data?restype=container&comp=list", "")
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "<Name>a</Name>") {
+			t.Fatalf("private link list = %d %s", rec.Code, rec.Body)
+		}
+	})
+	t.Run("a versioned snapshot shares its time with the new version", func(t *testing.T) {
+		s := arm.New()
+		newStorage(t, s, `{"isVersioningEnabled":true}`)
+		blobDo(t, s, http.MethodPut, "/acct/data/a", "1")
+		rec := blobDo(t, s, http.MethodPut, "/acct/data/a?comp=snapshot", "")
+		if snap := rec.Header().Get("x-ms-snapshot"); snap == "" || snap != rec.Header().Get("x-ms-version-id") {
+			t.Fatalf("snapshot = %v", rec.Header())
+		}
 	})
 }

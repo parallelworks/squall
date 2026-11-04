@@ -439,16 +439,20 @@
 //     inferred. An account takes version-level immutability only when it is
 //     created, and keeps it: an update that leaves it out keeps it, and one
 //     that enables or disables it fails with 400 PropertyIsImmutable, which
-//     is inferred. It turns on blob versioning, which then cannot be turned
-//     off (400 InvalidRequestPropertyValue, inferred), as the portal does.
-//     A container takes it only when created; migrating an existing one is
-//     not served, and a container's own setting does not turn on versioning.
+//     is inferred. It turns on blob versioning, as the portal does. A
+//     container takes it only when created, and only while the account has
+//     versioning on, as Microsoft documents; migrating an existing one is not
+//     served. Versioning cannot be turned off while the account or any of
+//     its containers, soft-deleted ones included, has version-level
+//     immutability, as Microsoft documents. Both fail with 400
+//     InvalidRequestPropertyValue, which is inferred.
 //     Blob-level immutability policies
 //     and legal holds are not supported: Put Blob with
 //     x-ms-immutability-policy-until-date, x-ms-immutability-policy-mode or
 //     x-ms-legal-hold fails with 400 BadRequest.
 //   - The Blob service takes the account from a host name such as
-//     {account}.blob.core.windows.net, or else from the first path segment,
+//     {account}.blob.core.windows.net or {account}.privatelink.blob.*, or
+//     else from the first path segment,
 //     as the storage emulator does, so an azblob client made with
 //     {URL}/{account} for the URL [Server.Blob] is served at reaches it. Each
 //     call needs a bearer token, which is not checked, or Shared Key, whose

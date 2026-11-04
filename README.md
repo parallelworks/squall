@@ -618,7 +618,9 @@ For Azure Resource Manager:
   with `httptest` and make the azblob client with `{its URL}/{account}`, as
   for the storage emulator, any token credential and
   `InsecureAllowCredentialWithHTTP`; a host name such as
-  `{account}.blob.core.windows.net` names the account too. It shares the ARM
+  `{account}.blob.core.windows.net` (or `{account}.privatelink.blob...`)
+  names the account too. Container names are lower case, 3 to 63 letters,
+  digits and hyphens, through ARM as through the Blob service. It shares the ARM
   server's accounts, containers, blob service properties, faults and policy,
   so deleting a container or account through ARM deletes its blobs. A missing
   account answers 404 `ResourceNotFound`, where Azure's host name would not
@@ -647,8 +649,12 @@ For Azure Resource Manager:
   otherwise). An account with it enabled cannot be deleted while any
   container exists, and one without it cannot while it has such a
   container. Account version-level immutability is set only at creation,
-  kept across updates and implies versioning; blob-level immutability
-  policies and legal holds are not supported (400).
+  kept across updates and implies versioning; a container takes it only
+  with versioning on, and versioning cannot then be turned off. Blob-level
+  immutability policies and legal holds are not supported (400). A
+  soft-deleted container's protection lapses when its retention days end,
+  so a test of that should make the server with `arm.WithClock` and move
+  the clock rather than wait.
 - Fault method names are the Azure RBAC action, such as
   `Microsoft.Compute/virtualMachines/write`, and a rule's `Resource` is the
   resource ID in the call's path. Blob service faults name the operation,

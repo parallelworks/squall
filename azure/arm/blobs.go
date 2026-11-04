@@ -151,7 +151,7 @@ func (s *Server) containerOf(c *blobCall) (*resource, *resource, *apiError) {
 	}
 	s.deletedContainers(acct)
 	res := s.resources[key(containerID(acct, c.container))]
-	if res == nil {
+	if res == nil || res.name != c.container {
 		return acct, nil, containers.notFound()
 	}
 	if c.blobName != "" {
@@ -270,7 +270,7 @@ func (s *Server) recheck(c *blobCall, acct *resource) *apiError {
 
 func listBlobsNeeds(_ *Server, c *blobCall, _ *resource) []string {
 	needs := []string{blobAction + "read"}
-	if slices.Contains(strings.Split(c.query.Get("include"), ","), "tags") {
+	if slices.ContainsFunc(strings.Split(c.query.Get("include"), ","), func(v string) bool { return strings.EqualFold(strings.TrimSpace(v), "tags") }) {
 		needs = append(needs, blobAction+"tags/read")
 	}
 	return needs
@@ -623,7 +623,8 @@ func (s *Server) snapshotBlob(c *blobCall) (*blobReply, *apiError) {
 		return nil, err
 	}
 	snap := *cur
-	snap.snapshot, snap.versionID = stamp(s.tick()), ""
+	at := s.tick()
+	snap.snapshot, snap.versionID = stamp(at), ""
 	if m := metadataOf(c.r); m != nil {
 		snap.metadata = m
 	}
@@ -636,7 +637,7 @@ func (s *Server) snapshotBlob(c *blobCall) (*blobReply, *apiError) {
 	h.Set("x-ms-request-server-encrypted", "true")
 	if settingsOf(acct).versioning {
 		next := *cur
-		next.versionID = stamp(s.tick())
+		next.versionID = snap.snapshot
 		keepVersion(b, cur)
 		b.current = &next
 		h.Set("x-ms-version-id", next.versionID)
@@ -849,7 +850,11 @@ func (s *Server) Blobs() []Blob {
 			continue
 		}
 		s.purgeBlobs(res)
-		account := strings.Split(res.id, "/")[8]
+		acct := s.accountOf(res)
+		if acct == nil {
+			continue
+		}
+		account := acct.name
 		for name, b := range res.blobs {
 			add := func(e *blobEntry) {
 				out = append(out, Blob{

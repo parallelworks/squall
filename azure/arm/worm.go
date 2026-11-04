@@ -279,6 +279,22 @@ func (s *Server) accountOf(res *resource) *resource {
 	return acct
 }
 
+// versionLevelAnywhere reports whether the storage account acct, or any of
+// its containers, soft-deleted ones included, has version-level
+// immutability. The caller holds s.mu.
+func (s *Server) versionLevelAnywhere(acct *resource) bool {
+	if versionLevelWORM(acct.props) {
+		return true
+	}
+	prefix := key(acct.id) + "/"
+	for k, res := range s.resources {
+		if res.kind == containerKind && strings.HasPrefix(k, prefix) && versionLevelWORM(res.props) {
+			return true
+		}
+	}
+	return slices.ContainsFunc(s.deletedContainers(acct), func(d *deletedContainer) bool { return versionLevelWORM(d.res.props) })
+}
+
 // storageParent returns the storage account holding res when res is not
 // itself one, or nil. The caller holds s.mu.
 func (s *Server) storageParent(res *resource) *resource {

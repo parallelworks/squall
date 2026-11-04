@@ -362,9 +362,9 @@ func (s *Server) putService(svc *service) handler {
 		if err != nil {
 			return nil, err
 		}
-		if on, ok := boolean(p.props, "isVersioningEnabled"); ok && !on && svc == blobService && versionLevelWORM(res.props) {
+		if on, ok := boolean(p.props, "isVersioningEnabled"); ok && !on && svc == blobService && s.versionLevelAnywhere(res) {
 			return nil, newError(http.StatusBadRequest, "InvalidRequestPropertyValue",
-				"Blob versioning cannot be disabled on a storage account with version-level immutability.")
+				"Blob versioning cannot be disabled while the storage account or one of its containers has version-level immutability.")
 		}
 		if svc.replace || res.account.services[svc.path] == nil {
 			res.account.services[svc.path] = map[string]any{}
@@ -467,8 +467,18 @@ func (s *Server) putChild(ch *child) handler {
 		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		if _, err := s.writableAccount(c, ch.kind); err != nil {
+		acct, err := s.writableAccount(c, ch.kind)
+		if err != nil {
 			return nil, err
+		}
+		if ch == containers {
+			if err := containerNameError(c.val("name")); err != nil {
+				return nil, err
+			}
+			if versionLevelWORM(p.props) && !settingsOf(acct).versioning {
+				return nil, newError(http.StatusBadRequest, "InvalidRequestPropertyValue",
+					"Version-level immutability needs blob versioning enabled on the storage account.")
+			}
 		}
 		id := ch.id(c)
 		if existing := s.resources[key(id)]; existing != nil {

@@ -134,7 +134,7 @@ func parseBlobRequest(r *http.Request) *blobCall {
 	if err != nil {
 		host = r.Host
 	}
-	if labels := strings.Split(host, "."); len(labels) > 2 && strings.EqualFold(labels[1], "blob") {
+	if labels := strings.Split(host, "."); len(labels) > 2 && (strings.EqualFold(labels[1], "blob") || len(labels) > 3 && strings.EqualFold(labels[1], "privatelink") && strings.EqualFold(labels[2], "blob")) {
 		c.account = strings.ToLower(labels[0])
 	} else {
 		c.account, path, _ = strings.Cut(path, "/")

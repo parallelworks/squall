@@ -14,12 +14,20 @@ import (
 // containerNames are the names the Blob service takes for a container.
 var containerNames = regexp.MustCompile(`^[a-z0-9](?:-?[a-z0-9])*$`)
 
-func (s *Server) createContainerData(c *blobCall) (*blobReply, *apiError) {
+// containerNameError fails a container name Azure does not take, or returns nil.
+func containerNameError(name string) *apiError {
 	switch {
-	case len(c.container) < 3 || len(c.container) > 63:
-		return nil, newError(http.StatusBadRequest, "OutOfRangeInput", "The specified resource name length is not within the permissible limits.")
-	case !containerNames.MatchString(c.container):
-		return nil, newError(http.StatusBadRequest, "InvalidResourceName", "The specified resource name contains invalid characters.")
+	case len(name) < 3 || len(name) > 63:
+		return newError(http.StatusBadRequest, "OutOfRangeInput", "The specified resource name length is not within the permissible limits.")
+	case !containerNames.MatchString(name):
+		return newError(http.StatusBadRequest, "InvalidResourceName", "The specified resource name contains invalid characters.")
+	}
+	return nil
+}
+
+func (s *Server) createContainerData(c *blobCall) (*blobReply, *apiError) {
+	if err := containerNameError(c.container); err != nil {
+		return nil, err
 	}
 	props := map[string]any{}
 	switch access := strings.ToLower(c.r.Header.Get("x-ms-blob-public-access")); access {
