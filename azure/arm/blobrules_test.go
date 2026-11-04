@@ -189,11 +189,14 @@ func TestDeletesAProtectionAllows(t *testing.T) {
 		rec, body := do(t, s, http.MethodDelete, accountPath, "")
 		wantStatus(t, rec, body, http.StatusConflict, "AccountProtectedFromDeletion")
 	})
-	t.Run("empty held container through ARM", func(t *testing.T) {
+	t.Run("empty held container through ARM once the hold is cleared", func(t *testing.T) {
 		s := arm.New()
 		newStorage(t, s, "")
 		hold(t, s)
 		rec, body := do(t, s, http.MethodDelete, containerPath, "")
+		wantStatus(t, rec, body, http.StatusConflict, "ContainerHasLegalHold")
+		do(t, s, http.MethodPost, containerPath+"/clearLegalHold", `{"tags":["case1"]}`)
+		rec, body = do(t, s, http.MethodDelete, containerPath, "")
 		wantStatus(t, rec, body, http.StatusOK, "")
 	})
 	t.Run("empty container with a locked policy through ARM", func(t *testing.T) {

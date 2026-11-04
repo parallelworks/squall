@@ -649,31 +649,43 @@ For Azure Resource Manager:
   not `*`, and locking a locked policy changes nothing. A container takes 1 to 10 legal hold tags, which
   are lower-cased so case variants count once.
 - Container legal holds block overwrites, snapshots and deletes of their
-  blobs. An immutability policy blocks deletes for its days, and overwrites
-  and snapshots for as long as it exists. Deleting an account with a
-  container under a locked policy or a legal hold fails with 409
+  blobs, and deleting the container itself, even empty, until the hold is
+  cleared (inferred: the container-level WORM table says container deletion
+  fails while a legal hold is in effect, its Deletion section that the
+  container must be empty). An immutability policy blocks deletes for its
+  days, and overwrites and snapshots for as long as it exists; a container
+  under one can be deleted through ARM once empty. Deleting an account with
+  a container under a locked policy or a legal hold fails with 409
   `AccountProtectedFromDeletion`, as Azure answers. A legal hold protects
   the account even on an empty container, as Microsoft's data protection
-  overview says, though its container-level WORM table adds "at least one
-  blob" (failing closed is inferred). Uncommitted blocks alone are not a
-  blob, here or in `Blobs()`. A blocked group delete leaves the account
-  whole, shares, queues and tables included. Soft-deleted containers do
-  not protect their account (inferred from the soft delete page:
-  "Container soft delete doesn't protect against the deletion of a storage
-  account"), while soft-deleted blobs count as data for holds, policies and version-level
-  immutability (inferred). A container with version-level immutability can be deleted
-  only through ARM once empty (`ContainerImmutableStorageWithVersioningEnabled`
-  otherwise). An account with it enabled cannot be deleted while any
-  container exists, and one without it cannot while it has such a
-  container. Account version-level immutability is set only at creation,
-  kept across updates and implies versioning; a container takes it only
-  with versioning on, and versioning cannot then be turned off (that a
-  soft-deleted container's counts is inferred). Blob-level
-  immutability policies and legal holds are not supported (400), and
-  version-level immutability with a hierarchical namespace, on the account
-  or a container, answers 400. Retention days run against the server's clock, so a test of
-  expiry should make the server with `arm.WithClock` and move the clock
-  rather than wait.
+  overview says, though the container-level WORM table adds "at least one
+  blob" and its note says unlocked policies "and/or legal hold" don't
+  provide delete protection (failing closed is inferred). Uncommitted
+  blocks alone are not a blob, here or in `Blobs()`. A blocked group delete
+  leaves the account whole, shares, queues and tables included. Soft-deleted
+  containers do not protect their account (inferred from the soft delete
+  page: "Container soft delete doesn't protect against the deletion of a
+  storage account"), while soft-deleted blobs count as data for holds,
+  policies and version-level immutability (inferred).
+- A container with version-level immutability can be deleted only through
+  ARM once empty (`ContainerImmutableStorageWithVersioningEnabled`
+  otherwise, with the message Azure shows on Microsoft Q&A 5656033 and
+  1300488; using it for the Blob service is inferred). An account with it
+  enabled cannot be deleted while any container exists, and one without it
+  cannot while it has such a container; an account with it and no
+  container can be deleted (inferred, as the version-level WORM page says
+  both "it can't be deleted until it's empty" and that deletion fails "if
+  it's enabled for the account", and the setting cannot be turned off).
+  Account version-level immutability is set only at creation, kept across
+  updates and implies versioning; a container takes it only with
+  versioning on, and versioning cannot then be turned off ("Conflicting
+  feature 'VersionLevelWorm' is enabled. Please disable it and retry.", as
+  on Q&A 5656033; that a soft-deleted container's counts is inferred).
+  Blob-level immutability policies and legal holds are not supported
+  (400), and version-level immutability with a hierarchical namespace, on
+  the account or a container, answers 400. Retention days run against the
+  server's clock, so a test of expiry should make the server with
+  `arm.WithClock` and move the clock rather than wait.
 - Fault method names are the Azure RBAC action, such as
   `Microsoft.Compute/virtualMachines/write`, and a rule's `Resource` is the
   resource ID in the call's path. Blob service faults name the operation,

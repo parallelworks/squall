@@ -365,9 +365,9 @@ func (s *Server) storageParent(res *resource) *resource {
 }
 
 // containerProtected fails a deletion of the container res, or returns nil.
-// Through ARM, a container under a legal hold or a policy can be deleted once
-// it is empty; through the Blob service, not at all. The same holds for one
-// with version-level immutability, its own or its account's. The caller
+// A legal hold always blocks it. Through ARM, a container under a policy, or
+// with version-level immutability of its own or its account's, can be
+// deleted once it is empty; through the Blob service, not at all. The caller
 // holds s.mu.
 func (s *Server) containerProtected(res *resource, dataPlane bool) *apiError {
 	empty := !s.holdsBlobs(res)
@@ -380,12 +380,13 @@ func (s *Server) containerProtected(res *resource, dataPlane bool) *apiError {
 		return newError(http.StatusConflict, "ContainerImmutableStorageWithVersioningEnabled",
 			"The storage account %s container %s is protected from deletion due to ImmutableStorageWithVersioning.", name, res.name)
 	}
+	if res.worm.held() {
+		return legalHoldPresent()
+	}
 	if !dataPlane && empty {
 		return nil
 	}
 	switch {
-	case res.worm.held():
-		return legalHoldPresent()
 	case res.worm.locked():
 		return policyLocked()
 	case res.worm != nil && res.worm.policy != nil:
