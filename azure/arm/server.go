@@ -404,11 +404,18 @@
 //     errors for no tags or an 11th (400 InvalidParameter) are inferred, and
 //     clearing a tag the container does not have answers 200, also
 //     inferred. An immutability policy is default, takes 1 to 146,000 days
-//     and is Unlocked until locked with its current ETag in If-Match; a
-//     GET answers it with its ETag, or 404 ResourceNotFound when there is
-//     none, which is inferred. Changing a locked policy, deleting a policy,
-//     extending one and allowProtectedAppendWritesAll, on a policy or a
-//     legal hold, are not supported and fail with 400. While a container has
+//     and is Unlocked until locked with its current ETag in If-Match (not
+//     *); locking a locked policy answers it unchanged, which is inferred. A
+//     GET answers it with its ETag, 412 for a stale If-Match, or 404
+//     ResourceNotFound when there is none, which is inferred: Azure's spec
+//     lists only 200 and a default error, so a caller should prefer the
+//     container's hasImmutabilityPolicy. Changing a locked policy and
+//     allowProtectedAppendWritesAll, on a policy or a legal hold, fail with
+//     400 as not supported, and deleting or extending a policy is not served
+//     (404). Legal holds on a container with version-level immutability,
+//     its own or its account's, fail with 400 as not supported, since
+//     Microsoft documents only time-based policies at that scope. While a
+//     container has
 //     a legal hold, its blobs can be created but not overwritten, snapshotted
 //     or deleted (409 BlobImmutableDueToLegalHold). A policy blocks deletes
 //     of a blob for its days since the blob was created, and overwrites and
@@ -459,7 +466,9 @@
 //     policy on a container with version-level immutability, its own or its
 //     account's, fail with 400. An update whose immutableStorageWithVersioning
 //     has no enabled leaves the setting as it was. Version-level
-//     immutability on an account with isHnsEnabled fails with 400, and
+//     immutability with a hierarchical namespace fails with 400, whether the
+//     account asks for both, an update turns on isHnsEnabled for an account
+//     with it, or a container asks for it on an account with isHnsEnabled;
 //     hierarchical namespaces are otherwise not modeled. ARM container gets
 //     and lists, Get Container Properties and List Containers report
 //     version-level immutability, the container's or its account's; that

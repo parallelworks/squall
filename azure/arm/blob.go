@@ -84,6 +84,9 @@ var (
 	deleteBlobOp     = &blobOp{name: "DeleteBlob", needs: deleteNeeds, h: (*Server).deleteBlob}
 )
 
+// unservedOp names the operation of calls that are refused, which faults never match.
+const unservedOp = "Unserved"
+
 // oneSegmentOp answers a call that names only a container without
 // restype=container, once the call is authenticated and its account found.
 func oneSegmentOp(c *blobCall) *blobOp {
@@ -91,7 +94,7 @@ func oneSegmentOp(c *blobCall) *blobOp {
 	if c.query.Get("comp") == "list" {
 		msg = "List Blobs needs restype=container"
 	}
-	return &blobOp{name: "Unserved", needs: always(), h: func(*Server, *blobCall) (*blobReply, *apiError) { return nil, unsupported("%s", msg) }}
+	return &blobOp{name: unservedOp, needs: always(), h: func(*Server, *blobCall) (*blobReply, *apiError) { return nil, unsupported("%s", msg) }}
 }
 
 // blobOperation returns the operation c asks for, or nil if it is not served.
@@ -180,7 +183,10 @@ func (s *Server) serveBlob(w http.ResponseWriter, r *http.Request) {
 		s.writeBlobError(w, r, permissionMismatch())
 		return
 	}
-	f, _ := s.faults.Decide(fault.Call{Method: op.name, Resource: c.resource()})
+	var f fault.Fault
+	if op.name != unservedOp {
+		f, _ = s.faults.Decide(fault.Call{Method: op.name, Resource: c.resource()})
+	}
 	reject := f.Mode == fault.ModeReject || f.Mode == fault.ModeFailOperation
 	stub.Serve(w, r, f, reject, "application/xml", func() { s.writeBlobError(w, r, blobFaultError(f)) }, func() (func(), bool) {
 		rep, err := op.h(s, c)

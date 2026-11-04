@@ -46,8 +46,6 @@ func (s *Server) registerWormRoutes() {
 	s.add("PUT", item+"/immutabilityPolicies/{policy}", containerKind.action("immutabilityPolicies/write"), false, s.putImmutabilityPolicy)
 	s.add("POST", item+"/immutabilityPolicies/{policy}/lock", containerKind.action("immutabilityPolicies/lock/action"), false, s.lockImmutabilityPolicy)
 	s.add("GET", item+"/immutabilityPolicies/{policy}", containerKind.action("immutabilityPolicies/read"), false, s.getImmutabilityPolicy)
-	s.add("DELETE", item+"/immutabilityPolicies/{policy}", containerKind.action("immutabilityPolicies/delete"), false, notModeled("deleting an immutability policy"))
-	s.add("POST", item+"/immutabilityPolicies/{policy}/extend", containerKind.action("immutabilityPolicies/extend/action"), false, notModeled("extending an immutability policy"))
 }
 
 // wormContainer returns the call's container for a change to its legal hold
@@ -98,6 +96,9 @@ func (s *Server) legalHold(set bool) handler {
 		res, aerr := s.wormContainer(c)
 		if aerr != nil {
 			return nil, aerr
+		}
+		if s.containerVersionLevel(res) {
+			return nil, unsupported("legal holds on a container with version-level immutability are not supported")
 		}
 		w := res.worm
 		if set {
@@ -188,10 +189,6 @@ func (s *Server) putImmutabilityPolicy(c *call) (*reply, *apiError) {
 	return s.policyReply(res), nil
 }
 
-func notModeled(what string) handler {
-	return func(*call) (*reply, *apiError) { return nil, unsupported("%s is not supported", what) }
-}
-
 func (s *Server) getImmutabilityPolicy(c *call) (*reply, *apiError) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -205,13 +202,16 @@ func (s *Server) getImmutabilityPolicy(c *call) (*reply, *apiError) {
 	if c.val("policy") != "default" || res.worm == nil || res.worm.policy == nil {
 		return nil, newError(http.StatusNotFound, "ResourceNotFound", "The container %s has no immutability policy.", res.name)
 	}
+	if m := c.r.Header.Get("If-Match"); m != "" && m != "*" && m != res.worm.policy.etag {
+		return nil, preconditionFailed()
+	}
 	return s.policyReply(res), nil
 }
 
 func (s *Server) lockImmutabilityPolicy(c *call) (*reply, *apiError) {
 	m := c.r.Header.Get("If-Match")
-	if m == "" {
-		return nil, badRequest("The If-Match header is required to lock an immutability policy.")
+	if m == "" || m == "*" {
+		return nil, badRequest("The If-Match header with the policy's ETag is required to lock an immutability policy.")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -220,8 +220,11 @@ func (s *Server) lockImmutabilityPolicy(c *call) (*reply, *apiError) {
 		return nil, aerr
 	}
 	p := res.worm.policy
-	if p == nil || m != "*" && m != p.etag {
+	if p == nil || m != p.etag {
 		return nil, preconditionFailed()
+	}
+	if p.locked {
+		return s.policyReply(res), nil
 	}
 	p.locked = true
 	s.touchPolicy(p, "lock")

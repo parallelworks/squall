@@ -163,7 +163,7 @@ func (s *Server) putAccount(c *call) (*reply, *apiError) {
 			}
 			_, given := boolean(m, "enabled")
 			was := res.props[vlw]
-			if hns, _ := boolean(p.props, "isHnsEnabled"); hns && versionLevelWORM(p.props) {
+			if hns, _ := boolean(p.props, "isHnsEnabled"); hns && (versionLevelWORM(p.props) || !given && versionLevelWORM(res.props)) {
 				return nil, unsupported("version-level immutability on an account with a hierarchical namespace is not supported")
 			}
 			if !created && given && versionLevelWORM(p.props) != versionLevelWORM(res.props) {
@@ -493,6 +493,9 @@ func (s *Server) putChild(ch *child) handler {
 		if ch == containers {
 			if err := containerNameError(c.val("name")); err != nil {
 				return nil, err
+			}
+			if hns, _ := boolean(acct.props, "isHnsEnabled"); hns && versionLevelWORM(p.props) {
+				return nil, unsupported("version-level immutability on an account with a hierarchical namespace is not supported")
 			}
 			if versionLevelWORM(p.props) && !settingsOf(acct).versioning {
 				return nil, newError(http.StatusBadRequest, "InvalidRequestPropertyValue",

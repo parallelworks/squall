@@ -640,10 +640,13 @@ For Azure Resource Manager:
   IP rule allows the caller.
 - Version-level immutability policies are not modeled: a non-empty default
   policy on an account's version-level settings, or an immutability policy
-  on a version-level immutable container, answers 400, as do changing,
-  extending or deleting a container policy once locked or at all, and
-  `allowProtectedAppendWritesAll`. A container's policy can be read back
-  (404 when it has none). A container takes 1 to 10 legal hold tags, which
+  on a version-level immutable container, answers 400, as do changing a
+  locked container policy, legal holds on a version-level immutable
+  container and `allowProtectedAppendWritesAll`; deleting or extending a
+  policy is not served (404). A container's policy can be read back (404
+  when it has none, inferred, as Azure's spec lists only 200; prefer the
+  container's `hasImmutabilityPolicy`). Locking takes the policy's ETag,
+  not `*`, and locking a locked policy changes nothing. A container takes 1 to 10 legal hold tags, which
   are lower-cased so case variants count once.
 - Container legal holds block overwrites, snapshots and deletes of their
   blobs. An immutability policy blocks deletes for its days, and overwrites
@@ -663,14 +666,15 @@ For Azure Resource Manager:
   with versioning on, and versioning cannot then be turned off (that a
   soft-deleted container's counts is inferred). Blob-level
   immutability policies and legal holds are not supported (400), and
-  version-level immutability on an account with a hierarchical namespace
-  answers 400. Retention days run against the server's clock, so a test of
+  version-level immutability with a hierarchical namespace, on the account
+  or a container, answers 400. Retention days run against the server's clock, so a test of
   expiry should make the server with `arm.WithClock` and move the clock
   rather than wait.
 - Fault method names are the Azure RBAC action, such as
   `Microsoft.Compute/virtualMachines/write`, and a rule's `Resource` is the
   resource ID in the call's path. Blob service faults name the operation,
-  such as `PutBlob` or `ListBlobs`, and `{account}/{container}/{blob}`.
+  such as `PutBlob` or `ListBlobs`, and `{account}/{container}/{blob}`;
+  calls the Blob service refuses as not served never match a fault.
 
 For Microsoft Graph:
 

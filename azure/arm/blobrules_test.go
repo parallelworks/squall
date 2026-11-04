@@ -675,10 +675,18 @@ func TestImmutabilityPolicyReads(t *testing.T) {
 	if rec.Code != http.StatusOK || body["etag"] != etag || rec.Header().Get("ETag") != etag {
 		t.Fatalf("get policy = %d %v %v", rec.Code, rec.Header(), body)
 	}
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, containerPath+"/immutabilityPolicies/default?api-version=1", nil)
+	req.Header.Set("Authorization", "Bearer token")
+	req.Header.Set("If-Match", `"stale"`)
+	stale := httptest.NewRecorder()
+	s.ServeHTTP(stale, req)
+	if stale.Code != http.StatusPreconditionFailed {
+		t.Fatalf("get with a stale If-Match = %d %s", stale.Code, stale.Body)
+	}
 	rec, body = do(t, s, http.MethodDelete, containerPath+"/immutabilityPolicies/default", "")
-	wantStatus(t, rec, body, http.StatusBadRequest, "BadRequest")
+	wantStatus(t, rec, body, http.StatusNotFound, "NotFound")
 	rec, body = do(t, s, http.MethodPost, containerPath+"/immutabilityPolicies/default/extend", `{"properties":{"immutabilityPeriodSinceCreationInDays":2}}`)
-	wantStatus(t, rec, body, http.StatusBadRequest, "BadRequest")
+	wantStatus(t, rec, body, http.StatusNotFound, "NotFound")
 }
 
 func TestLegalHoldTags(t *testing.T) {
@@ -768,4 +776,77 @@ func TestARMContainersShowInheritedVersionLevelImmutability(t *testing.T) {
 	check(body)
 	_, body = do(t, s, http.MethodGet, accountPath+"/blobServices/default/containers", "")
 	check(body["value"].([]any)[0].(map[string]any))
+}
+
+func TestLegalHoldsOnVersionLevelContainersAreRefused(t *testing.T) {
+	t.Run("its own", func(t *testing.T) {
+		s := arm.New()
+		newStorage(t, s, `{"isVersioningEnabled":true}`)
+		worm := accountPath + "/blobServices/default/containers/worm"
+		do(t, s, http.MethodPut, worm, `{"properties":{"immutableStorageWithVersioning":{"enabled":true}}}`)
+		rec, body := do(t, s, http.MethodPost, worm+"/setLegalHold", `{"tags":["case1"]}`)
+		wantStatus(t, rec, body, http.StatusBadRequest, "BadRequest")
+		rec, body = do(t, s, http.MethodPost, worm+"/clearLegalHold", `{"tags":["case1"]}`)
+		wantStatus(t, rec, body, http.StatusBadRequest, "BadRequest")
+	})
+	t.Run("its account's", func(t *testing.T) {
+		s := arm.New()
+		newGroup(t, s)
+		do(t, s, http.MethodPut, accountPath, `{"location":"eastus","sku":{"name":"Standard_LRS"},"kind":"StorageV2","properties":{"immutableStorageWithVersioning":{"enabled":true}}}`)
+		blobDo(t, s, http.MethodPut, "/acct/data?restype=container", "")
+		rec, body := do(t, s, http.MethodPost, containerPath+"/setLegalHold", `{"tags":["case1"]}`)
+		wantStatus(t, rec, body, http.StatusBadRequest, "BadRequest")
+	})
+}
+
+func TestVersionLevelImmutabilityWithHierarchicalNamespaces(t *testing.T) {
+	t.Run("a container on an HNS account", func(t *testing.T) {
+		s := arm.New()
+		newGroup(t, s)
+		do(t, s, http.MethodPut, accountPath, `{"location":"eastus","sku":{"name":"Standard_LRS"},"kind":"StorageV2","properties":{"isHnsEnabled":true}}`)
+		do(t, s, http.MethodPut, accountPath+"/blobServices/default", `{"properties":{"isVersioningEnabled":true}}`)
+		rec, body := do(t, s, http.MethodPut, accountPath+"/blobServices/default/containers/worm", `{"properties":{"immutableStorageWithVersioning":{"enabled":true}}}`)
+		wantStatus(t, rec, body, http.StatusBadRequest, "BadRequest")
+	})
+	t.Run("turning HNS on for a VLW account", func(t *testing.T) {
+		s := arm.New()
+		newGroup(t, s)
+		do(t, s, http.MethodPut, accountPath, `{"location":"eastus","sku":{"name":"Standard_LRS"},"kind":"StorageV2","properties":{"immutableStorageWithVersioning":{"enabled":true}}}`)
+		rec, body := do(t, s, http.MethodPut, accountPath, `{"location":"eastus","sku":{"name":"Standard_LRS"},"kind":"StorageV2","properties":{"isHnsEnabled":true}}`)
+		wantStatus(t, rec, body, http.StatusBadRequest, "BadRequest")
+	})
+}
+
+func TestLockingAPolicy(t *testing.T) {
+	s := arm.New()
+	newStorage(t, s, "")
+	etag := policy(t, s)
+	lockWith := func(match string) *httptest.ResponseRecorder {
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, containerPath+"/immutabilityPolicies/default/lock?api-version=1", nil)
+		req.Header.Set("Authorization", "Bearer token")
+		req.Header.Set("If-Match", match)
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := lockWith("*"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("lock with If-Match * = %d %s", rec.Code, rec.Body)
+	}
+	first := lockWith(etag)
+	if first.Code != http.StatusOK {
+		t.Fatalf("lock = %d %s", first.Code, first.Body)
+	}
+	locked := first.Header().Get("ETag")
+	again := lockWith(locked)
+	if again.Code != http.StatusOK || again.Header().Get("ETag") != locked || again.Body.String() != first.Body.String() {
+		t.Fatalf("locking a locked policy = %d %v %s, want it unchanged from %s", again.Code, again.Header(), again.Body, first.Body)
+	}
+}
+
+func TestFaultsWithoutAMethodSkipUnservedCalls(t *testing.T) {
+	s := arm.New(arm.WithFaults(fault.New().Add(fault.Rule{Resource: "acct/a", Fault: fault.Unavailable()})))
+	newStorage(t, s, "")
+	if rec := blobDo(t, s, http.MethodHead, "/acct/a", ""); rec.Code != http.StatusBadRequest {
+		t.Fatalf("a refused call under a catch-all fault = %d", rec.Code)
+	}
 }
