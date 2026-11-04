@@ -1,6 +1,8 @@
 package arm_test
 
 import (
+	"encoding/json"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -177,5 +179,88 @@ func TestListGroupResourcesWhileTheGroupDeletes(t *testing.T) {
 	}
 	if _, err := c.resources.NewListByResourceGroupPager(group, nil).NextPage(t.Context()); code(err) != "ResourceGroupNotFound" {
 		t.Fatalf("after the deletion settles = %v", err)
+	}
+}
+
+// generic is what a group's resource list and a GET by ID both show of a resource.
+type generic struct {
+	Location, ManagedBy, Kind *string
+	ExtendedLocation          *armresources.ExtendedLocation
+	Identity                  *armresources.Identity
+	Plan                      *armresources.Plan
+	SKU                       *armresources.SKU
+	Tags                      map[string]*string
+}
+
+func TestListGroupResourcesMatchTheirGets(t *testing.T) {
+	c := setup(t)
+	c.createGroup(t, group, nil)
+	identity := "/subscriptions/" + subscription + "/resourceGroups/" + group + "/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id"
+	body := vmBody(c.createNIC(t, group, "nic", nil).ID)
+	body.Plan = &armcompute.Plan{Name: new("server"), Publisher: new("publisher"), Product: new("product")}
+	body.Identity = &armcompute.VirtualMachineIdentity{
+		Type:                   new(armcompute.ResourceIdentityTypeUserAssigned),
+		UserAssignedIdentities: map[string]*armcompute.UserAssignedIdentitiesValue{identity: {}},
+	}
+	vp, err := c.vms.BeginCreateOrUpdate(t.Context(), group, "vm", body, nil)
+	if _, err := wait(t, vp, err); err != nil {
+		t.Fatal(err)
+	}
+	c.createScaleSet(t, "set", 2)
+	c.createAccount(t, group, "st1")
+	c.createPIP(t, "pip")
+	c.createVNet(t, "vnet", map[string]string{"default": "10.1.0.0/24"})
+	c.createZone(t, "example.internal")
+	c.createLogWorkspace(t, "logs")
+	c.createCognitiveAccount(t, "ai", "ai-domain")
+	for _, begin := range []func() error{
+		func() error { p, err := c.beginWorkspace(t, "ws"); _, err = wait(t, p, err); return err },
+		func() error { p, err := c.beginSearch(t, "search"); _, err = wait(t, p, err); return err },
+		func() error { p, err := c.beginFilesystem(t, "lustre"); _, err = wait(t, p, err); return err },
+	} {
+		if err := begin(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	listed := c.groupResources(t, nil)
+	types := map[string]bool{}
+	for _, r := range listed {
+		types[*r.Type] = true
+		got, err := c.resources.GetByID(t.Context(), *r.ID, "2024-01-01", nil)
+		if err != nil {
+			t.Fatalf("GET %s: %v", *r.ID, err)
+		}
+		fromList, _ := json.Marshal(generic{r.Location, r.ManagedBy, r.Kind, r.ExtendedLocation, r.Identity, r.Plan, r.SKU, r.Tags})
+		g := got.GenericResource
+		fromGet, _ := json.Marshal(generic{g.Location, g.ManagedBy, g.Kind, g.ExtendedLocation, g.Identity, g.Plan, g.SKU, g.Tags})
+		if string(fromList) != string(fromGet) {
+			t.Errorf("%s lists as %s, GET shows %s", *r.ID, fromList, fromGet)
+		}
+	}
+	for typ, check := range map[string]func(*armresources.GenericResourceExpanded) bool{
+		"Microsoft.Compute/virtualMachineScaleSets": func(r *armresources.GenericResourceExpanded) bool {
+			return r.SKU != nil && *r.SKU.Name != "" && *r.SKU.Tier == "Standard" && *r.SKU.Capacity == 2
+		},
+		"Microsoft.Compute/disks": func(r *armresources.GenericResourceExpanded) bool {
+			return r.SKU != nil && *r.SKU.Name == "Premium_LRS" && *r.SKU.Tier == "Premium" && r.ManagedBy != nil
+		},
+		"Microsoft.Storage/storageAccounts": func(r *armresources.GenericResourceExpanded) bool {
+			return r.SKU != nil && *r.SKU.Name == "Standard_LRS" && *r.SKU.Tier == "Standard" && *r.Kind == "StorageV2"
+		},
+		"Microsoft.Compute/virtualMachines": func(r *armresources.GenericResourceExpanded) bool {
+			return r.Plan != nil && *r.Plan.Name == "server" && r.Identity != nil && *r.Identity.Type == "UserAssigned" &&
+				r.Identity.UserAssignedIdentities[identity] != nil
+		},
+		"Microsoft.MachineLearningServices/workspaces": func(r *armresources.GenericResourceExpanded) bool {
+			return r.Identity != nil && r.Identity.PrincipalID != nil && *r.Identity.PrincipalID != ""
+		},
+	} {
+		i := slices.IndexFunc(listed, func(r *armresources.GenericResourceExpanded) bool { return *r.Type == typ })
+		if i < 0 || !check(listed[i]) {
+			t.Errorf("%s = %+v", typ, listed[max(i, 0)])
+		}
+	}
+	if got := slices.Sorted(maps.Keys(types)); len(got) != 13 {
+		t.Errorf("listed types = %v", got)
 	}
 }

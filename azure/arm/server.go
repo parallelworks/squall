@@ -109,16 +109,16 @@
 //     ones with a location, nested ones such as VM extensions, gallery image
 //     versions and virtual network links included, ordered by ID. Proxy types
 //     such as subnets, record sets, blob containers, Cognitive Services
-//     deployments and role assignments are left out. Entries show id, name,
-//     type, location, tags, and the extendedLocation, kind, plan, sku,
-//     identity and managedBy the server holds, as a GET of each shows them:
-//     identity is what the caller sent, with a principalId only for a Machine
-//     Learning workspace's system-assigned one. It takes the tag $filter a
+//     deployments and role assignments are left out. Each entry shows the
+//     location, tags, extendedLocation, kind, plan, sku, identity and
+//     managedBy that a GET of the resource shows. It takes the tag $filter a
 //     group list takes, and with a tagValue clause leaves out each entry's
-//     tags, as Azure does; $top, which returns at most that many with no
-//     nextLink; and an $expand of createdTime and provisioningState. Other
-//     filters, such as on name, location or resourceType, or with substringof
-//     or startswith, and changedTime fail with 400.
+//     tags, as Azure does, and an $expand of createdTime and
+//     provisioningState. Other filters, such as on name, location or
+//     resourceType, or with substringof or startswith, and changedTime fail
+//     with 400.
+//   - Listing groups or a group's resources with $top returns at most that
+//     many, with no nextLink; Azure may page them instead.
 //   - Resource names, subscription IDs and locations are not validated, and
 //     names match without regard to case. Tags are not validated. Fields the
 //     server only records keep the JSON the caller sent; fields it does not

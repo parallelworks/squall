@@ -55,3 +55,17 @@ func BenchmarkListGroupsFiltered(b *testing.B) {
 		}
 	}
 }
+
+func BenchmarkListGroupResources(b *testing.B) {
+	s := arm.New()
+	serve(b, s, http.MethodPut, groupPath, `{"location":"eastus"}`)
+	for i := range 200 {
+		serve(b, s, http.MethodPut, fmt.Sprintf("%s/providers/Microsoft.Network/networkSecurityGroups/nsg-%d", groupPath, i),
+			fmt.Sprintf(`{"location":"eastus","tags":{"session":"%d"}}`, i%10))
+	}
+	for b.Loop() {
+		if rec := serve(b, s, http.MethodGet, groupPath+"/resources", ""); rec.Code != http.StatusOK {
+			b.Fatal(rec.Body)
+		}
+	}
+}

@@ -230,7 +230,7 @@ func (s *Server) listGroupResources(c *call) (*reply, *apiError) {
 	var created, provisioning bool
 	if v := c.query("$expand"); v != "" {
 		for part := range strings.SplitSeq(v, ",") {
-			switch strings.TrimSpace(part) {
+			switch part = strings.TrimSpace(part); part {
 			case "createdTime":
 				created = true
 			case "provisioningState":
@@ -263,20 +263,12 @@ func (s *Server) listGroupResources(c *call) (*reply, *apiError) {
 	}
 	slices.SortFunc(out, func(a, b *resource) int { return cmp.Compare(key(a.id), key(b.id)) })
 	return ok(listBody(firstN(out, top), func(res *resource) any {
-		m := map[string]any{"id": res.id, "name": genericName(res.id), "type": res.kind.typ, "location": res.loc}
-		if res.tags != nil && !byValue {
-			m["tags"] = res.tags
-		}
-		if identity := shownIdentity(res); identity != nil {
-			m["identity"] = identity
-		}
-		for _, name := range []string{"extendedLocation", "kind", "plan", "sku"} {
-			if v, ok := res.top[name]; ok {
+		full := s.renderOne(res)
+		m := map[string]any{"id": res.id, "name": genericName(res.id), "type": res.kind.typ}
+		for _, name := range genericMembers {
+			if v, ok := full[name]; ok && (name != "tags" || !byValue) {
 				m[name] = v
 			}
-		}
-		if res.disk != nil && res.disk.vm != "" {
-			m["managedBy"] = res.disk.vm
 		}
 		if created {
 			m["createdTime"] = timestamp(res.created)
@@ -286,6 +278,52 @@ func (s *Server) listGroupResources(c *call) (*reply, *apiError) {
 		}
 		return m
 	})), nil
+}
+
+// genericMembers are the members of a resource ARM's generic resource list
+// shows, beyond id, name and type, taken from the resource as its GET shows it.
+var genericMembers = []string{"extendedLocation", "identity", "kind", "location", "managedBy", "plan", "sku", "tags"}
+
+// renderOne renders res as a GET of it answers, without $expand. The caller holds s.mu.
+func (s *Server) renderOne(res *resource) map[string]any {
+	switch res.kind {
+	case nsgKind, nicKind, pipKind, peKind, vnetKind, natKind, lbKind, subnetKind:
+		return s.renderNetwork(res)
+	case zoneKind:
+		return s.renderZone(res)
+	case linkKind:
+		return s.renderLink(res)
+	case vmKind:
+		return s.renderVM(res, "")
+	case vmExtensionKind:
+		return renderExtension(res)
+	case vmssKind:
+		return s.renderScaleSet(res)
+	case diskKind, snapshotKind:
+		return s.renderDisk(res)
+	case galleryKind, galleryImageKind, galleryVersionKind:
+		return renderGallery(res, false)
+	case accountKind:
+		return s.accountBody(res)
+	case netappAccountKind, poolKind, volumeKind:
+		return renderNetApp(res)
+	case amlfsKind:
+		return renderAmlfs(res)
+	case cognitiveAccountKind:
+		return renderCognitiveAccount(res)
+	case searchKind:
+		return renderSearch(res)
+	case vaultKind:
+		return renderVault(res)
+	case componentKind:
+		return renderComponent(res)
+	case workspaceKind:
+		return renderWorkspace(res)
+	case logWorkspaceKind:
+		return renderLogWorkspace(res)
+	}
+	m, _ := envelope(res)
+	return m
 }
 
 // genericName is the name ARM's generic resource APIs give the resource id: a
