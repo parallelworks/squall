@@ -433,8 +433,9 @@ For Azure Resource Manager:
   location, nested ones such as VM extensions and virtual network links
   included, ordered by ID; subnets, record sets, containers and other proxy
   types are left out. Each entry shows the fields a GET of the resource shows
-  among `location`, `tags`, `extendedLocation`, `kind`, `plan`, `sku`,
-  `identity` and `managedBy`. It takes a tag `$filter`, and with a `tagValue`
+  among `id`, `type`, `location`, `tags`, `extendedLocation`, `kind`, `plan`,
+  `sku`, `identity` and `managedBy`, and with `$expand` its
+  `provisioningState`. It takes a tag `$filter`, and with a `tagValue`
   clause leaves out each resource's tags, as Azure does, and an `$expand` of
   `createdTime` and `provisioningState`. Other filters (on name, location or
   `resourceType`, or with `substringof` or `startswith`) and `changedTime`

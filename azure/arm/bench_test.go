@@ -63,9 +63,17 @@ func BenchmarkListGroupResources(b *testing.B) {
 		serve(b, s, http.MethodPut, fmt.Sprintf("%s/providers/Microsoft.Network/networkSecurityGroups/nsg-%d", groupPath, i),
 			fmt.Sprintf(`{"location":"eastus","tags":{"session":"%d"}}`, i%10))
 	}
-	for b.Loop() {
-		if rec := serve(b, s, http.MethodGet, groupPath+"/resources", ""); rec.Code != http.StatusOK {
-			b.Fatal(rec.Body)
-		}
+	for _, bc := range [][2]string{{"all", ""}, {"filtered", "&%24filter=tagName+eq+%27session%27+and+tagValue+eq+%273%27"}} {
+		b.Run(bc[0], func(b *testing.B) {
+			req := httptest.NewRequestWithContext(b.Context(), http.MethodGet, groupPath+"/resources?api-version=2025-04-01"+bc[1], nil)
+			req.Header.Set("Authorization", "Bearer token")
+			for b.Loop() {
+				rec := httptest.NewRecorder()
+				s.ServeHTTP(rec, req)
+				if rec.Code != http.StatusOK {
+					b.Fatal(rec.Body)
+				}
+			}
+		})
 	}
 }

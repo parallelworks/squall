@@ -2,12 +2,12 @@ package arm_test
 
 import (
 	"encoding/json"
-	"maps"
 	"net/http"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/applicationinsights/armapplicationinsights"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v8"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/privatedns/armprivatedns"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources/v3"
@@ -184,18 +184,19 @@ func TestListGroupResourcesWhileTheGroupDeletes(t *testing.T) {
 
 // generic is what a group's resource list and a GET by ID both show of a resource.
 type generic struct {
-	Location, ManagedBy, Kind *string
-	ExtendedLocation          *armresources.ExtendedLocation
-	Identity                  *armresources.Identity
-	Plan                      *armresources.Plan
-	SKU                       *armresources.SKU
-	Tags                      map[string]*string
+	ID, Type, Location, ManagedBy, Kind *string
+	ExtendedLocation                    *armresources.ExtendedLocation
+	Identity                            *armresources.Identity
+	Plan                                *armresources.Plan
+	SKU                                 *armresources.SKU
+	Tags                                map[string]*string
 }
 
 func TestListGroupResourcesMatchTheirGets(t *testing.T) {
 	c := setup(t)
 	c.createGroup(t, group, nil)
-	identity := "/subscriptions/" + subscription + "/resourceGroups/" + group + "/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id"
+	prefix := "/subscriptions/" + subscription + "/resourceGroups/" + group + "/providers/"
+	identity := prefix + "Microsoft.ManagedIdentity/userAssignedIdentities/id"
 	body := vmBody(c.createNIC(t, group, "nic", nil).ID)
 	body.Plan = &armcompute.Plan{Name: new("server"), Publisher: new("publisher"), Product: new("product")}
 	body.Identity = &armcompute.VirtualMachineIdentity{
@@ -203,46 +204,135 @@ func TestListGroupResourcesMatchTheirGets(t *testing.T) {
 		UserAssignedIdentities: map[string]*armcompute.UserAssignedIdentitiesValue{identity: {}},
 	}
 	vp, err := c.vms.BeginCreateOrUpdate(t.Context(), group, "vm", body, nil)
-	if _, err := wait(t, vp, err); err != nil {
+	vm, err := wait(t, vp, err)
+	if err != nil {
 		t.Fatal(err)
 	}
+	win := c.createWindowsVM(t, "win")
+	c.sendScript(t, "win", "hostname")
 	c.createScaleSet(t, "set", 2)
 	c.createAccount(t, group, "st1")
-	c.createPIP(t, "pip")
-	c.createVNet(t, "vnet", map[string]string{"default": "10.1.0.0/24"})
+	pip := c.createPIP(t, "pip")
+	lbIP := c.createPIP(t, "lb-ip")
+	natIP := c.createPIP(t, "nat-ip")
+	c.createNSG(t, "nsg")
+	vnet := c.createVNet(t, "vnet", map[string]string{"default": "10.1.0.0/24"})
 	c.createZone(t, "example.internal")
 	c.createLogWorkspace(t, "logs")
 	c.createCognitiveAccount(t, "ai", "ai-domain")
-	for _, begin := range []func() error{
+	disk, err := c.putDisk(t, "data", diskBody(location, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := c.putSnapshot(t, "snap", snapshotBody(location, armcompute.DiskCreateOptionCopy, *disk.ID, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.components.CreateOrUpdate(t.Context(), group, "insights", armapplicationinsights.Component{
+		Location: new(location), Kind: new("web"),
+		Properties: &armapplicationinsights.ComponentProperties{ApplicationType: new(armapplicationinsights.ApplicationTypeWeb)},
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []func() error{
+		func() error { _, err := c.createNAT(t, "nat", natIP.ID); return err },
+		func() error { _, err := c.putLB(t, lbBody(1_024, lbIP.ID)); return err },
+		func() error {
+			_, err := c.createPrivateEndpoint(t, prefix+"Microsoft.Storage/storageAccounts/st1")
+			return err
+		},
+		func() error { _, err := c.createVolume(t, "netapp", "pool", "vol"); return err },
+		func() error { p, err := c.beginVault(t, "kv1"); _, err = wait(t, p, err); return err },
 		func() error { p, err := c.beginWorkspace(t, "ws"); _, err = wait(t, p, err); return err },
 		func() error { p, err := c.beginSearch(t, "search"); _, err = wait(t, p, err); return err },
 		func() error { p, err := c.beginFilesystem(t, "lustre"); _, err = wait(t, p, err); return err },
+		func() error {
+			p, err := c.links.BeginCreateOrUpdate(t.Context(), group, "example.internal", "link", armprivatedns.VirtualNetworkLink{
+				Location:   new("global"),
+				Properties: &armprivatedns.VirtualNetworkLinkProperties{VirtualNetwork: &armprivatedns.SubResource{ID: vnet.ID}, RegistrationEnabled: new(false)},
+			}, nil)
+			_, err = wait(t, p, err)
+			return err
+		},
+		func() error {
+			p, err := c.galleries.BeginCreateOrUpdate(t.Context(), group, "gallery", armcompute.Gallery{Location: new(location)}, nil)
+			if _, err = wait(t, p, err); err != nil {
+				return err
+			}
+			ip, err := c.images.BeginCreateOrUpdate(t.Context(), group, "gallery", "image", imageBody(armcompute.OperatingSystemTypesLinux), nil)
+			if _, err = wait(t, ip, err); err != nil {
+				return err
+			}
+			vp, err := c.versions.BeginCreateOrUpdate(t.Context(), group, "gallery", "image", "1.0.0", versionBody(*snap.ID), nil)
+			_, err = wait(t, vp, err)
+			return err
+		},
 	} {
-		if err := begin(); err != nil {
+		if err := step(); err != nil {
 			t.Fatal(err)
 		}
 	}
 	listed := c.groupResources(t, nil)
-	types := map[string]bool{}
+	var ids []string
 	for _, r := range listed {
-		types[*r.Type] = true
+		ids = append(ids, *r.ID)
 		got, err := c.resources.GetByID(t.Context(), *r.ID, "2024-01-01", nil)
 		if err != nil {
 			t.Fatalf("GET %s: %v", *r.ID, err)
 		}
-		fromList, _ := json.Marshal(generic{r.Location, r.ManagedBy, r.Kind, r.ExtendedLocation, r.Identity, r.Plan, r.SKU, r.Tags})
+		fromList, _ := json.Marshal(generic{r.ID, r.Type, r.Location, r.ManagedBy, r.Kind, r.ExtendedLocation, r.Identity, r.Plan, r.SKU, r.Tags})
 		g := got.GenericResource
-		fromGet, _ := json.Marshal(generic{g.Location, g.ManagedBy, g.Kind, g.ExtendedLocation, g.Identity, g.Plan, g.SKU, g.Tags})
+		fromGet, _ := json.Marshal(generic{g.ID, g.Type, g.Location, g.ManagedBy, g.Kind, g.ExtendedLocation, g.Identity, g.Plan, g.SKU, g.Tags})
 		if string(fromList) != string(fromGet) {
 			t.Errorf("%s lists as %s, GET shows %s", *r.ID, fromList, fromGet)
 		}
+	}
+	want := []string{
+		prefix + "Microsoft.CognitiveServices/accounts/ai",
+		prefix + "Microsoft.Compute/disks/data",
+		*vm.Properties.StorageProfile.OSDisk.ManagedDisk.ID,
+		*win.Properties.StorageProfile.OSDisk.ManagedDisk.ID,
+		prefix + "Microsoft.Compute/galleries/gallery",
+		prefix + "Microsoft.Compute/galleries/gallery/images/image",
+		prefix + "Microsoft.Compute/galleries/gallery/images/image/versions/1.0.0",
+		*snap.ID,
+		*vm.ID,
+		*win.ID,
+		*win.ID + "/extensions/" + scriptExtension,
+		prefix + "Microsoft.Compute/virtualMachineScaleSets/set",
+		prefix + "microsoft.insights/components/insights",
+		prefix + "Microsoft.KeyVault/vaults/kv1",
+		prefix + "Microsoft.MachineLearningServices/workspaces/ws",
+		prefix + "Microsoft.NetApp/netAppAccounts/netapp",
+		prefix + "Microsoft.NetApp/netAppAccounts/netapp/capacityPools/pool",
+		prefix + "Microsoft.NetApp/netAppAccounts/netapp/capacityPools/pool/volumes/vol",
+		lbID,
+		prefix + "Microsoft.Network/natGateways/nat",
+		prefix + "Microsoft.Network/networkInterfaces/files1-nic",
+		prefix + "Microsoft.Network/networkInterfaces/nic",
+		prefix + "Microsoft.Network/networkInterfaces/win-nic",
+		prefix + "Microsoft.Network/networkSecurityGroups/nsg",
+		prefix + "Microsoft.Network/privateDnsZones/example.internal",
+		prefix + "Microsoft.Network/privateDnsZones/example.internal/virtualNetworkLinks/link",
+		prefix + "Microsoft.Network/privateEndpoints/files1-endpoint",
+		*lbIP.ID,
+		*natIP.ID,
+		*pip.ID,
+		*vnet.ID,
+		prefix + "Microsoft.OperationalInsights/workspaces/logs",
+		prefix + "Microsoft.Search/searchServices/search",
+		prefix + "Microsoft.Storage/storageAccounts/st1",
+		prefix + "Microsoft.StorageCache/amlFilesystems/lustre",
+	}
+	if !slices.Equal(ids, want) {
+		t.Errorf("listed\n%s\nwant\n%s", strings.Join(ids, "\n"), strings.Join(want, "\n"))
 	}
 	for typ, check := range map[string]func(*armresources.GenericResourceExpanded) bool{
 		"Microsoft.Compute/virtualMachineScaleSets": func(r *armresources.GenericResourceExpanded) bool {
 			return r.SKU != nil && *r.SKU.Name != "" && *r.SKU.Tier == "Standard" && *r.SKU.Capacity == 2
 		},
 		"Microsoft.Compute/disks": func(r *armresources.GenericResourceExpanded) bool {
-			return r.SKU != nil && *r.SKU.Name == "Premium_LRS" && *r.SKU.Tier == "Premium" && r.ManagedBy != nil
+			return r.SKU != nil && *r.SKU.Name == "Premium_LRS" && *r.SKU.Tier == "Premium"
 		},
 		"Microsoft.Storage/storageAccounts": func(r *armresources.GenericResourceExpanded) bool {
 			return r.SKU != nil && *r.SKU.Name == "Standard_LRS" && *r.SKU.Tier == "Standard" && *r.Kind == "StorageV2"
@@ -260,7 +350,15 @@ func TestListGroupResourcesMatchTheirGets(t *testing.T) {
 			t.Errorf("%s = %+v", typ, listed[max(i, 0)])
 		}
 	}
-	if got := slices.Sorted(maps.Keys(types)); len(got) != 13 {
-		t.Errorf("listed types = %v", got)
+	expanded := c.groupResources(t, &armresources.ClientListByResourceGroupOptions{Expand: new("provisioningState")})
+	for _, r := range expanded {
+		got, err := c.resources.GetByID(t.Context(), *r.ID, "2024-01-01", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		props, _ := got.Properties.(map[string]any)
+		if want, _ := props["provisioningState"].(string); r.ProvisioningState == nil || *r.ProvisioningState != want {
+			t.Errorf("%s lists provisioningState %v, GET shows %q", *r.ID, r.ProvisioningState, want)
+		}
 	}
 }

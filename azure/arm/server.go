@@ -110,8 +110,10 @@
 //     versions and virtual network links included, ordered by ID. Proxy types
 //     such as subnets, record sets, blob containers, Cognitive Services
 //     deployments and role assignments are left out. Each entry shows the
-//     location, tags, extendedLocation, kind, plan, sku, identity and
-//     managedBy that a GET of the resource shows. It takes the tag $filter a
+//     id, type, location, tags, extendedLocation, kind, plan, sku, identity
+//     and managedBy that a GET of the resource shows, and with $expand its
+//     provisioningState, so an Application Insights component's id and type
+//     are in lower case, as its GET shows them. It takes the tag $filter a
 //     group list takes, and with a tagValue clause leaves out each entry's
 //     tags, as Azure does, and an $expand of createdTime and
 //     provisioningState. Other filters, such as on name, location or

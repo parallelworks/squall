@@ -264,25 +264,33 @@ func (s *Server) listGroupResources(c *call) (*reply, *apiError) {
 	slices.SortFunc(out, func(a, b *resource) int { return cmp.Compare(key(a.id), key(b.id)) })
 	return ok(listBody(firstN(out, top), func(res *resource) any {
 		full := s.renderOne(res)
-		m := map[string]any{"id": res.id, "name": genericName(res.id), "type": res.kind.typ}
-		for _, name := range genericMembers {
-			if v, ok := full[name]; ok && (name != "tags" || !byValue) {
-				m[name] = v
-			}
+		m := genericView(full)
+		m["name"] = genericName(res.id)
+		if byValue {
+			delete(m, "tags")
 		}
 		if created {
 			m["createdTime"] = timestamp(res.created)
 		}
 		if provisioning {
-			m["provisioningState"] = res.state
+			props, _ := full["properties"].(map[string]any)
+			m["provisioningState"] = cmp.Or(str(props, "provisioningState"), res.state)
 		}
 		return m
 	})), nil
 }
 
-// genericMembers are the members of a resource ARM's generic resource list
-// shows, beyond id, name and type, taken from the resource as its GET shows it.
-var genericMembers = []string{"extendedLocation", "identity", "kind", "location", "managedBy", "plan", "sku", "tags"}
+// genericView picks from a resource as its GET shows it the members ARM's
+// generic resource list shows, other than its name.
+func genericView(full map[string]any) map[string]any {
+	m := map[string]any{}
+	for _, name := range []string{"extendedLocation", "id", "identity", "kind", "location", "managedBy", "plan", "sku", "tags", "type"} {
+		if v, ok := full[name]; ok {
+			m[name] = v
+		}
+	}
+	return m
+}
 
 // renderOne renders res as a GET of it answers, without $expand. The caller holds s.mu.
 func (s *Server) renderOne(res *resource) map[string]any {
