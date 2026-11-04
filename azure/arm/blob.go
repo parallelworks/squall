@@ -138,6 +138,7 @@ func parseBlobRequest(r *http.Request) *blobCall {
 		c.account = strings.ToLower(labels[0])
 	} else {
 		c.account, path, _ = strings.Cut(path, "/")
+		c.account = strings.ToLower(c.account)
 	}
 	escaped, rest, _ := strings.Cut(path, "/")
 	c.container, _ = url.PathUnescape(escaped)
@@ -148,6 +149,10 @@ func parseBlobRequest(r *http.Request) *blobCall {
 func (s *Server) serveBlob(w http.ResponseWriter, r *http.Request) {
 	c := parseBlobRequest(r)
 	op := blobOperation(c)
+	if op == nil && c.container != "" && c.blobName == "" && c.query.Get("restype") == "" {
+		s.writeBlobError(w, r, unsupported("addressing a blob in the root container without $root in the path is not supported"))
+		return
+	}
 	if op == nil {
 		s.writeBlobError(w, r, newError(http.StatusNotFound, "NotImplemented", "squall: %s %s is not served", r.Method, r.URL.RequestURI()))
 		return

@@ -239,7 +239,7 @@ func (s *Server) newETag() string {
 func quote(etag string) string { return `"` + strings.Trim(etag, `"`) + `"` }
 
 func writeNeeds(s *Server, c *blobCall, acct *resource) []string {
-	if res := s.resources[key(containerID(acct, c.container))]; res != nil {
+	if res := s.resources[key(containerID(acct, c.container))]; res != nil && res.name == c.container {
 		if b := res.blobs[c.blobName]; b != nil && b.current != nil {
 			return []string{blobAction + "write"}
 		}

@@ -12,6 +12,7 @@ import (
 
 	"github.com/parallelworks/squall/access"
 	"github.com/parallelworks/squall/azure/arm"
+	"github.com/parallelworks/squall/fault"
 )
 
 const containerPath = accountPath + "/blobServices/default/containers/data"
@@ -593,5 +594,86 @@ func TestBlobServiceEdges(t *testing.T) {
 		if snap := rec.Header().Get("x-ms-snapshot"); snap == "" || snap != rec.Header().Get("x-ms-version-id") {
 			t.Fatalf("snapshot = %v", rec.Header())
 		}
+	})
+}
+
+func TestVersionLevelPoliciesAreRefused(t *testing.T) {
+	t.Run("a default policy on the account", func(t *testing.T) {
+		s := arm.New()
+		newGroup(t, s)
+		rec, body := do(t, s, http.MethodPut, accountPath, `{"location":"eastus","sku":{"name":"Standard_LRS"},"kind":"StorageV2","properties":{"immutableStorageWithVersioning":{"enabled":true,"immutabilityPolicy":{"immutabilityPeriodSinceCreationInDays":1,"state":"Unlocked"}}}}`)
+		wantStatus(t, rec, body, http.StatusBadRequest, "BadRequest")
+	})
+	t.Run("a policy on a container with version-level immutability", func(t *testing.T) {
+		s := arm.New()
+		newStorage(t, s, `{"isVersioningEnabled":true}`)
+		worm := accountPath + "/blobServices/default/containers/worm"
+		do(t, s, http.MethodPut, worm, `{"properties":{"immutableStorageWithVersioning":{"enabled":true}}}`)
+		rec, body := do(t, s, http.MethodPut, worm+"/immutabilityPolicies/default", `{"properties":{"immutabilityPeriodSinceCreationInDays":1}}`)
+		wantStatus(t, rec, body, http.StatusBadRequest, "BadRequest")
+	})
+	t.Run("a policy on a container of an account with version-level immutability", func(t *testing.T) {
+		s := arm.New()
+		newGroup(t, s)
+		do(t, s, http.MethodPut, accountPath, `{"location":"eastus","sku":{"name":"Standard_LRS"},"kind":"StorageV2","properties":{"immutableStorageWithVersioning":{"enabled":true}}}`)
+		blobDo(t, s, http.MethodPut, "/acct/data?restype=container", "")
+		rec, body := do(t, s, http.MethodPut, containerPath+"/immutabilityPolicies/default", `{"properties":{"immutabilityPeriodSinceCreationInDays":1}}`)
+		wantStatus(t, rec, body, http.StatusBadRequest, "BadRequest")
+	})
+}
+
+func TestWormInputNotModeled(t *testing.T) {
+	s := arm.New()
+	newStorage(t, s, "")
+	rec, body := do(t, s, http.MethodPut, containerPath+"/immutabilityPolicies/default", `{"properties":{"immutabilityPeriodSinceCreationInDays":1,"allowProtectedAppendWritesAll":true}}`)
+	wantStatus(t, rec, body, http.StatusBadRequest, "BadRequest")
+	rec, body = do(t, s, http.MethodPost, containerPath+"/setLegalHold", `{"tags":["case1"],"allowProtectedAppendWritesAll":true}`)
+	wantStatus(t, rec, body, http.StatusBadRequest, "BadRequest")
+	tags := make([]string, 11)
+	for i := range tags {
+		tags[i] = `"case` + string(rune('a'+i)) + `x"`
+	}
+	rec, body = do(t, s, http.MethodPost, containerPath+"/setLegalHold", `{"tags":[`+strings.Join(tags[:10], ",")+`]}`)
+	wantStatus(t, rec, body, http.StatusOK, "")
+	rec, body = do(t, s, http.MethodPost, containerPath+"/setLegalHold", `{"tags":[`+tags[10]+`]}`)
+	wantStatus(t, rec, body, http.StatusBadRequest, "InvalidParameter")
+	do(t, s, http.MethodPost, containerPath+"/clearLegalHold", `{"tags":[`+strings.Join(tags[:10], ",")+`]}`)
+	lock(t, s, policy(t, s))
+	rec, body = do(t, s, http.MethodPut, containerPath+"/immutabilityPolicies/default", `{"properties":{"immutabilityPeriodSinceCreationInDays":2}}`)
+	wantStatus(t, rec, body, http.StatusBadRequest, "BadRequest")
+}
+
+func TestSystemContainers(t *testing.T) {
+	s := arm.New()
+	newStorage(t, s, "")
+	if rec, body := do(t, s, http.MethodPut, accountPath+"/blobServices/default/containers/$web", "{}"); rec.Code != http.StatusCreated {
+		t.Fatalf("ARM $web = %d %v", rec.Code, body)
+	}
+	if rec := blobDo(t, s, http.MethodPut, "/acct/$root?restype=container", ""); rec.Code != http.StatusCreated {
+		t.Fatalf("data-plane $root = %d %s", rec.Code, rec.Body)
+	}
+	if rec := blobDo(t, s, http.MethodPut, "/acct/$root/a", "1"); rec.Code != http.StatusCreated {
+		t.Fatalf("a blob in $root = %d %s", rec.Code, rec.Body)
+	}
+	wantError(t, blobDo(t, s, http.MethodPut, "/acct/$logs?restype=container", ""), http.StatusBadRequest, "InvalidResourceName")
+	wantError(t, blobDo(t, s, http.MethodHead, "/acct/a", ""), http.StatusBadRequest, "BadRequest")
+}
+
+func TestBlobCallsUseCanonicalNames(t *testing.T) {
+	t.Run("faults see the account in lower case", func(t *testing.T) {
+		faults := fault.New().Add(fault.Rule{Method: "PutBlob", Resource: "acct/data/a", Fault: fault.Unavailable()})
+		s := arm.New(arm.WithFaults(faults))
+		newStorage(t, s, "")
+		if rec := blobDo(t, s, http.MethodPut, "/ACCT/data/a", "1"); rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("a fault on acct/data/a through /ACCT = %d %s", rec.Code, rec.Body)
+		}
+	})
+	t.Run("write needs look the container up by its exact name", func(t *testing.T) {
+		p := access.Allow("Microsoft.Resources/*", "Microsoft.Storage/storageAccounts/write", "Microsoft.Storage/storageAccounts/blobServices/containers/write",
+			blobAction+"add/action")
+		s := arm.New(arm.WithPolicy(p))
+		newStorage(t, s, "")
+		blobDo(t, s, http.MethodPut, "/acct/data/a", "1")
+		wantError(t, blobDo(t, s, http.MethodPut, "/acct/Data/a", "2"), http.StatusNotFound, "ContainerNotFound")
 	})
 }

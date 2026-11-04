@@ -151,6 +151,9 @@ func (s *Server) putAccount(c *call) (*reply, *apiError) {
 			const vlw = "immutableStorageWithVersioning"
 			created := res.account == nil
 			was, given := res.props[vlw], p.props[vlw] != nil
+			if m, _ := p.props[vlw].(map[string]any); m["immutabilityPolicy"] != nil {
+				return nil, unsupported("a default version-level immutability policy is not supported")
+			}
 			if !created && given && versionLevelWORM(p.props) != versionLevelWORM(res.props) {
 				return nil, newError(http.StatusBadRequest, "PropertyIsImmutable",
 					"Version-level immutability can be enabled only when a storage account is created, and cannot be disabled.")

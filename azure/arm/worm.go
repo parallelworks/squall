@@ -76,6 +76,9 @@ func (s *Server) legalHold(set bool) handler {
 		if !ok {
 			return nil, requiredParameter("tags")
 		}
+		if all, _ := boolean(body, "allowProtectedAppendWritesAll"); all {
+			return nil, unsupported("allowProtectedAppendWritesAll is not supported")
+		}
 		var tags []string
 		for _, t := range raw {
 			tag, _ := t.(string)
@@ -91,6 +94,18 @@ func (s *Server) legalHold(set bool) handler {
 			return nil, aerr
 		}
 		w := res.worm
+		if set {
+			union := make(map[string]bool, len(w.tags)+len(tags))
+			for _, t := range w.tags {
+				union[t.tag] = true
+			}
+			for _, tag := range tags {
+				union[tag] = true
+			}
+			if len(union) > maxLegalHoldTags {
+				return nil, invalidParameter("tags", "A container can have at most %d legal hold tags.", maxLegalHoldTags)
+			}
+		}
 		for _, tag := range tags {
 			have := slices.ContainsFunc(w.tags, func(t legalTag) bool { return t.tag == tag })
 			switch {
@@ -107,6 +122,9 @@ func (s *Server) legalHold(set bool) handler {
 		return ok200(map[string]any{"hasLegalHold": w.held(), "tags": names}), nil
 	}
 }
+
+// maxLegalHoldTags is how many legal hold tags Microsoft documents a container can have.
+const maxLegalHoldTags = 10
 
 func (s *Server) putImmutabilityPolicy(c *call) (*reply, *apiError) {
 	if c.val("policy") != "default" {
@@ -135,18 +153,24 @@ func (s *Server) putImmutabilityPolicy(c *call) (*reply, *apiError) {
 	}
 	appendWrites, _ := boolean(props, "allowProtectedAppendWrites")
 	appendWritesAll, _ := boolean(props, "allowProtectedAppendWritesAll")
+	if appendWritesAll {
+		return nil, unsupported("allowProtectedAppendWritesAll is not supported")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	res, aerr := s.wormContainer(c)
 	if aerr != nil {
 		return nil, aerr
 	}
+	if s.containerVersionLevel(res) {
+		return nil, unsupported("immutability policies on a container with version-level immutability are not supported")
+	}
 	p := res.worm.policy
 	if m := c.r.Header.Get("If-Match"); m != "" && (p == nil || m != "*" && m != p.etag) {
 		return nil, preconditionFailed()
 	}
 	if res.worm.locked() {
-		return nil, policyLocked()
+		return nil, unsupported("extending a locked immutability policy is not supported")
 	}
 	update := "put"
 	if p == nil {
@@ -279,6 +303,13 @@ func (s *Server) accountOf(res *resource) *resource {
 	return acct
 }
 
+// containerVersionLevel reports whether the container res has version-level
+// immutability, its own or its account's. The caller holds s.mu.
+func (s *Server) containerVersionLevel(res *resource) bool {
+	acct := s.accountOf(res)
+	return versionLevelWORM(res.props) || acct != nil && versionLevelWORM(acct.props)
+}
+
 // versionLevelAnywhere reports whether the storage account acct, or any of
 // its containers, soft-deleted ones included, has version-level
 // immutability. The caller holds s.mu.
@@ -311,7 +342,7 @@ func (s *Server) storageParent(res *resource) *resource {
 // holds s.mu.
 func (s *Server) containerProtected(res *resource, dataPlane bool) *apiError {
 	empty := !s.holdsBlobs(res)
-	if acct := s.accountOf(res); (dataPlane || !empty) && (versionLevelWORM(res.props) || acct != nil && versionLevelWORM(acct.props)) {
+	if (dataPlane || !empty) && s.containerVersionLevel(res) {
 		return newError(http.StatusConflict, "ContainerImmutableStorageWithVersioningEnabled",
 			"This operation is not permitted on a container with version-level immutability enabled.")
 	}

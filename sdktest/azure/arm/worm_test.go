@@ -84,8 +84,8 @@ func TestLockedPolicyProtectsTheAccount(t *testing.T) {
 	if _, err := c.containers.CreateOrUpdateImmutabilityPolicy(t.Context(), group, "worm1", "data", policy(0)); code(err) != "InvalidParameter" {
 		t.Fatalf("a zero-day policy = %v", err)
 	}
-	if _, err := c.containers.CreateOrUpdateImmutabilityPolicy(t.Context(), group, "worm1", "data", policy(2)); code(err) != "ContainerImmutabilityPolicyLocked" {
-		t.Fatalf("changing a locked policy = %v", err)
+	if _, err := c.containers.CreateOrUpdateImmutabilityPolicy(t.Context(), group, "worm1", "data", policy(2)); code(err) != "BadRequest" || status(err) != http.StatusBadRequest {
+		t.Fatalf("extending a locked policy, which is not modeled = %v", err)
 	}
 	got, err := c.containers.Get(t.Context(), group, "worm1", "data", nil)
 	if err != nil || !*got.ContainerProperties.HasImmutabilityPolicy ||
@@ -247,6 +247,15 @@ func TestVersionLevelImmutability(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := c.blobs(t, "vlw1")
+	props, err := client.ServiceClient().NewContainerClient("data").GetProperties(t.Context(), nil)
+	if err != nil || props.IsImmutableStorageWithVersioningEnabled == nil || !*props.IsImmutableStorageWithVersioningEnabled {
+		t.Fatalf("container properties = %+v, %v", props, err)
+	}
+	page, err := client.NewListContainersPager(nil).NextPage(t.Context())
+	if err != nil || len(page.ContainerItems) != 1 || page.ContainerItems[0].Properties.IsImmutableStorageWithVersioningEnabled == nil ||
+		!*page.ContainerItems[0].Properties.IsImmutableStorageWithVersioningEnabled {
+		t.Fatalf("listed containers = %+v, %v", page, err)
+	}
 	made := upload(t, client, "a", "x")
 	if _, err := client.DeleteBlob(t.Context(), "data", "a", nil); err != nil {
 		t.Fatal(err)

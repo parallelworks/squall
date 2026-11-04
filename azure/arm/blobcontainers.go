@@ -14,8 +14,14 @@ import (
 // containerNames are the names the Blob service takes for a container.
 var containerNames = regexp.MustCompile(`^[a-z0-9](?:-?[a-z0-9])*$`)
 
+// systemContainers are the special containers a caller can create, as Azure allows.
+var systemContainers = []string{"$root", "$web"}
+
 // containerNameError fails a container name Azure does not take, or returns nil.
 func containerNameError(name string) *apiError {
+	if slices.Contains(systemContainers, name) {
+		return nil
+	}
 	switch {
 	case len(name) < 3 || len(name) > 63:
 		return newError(http.StatusBadRequest, "OutOfRangeInput", "The specified resource name length is not within the permissible limits.")
@@ -93,6 +99,7 @@ func (s *Server) containerProperties(c *blobCall) (*blobReply, *apiError) {
 	h.Set("x-ms-lease-state", "available")
 	h.Set("x-ms-has-immutability-policy", strconv.FormatBool(cont.worm != nil && cont.worm.policy != nil))
 	h.Set("x-ms-has-legal-hold", strconv.FormatBool(cont.worm.held()))
+	h.Set("x-ms-immutable-storage-with-versioning-enabled", strconv.FormatBool(s.containerVersionLevel(cont)))
 	h.Set("x-ms-default-encryption-scope", "$account-encryption-key")
 	h.Set("x-ms-deny-encryption-scope-override", "false")
 	if access := str(cont.props, "publicAccess"); access != "" && access != "None" {
@@ -131,13 +138,14 @@ type containerXML struct {
 		DenyOverride           bool   `xml:"DenyEncryptionScopeOverride"`
 		HasImmutabilityPolicy  bool   `xml:"HasImmutabilityPolicy"`
 		HasLegalHold           bool   `xml:"HasLegalHold"`
+		VersionLevelWORM       bool   `xml:"ImmutableStorageWithVersioningEnabled"`
 		DeletedTime            string `xml:"DeletedTime,omitempty"`
 		RemainingRetentionDays *int   `xml:"RemainingRetentionDays,omitempty"`
 	} `xml:"Properties"`
 	Metadata metadataXML `xml:"Metadata,omitempty"`
 }
 
-func renderContainerXML(res *resource, metadata bool) containerXML {
+func (s *Server) renderContainerXML(res *resource, metadata bool) containerXML {
 	var x containerXML
 	x.Name = res.name
 	x.Properties.LastModified = res.created.UTC().Format(http.TimeFormat)
@@ -146,6 +154,7 @@ func renderContainerXML(res *resource, metadata bool) containerXML {
 	x.Properties.DefaultEncryptionScope = "$account-encryption-key"
 	x.Properties.HasImmutabilityPolicy = res.worm != nil && res.worm.policy != nil
 	x.Properties.HasLegalHold = res.worm.held()
+	x.Properties.VersionLevelWORM = s.containerVersionLevel(res)
 	if access := str(res.props, "publicAccess"); access != "" && access != "None" {
 		x.Properties.PublicAccess = strings.ToLower(access)
 	}
@@ -202,13 +211,13 @@ func (s *Server) listContainersData(c *blobCall) (*blobReply, *apiError) {
 	under := key(acct.id + "/" + blobService.path + "/default/" + containerKind.plural + "/")
 	for k, res := range s.resources {
 		if res.kind == containerKind && strings.HasPrefix(k, under) {
-			all = append(all, entry{res.name + "\x00", renderContainerXML(res, withMetadata)})
+			all = append(all, entry{res.name + "\x00", s.renderContainerXML(res, withMetadata)})
 		}
 	}
 	if withDeleted {
 		now := s.now()
 		for _, d := range s.deletedContainers(acct) {
-			x := renderContainerXML(d.res, withMetadata)
+			x := s.renderContainerXML(d.res, withMetadata)
 			x.Deleted, x.Version = true, d.version
 			x.Properties.LeaseStatus = ""
 			x.Properties.LeaseState = "expired"

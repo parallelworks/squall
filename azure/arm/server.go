@@ -399,10 +399,12 @@
 //     storage account, or its group, deletes its containers and blobs,
 //     deleted ones included.
 //   - A legal hold takes tags of 3 to 23 letters and digits, lower-cased as
-//     Azure does. An immutability policy is default, takes 1 to 146,000 days
-//     and is Unlocked until locked with its current ETag in If-Match; a
-//     locked one cannot be changed (409 ContainerImmutabilityPolicyLocked) and
-//     extending or deleting a policy is not served. While a container has a
+//     Azure does, and a container holds at most 10, as Microsoft documents;
+//     the error for an 11th (400 InvalidParameter) is inferred. An
+//     immutability policy is default, takes 1 to 146,000 days and is
+//     Unlocked until locked with its current ETag in If-Match. Extending a
+//     locked policy, deleting a policy and allowProtectedAppendWritesAll, on
+//     a policy or a legal hold, are not supported and fail with 400. While a container has a
 //     legal hold, its blobs can be created but not overwritten, snapshotted
 //     or deleted (409 BlobImmutableDueToLegalHold). A policy blocks deletes
 //     of a blob for its days since the blob was created, and overwrites and
@@ -443,9 +445,14 @@
 //     container takes it only when created, and only while the account has
 //     versioning on, as Microsoft documents; migrating an existing one is not
 //     served. Versioning cannot be turned off while the account or any of
-//     its containers, soft-deleted ones included, has version-level
-//     immutability, as Microsoft documents. Both fail with 400
-//     InvalidRequestPropertyValue, which is inferred.
+//     its containers has version-level immutability, as Microsoft
+//     documents; that a soft-deleted container's counts is inferred. Both
+//     fail with 400 InvalidRequestPropertyValue, which is inferred.
+//     Version-level immutability policies are not modeled: a default policy
+//     in an account's immutableStorageWithVersioning, and an immutability
+//     policy on a container with version-level immutability, its own or its
+//     account's, fail with 400. Get Container Properties and List Containers
+//     report version-level immutability, the container's or its account's.
 //     Blob-level immutability policies
 //     and legal holds are not supported: Put Blob with
 //     x-ms-immutability-policy-until-date, x-ms-immutability-policy-mode or
@@ -466,7 +473,15 @@
 //     default, refuses calls with 403 AuthorizationFailure unless an IP rule
 //     allows the caller's address; virtual network rules and bypass are not
 //     modeled. Errors are XML with the code in x-ms-error-code, and HEAD
-//     errors carry only the header.
+//     errors carry only the header. Account names are matched in any case
+//     and faults and the policy see them in lower case. Container names are
+//     3 to 63 lower-case letters, digits and hyphens, through ARM as through
+//     the Blob service, or $root or $web, which can be created as Azure
+//     allows; $logs, which Azure makes itself for analytics logging, is
+//     refused like any invalid name. The Blob service finds a container only
+//     by its exact name and answers a differently cased one 404
+//     ContainerNotFound, where Azure may answer otherwise. Addressing a blob
+//     in the root container without $root in the path is not supported (400).
 //   - Blobs keep their size, MD5, HTTP properties and metadata, not their
 //     data, up to 16 MiB a call, and Get Blob is not served. Metadata names
 //     are lower-cased. Put Blob takes block blobs only and checks Content-MD5,

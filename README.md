@@ -620,7 +620,9 @@ For Azure Resource Manager:
   `InsecureAllowCredentialWithHTTP`; a host name such as
   `{account}.blob.core.windows.net` (or `{account}.privatelink.blob...`)
   names the account too. Container names are lower case, 3 to 63 letters,
-  digits and hyphens, through ARM as through the Blob service. It shares the ARM
+  digits and hyphens, through ARM as through the Blob service, or `$root`
+  and `$web` (not `$logs`); a blob in the root container is addressed with
+  `$root` in the path, and implicit root addressing answers 400. It shares the ARM
   server's accounts, containers, blob service properties, faults and policy,
   so deleting a container or account through ARM deletes its blobs. A missing
   account answers 404 `ResourceNotFound`, where Azure's host name would not
@@ -635,6 +637,11 @@ For Azure Resource Manager:
   a role's `*` does not in Azure; `networkAcls` that deny by default, or
   disabled public network access, answer 403 `AuthorizationFailure` unless an
   IP rule allows the caller.
+- Version-level immutability policies are not modeled: a default policy on
+  an account's version-level settings, or an immutability policy on a
+  version-level immutable container, answers 400, as do extending a locked
+  container policy and `allowProtectedAppendWritesAll`. A container takes
+  at most 10 legal hold tags.
 - Container legal holds block overwrites, snapshots and deletes of their
   blobs. An immutability policy blocks deletes for its days, and overwrites
   and snapshots for as long as it exists. Deleting an account with a
@@ -650,7 +657,8 @@ For Azure Resource Manager:
   container exists, and one without it cannot while it has such a
   container. Account version-level immutability is set only at creation,
   kept across updates and implies versioning; a container takes it only
-  with versioning on, and versioning cannot then be turned off. Blob-level
+  with versioning on, and versioning cannot then be turned off (that a
+  soft-deleted container's counts is inferred). Blob-level
   immutability policies and legal holds are not supported (400). A
   soft-deleted container's protection lapses when its retention days end,
   so a test of that should make the server with `arm.WithClock` and move
