@@ -201,6 +201,87 @@ func (s *Server) listGroups(c *call) (*reply, *apiError) {
 	return ok(listBody(out, func(g *group) any { return g.render() })), nil
 }
 
+// listGroupResources lists the resources in a group as ARM tracks them: the
+// types with a location, which leaves out proxy types such as subnets, record
+// sets and blob containers.
+func (s *Server) listGroupResources(c *call) (*reply, *apiError) {
+	match, err := parseTagFilter(c.query("$filter"))
+	if err != nil {
+		return nil, err
+	}
+	if v := c.query("$top"); v != "" {
+		return nil, unsupported("the $top query parameter is not supported when listing a group's resources")
+	}
+	var created, provisioning bool
+	if v := c.query("$expand"); v != "" {
+		for part := range strings.SplitSeq(v, ",") {
+			switch strings.TrimSpace(part) {
+			case "createdTime":
+				created = true
+			case "provisioningState":
+				provisioning = true
+			default:
+				return nil, unsupported("the $expand '%s' is not supported; use createdTime, provisioningState or both", v)
+			}
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	gk := groupKey(c)
+	observe := s.observer()
+	if g, ok := s.groups[gk]; ok {
+		observe(g.pending)
+	}
+	if err := s.readableGroup(c); err != nil {
+		return nil, err
+	}
+	for _, res := range s.resources {
+		if res.kind.located && res.inGroup(gk) {
+			observe(res.pending)
+		}
+	}
+	var out []*resource
+	for _, res := range s.resources {
+		if res.kind.located && res.inGroup(gk) && match(res.tags) {
+			out = append(out, res)
+		}
+	}
+	slices.SortFunc(out, func(a, b *resource) int { return cmp.Compare(key(a.id), key(b.id)) })
+	return ok(listBody(out, func(res *resource) any {
+		m := map[string]any{"id": res.id, "name": genericName(res.id), "type": res.kind.typ, "location": res.loc}
+		if res.tags != nil {
+			m["tags"] = res.tags
+		}
+		for _, name := range []string{"extendedLocation", "kind", "plan", "sku"} {
+			if v, ok := res.top[name]; ok {
+				m[name] = v
+			}
+		}
+		if res.disk != nil && res.disk.vm != "" {
+			m["managedBy"] = res.disk.vm
+		}
+		if created {
+			m["createdTime"] = timestamp(res.created)
+		}
+		if provisioning {
+			m["provisioningState"] = res.state
+		}
+		return m
+	})), nil
+}
+
+// genericName is the name ARM's generic resource APIs give the resource id: a
+// nested one's names joined with slashes, such as vm/extension.
+func genericName(id string) string {
+	_, path, _ := strings.Cut(id, "/providers/")
+	parts := strings.Split(path, "/")
+	var names []string
+	for i := 2; i < len(parts); i += 2 {
+		names = append(names, parts[i])
+	}
+	return strings.Join(names, "/")
+}
+
 // parseTagFilter parses the resource group list filters ARM takes on tags,
 // "tagName eq 'k'" and "tagName eq 'k' and tagValue eq 'v'". Tag names match
 // without regard to case, values exactly.

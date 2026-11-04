@@ -727,3 +727,49 @@ func TestDeploymentModelProviderData(t *testing.T) {
 		t.Fatalf("an unknown member = %d %v", rec.Code, body)
 	}
 }
+
+func TestGroupResourceShapes(t *testing.T) {
+	s := arm.New()
+	newGroup(t, s)
+	list := groupPath + "/resources?api-version=2025-04-01"
+	if rec, body := do(t, s, http.MethodGet, list, ""); rec.Code != http.StatusOK || fmt.Sprint(body["value"]) != "[]" {
+		t.Fatalf("empty group = %d %v", rec.Code, body)
+	}
+	zone := groupPath + "/providers/Microsoft.Network/privateDnsZones/example.internal"
+	for _, put := range [][2]string{
+		{zone, `{"location":"global","tags":{"env":"test"}}`},
+		{zone + "/virtualNetworkLinks/link", `{"location":"global","properties":{"virtualNetwork":{"id":"/subscriptions/s/resourceGroups/net/providers/Microsoft.Network/virtualNetworks/vnet"},"registrationEnabled":false}}`},
+		{zone + "/A/www", `{"properties":{"ttl":300,"aRecords":[{"ipv4Address":"10.0.0.4"}]}}`},
+	} {
+		if rec, got := do(t, s, http.MethodPut, put[0], put[1]); rec.Code >= 300 {
+			t.Fatalf("PUT %s = %d %v", put[0], rec.Code, got)
+		}
+	}
+	rec, body := do(t, s, http.MethodGet, list+"&$expand=createdTime,provisioningState", "")
+	value, _ := body["value"].([]any)
+	if rec.Code != http.StatusOK || len(value) != 2 {
+		t.Fatalf("list = %d %v", rec.Code, body)
+	}
+	z, _ := value[0].(map[string]any)
+	l, _ := value[1].(map[string]any)
+	if z["id"] != zone || z["name"] != "example.internal" || z["type"] != "Microsoft.Network/privateDnsZones" || z["location"] != "global" ||
+		fmt.Sprint(z["tags"]) != "map[env:test]" || z["provisioningState"] != "Succeeded" || z["createdTime"] == nil || z["properties"] != nil {
+		t.Errorf("zone = %v", z)
+	}
+	if l["id"] != zone+"/virtualNetworkLinks/link" || l["name"] != "example.internal/link" ||
+		l["type"] != "Microsoft.Network/privateDnsZones/virtualNetworkLinks" {
+		t.Errorf("link = %v", l)
+	}
+	_, body = do(t, s, http.MethodGet, list+"&$filter="+url.QueryEscape("tagName eq 'env'"), "")
+	if value, _ := body["value"].([]any); len(value) != 1 {
+		t.Errorf("tag filter = %v", body)
+	}
+	for _, query := range []string{"$top=1", "$expand=changedTime", "$filter=" + url.QueryEscape("resourceType eq 'Microsoft.Network/privateDnsZones'")} {
+		if rec, body := do(t, s, http.MethodGet, list+"&"+query, ""); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s = %d %v", query, rec.Code, body)
+		}
+	}
+	if rec, body := do(t, s, http.MethodGet, "/subscriptions/s/resourcegroups/nope/resources", ""); rec.Code != http.StatusNotFound || errorCode(body) != "ResourceGroupNotFound" {
+		t.Errorf("missing group = %d %v", rec.Code, body)
+	}
+}
