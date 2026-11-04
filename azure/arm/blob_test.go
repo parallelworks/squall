@@ -245,7 +245,7 @@ func TestStorageManagementRejectsWhatItDoesNotModel(t *testing.T) {
 		accountPath + "/fileServices/default/shares?api-version=1&$filter=x&$expand=deleted", containers + "/data?api-version=1&$expand=stats",
 	} {
 		if rec, body := do(t, s, http.MethodGet, path, ""); rec.Code != http.StatusOK {
-			t.Errorf("GET %s, which containers and shares have always ignored = %d %v", path, rec.Code, body)
+			t.Errorf("GET %s, which containers and shares take or ignore = %d %v", path, rec.Code, body)
 		}
 	}
 	do(t, s, http.MethodPut, accountPath+"/queueServices/default/queues/jobs", `{}`)
@@ -291,5 +291,26 @@ func TestQueueAndTableShapes(t *testing.T) {
 		if rec, _ := do(t, s, http.MethodDelete, accountPath+path, ""); rec.Code != http.StatusNoContent {
 			t.Errorf("DELETE %s = %d", path, rec.Code)
 		}
+	}
+}
+
+func TestFileServiceKeepsNFSAcrossAnSMBUpdate(t *testing.T) {
+	s := arm.New()
+	newStorage(t, s, "")
+	path := accountPath + "/fileServices/default"
+	for _, body := range []string{
+		`{"properties":{"protocolSettings":{"nfs":{"encryptionInTransit":{"required":true}}}}}`,
+		`{"properties":{"protocolSettings":{"smb":{"versions":"SMB3.1.1"}}}}`,
+	} {
+		if rec, got := do(t, s, http.MethodPut, path, body); rec.Code != http.StatusOK {
+			t.Fatalf("PUT %s = %d %v", body, rec.Code, got)
+		}
+	}
+	_, got := do(t, s, http.MethodGet, path, "")
+	ps, _ := got["properties"].(map[string]any)["protocolSettings"].(map[string]any)
+	nfs, _ := ps["nfs"].(map[string]any)
+	smb, _ := ps["smb"].(map[string]any)
+	if eit, _ := nfs["encryptionInTransit"].(map[string]any); eit["required"] != true || smb["versions"] != "SMB3.1.1" {
+		t.Fatalf("protocol settings = %v", ps)
 	}
 }

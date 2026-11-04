@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"io"
 	"maps"
 	"net/http"
@@ -88,7 +89,9 @@ type accountState struct {
 	// services are the properties of the account's services, by their path.
 	services map[string]map[string]any
 	// deleted are the account's soft-deleted blob containers.
-	deleted []*deletedContainer
+	deleted []*deletedChild
+	// deletedShares are the account's soft-deleted file shares.
+	deletedShares []*deletedChild
 }
 
 // accountName is the form Azure requires of a storage account name.
@@ -129,6 +132,7 @@ func (s *Server) registerStorageRoutes() {
 		s.add("GET", path+"/{name}", ch.kind.action("read"), false, s.getChild(ch))
 		s.add("DELETE", path+"/{name}", ch.kind.action("delete"), false, s.deleteChild(ch))
 	}
+	s.add("POST", account+"/fileServices/default/shares/{name}/restore", shareKind.action("restore/action"), false, s.restoreShare)
 }
 
 func (s *Server) putAccount(c *call) (*reply, *apiError) {
@@ -172,7 +176,9 @@ func (s *Server) putAccount(c *call) (*reply, *apiError) {
 			}
 			return func() {
 				if created {
-					res.account = &accountState{services: map[string]map[string]any{}}
+					res.account = &accountState{services: map[string]map[string]any{
+						fileService.path: {"shareDeleteRetentionPolicy": map[string]any{"enabled": true, "days": json.Number("7")}},
+					}}
 					if versionLevelWORM(p.props) {
 						res.account.services[blobService.path] = map[string]any{"isVersioningEnabled": true}
 					}
@@ -355,14 +361,11 @@ type service struct {
 	kind *kind
 	// path is the service's segment of its ID, such as blobServices.
 	path string
-	// replace is whether setting the properties replaces them all, rather
-	// than keeping the ones the call leaves out.
-	replace bool
 }
 
 var (
 	blobService  = &service{kind: blobServiceKind, path: "blobServices"}
-	fileService  = &service{kind: fileServiceKind, path: "fileServices", replace: true}
+	fileService  = &service{kind: fileServiceKind, path: "fileServices"}
 	queueService = &service{kind: queueServiceKind, path: "queueServices"}
 	tableService = &service{kind: tableServiceKind, path: "tableServices"}
 )
@@ -385,11 +388,28 @@ func (s *Server) putService(svc *service) handler {
 			return nil, newError(http.StatusBadRequest, "InvalidRequestPropertyValue",
 				"Conflicting feature 'VersionLevelWorm' is enabled. Please disable it and retry.")
 		}
-		if svc.replace || res.account.services[svc.path] == nil {
+		if res.account.services[svc.path] == nil {
 			res.account.services[svc.path] = map[string]any{}
 		}
-		maps.Copy(res.account.services[svc.path], p.props)
+		if svc == fileService {
+			mergeProps(res.account.services[svc.path], p.props)
+		} else {
+			maps.Copy(res.account.services[svc.path], p.props)
+		}
 		return ok200(svc.body(c, res)), nil
+	}
+}
+
+// mergeProps merges src into dst: objects merge member by member, and arrays and other values replace.
+func mergeProps(dst, src map[string]any) {
+	for k, v := range src {
+		old, ok := dst[k].(map[string]any)
+		if m, isMap := v.(map[string]any); isMap && ok {
+			merged := maps.Clone(old)
+			mergeProps(merged, m)
+			v = merged
+		}
+		dst[k] = v
 	}
 }
 
@@ -480,6 +500,13 @@ func (s *Server) putChild(ch *child) handler {
 			}
 			c.r.Body = io.NopCloser(bytes.NewReader(body))
 		}
+		var expand map[string]bool
+		if ch == shares {
+			var err *apiError
+			if expand, err = expandOf(c, "snapshots"); err != nil {
+				return nil, err
+			}
+		}
 		p, err := parseBody(c, ch.kind)
 		if err != nil {
 			return nil, err
@@ -489,6 +516,9 @@ func (s *Server) putChild(ch *child) handler {
 		acct, err := s.writableAccount(c, ch.kind)
 		if err != nil {
 			return nil, err
+		}
+		if expand["snapshots"] {
+			return s.snapshotShare(c, p)
 		}
 		if ch == containers {
 			if err := containerNameError(c.val("name")); err != nil {
@@ -530,15 +560,13 @@ func (s *Server) getChild(ch *child) handler {
 		if res == nil {
 			return nil, ch.notFound()
 		}
-		m := s.renderChild(ch, res)
-		expand := c.query("$expand")
-		switch {
-		case ch == shares && slices.Contains(strings.Split(expand, ","), "stats"):
-			m["properties"].(map[string]any)["shareUsageBytes"] = res.usage
-		case ch.upsert && expand != "":
+		if ch == shares {
+			return getShare(c, res)
+		}
+		if expand := c.query("$expand"); ch.upsert && expand != "" {
 			return nil, unsupported("$expand=%s is not supported", expand)
 		}
-		return ok200(m), nil
+		return ok200(s.renderChild(ch, res)), nil
 	}
 }
 
@@ -550,11 +578,24 @@ func (s *Server) listChildren(ch *child) handler {
 		if err != nil {
 			return nil, err
 		}
-		// Containers and shares ignore the parameters they do not model, as they always have; queues and tables refuse them.
-		include, filter := "", ""
+		// Containers and shares ignore the parameters they do not model, as they always have, but for $expand; queues and tables refuse them.
+		filter := ""
+		var deleted []*deletedChild
+		expand := map[string]bool{}
 		switch {
 		case ch == containers:
-			include, filter = c.query("$include"), c.query("$filter")
+			filter = c.query("$filter")
+			if c.query("$include") == "deleted" {
+				deleted = s.deletedContainers(acct)
+			}
+		case ch == shares:
+			if expand, err = expandOf(c, "deleted", "snapshots"); err != nil {
+				return nil, err
+			}
+			filter = c.query("$filter")
+			if expand["deleted"] {
+				deleted = s.deletedShares(acct)
+			}
 		case ch.upsert && c.query("$filter") != "":
 			return nil, unsupported("$filter is not supported")
 		}
@@ -563,20 +604,26 @@ func (s *Server) listChildren(ch *child) handler {
 		for k, res := range s.resources {
 			if res.kind == ch.kind && strings.HasPrefix(k, prefix) && strings.HasPrefix(res.name, filter) {
 				items = append(items, s.renderChild(ch, res))
+				if expand["snapshots"] {
+					for _, sn := range res.shareSnapshots {
+						items = append(items, renderShareSnapshot(sn, false))
+					}
+				}
 			}
 		}
-		if include == "deleted" {
-			now := s.now()
-			for _, d := range s.deletedContainers(acct) {
-				if !strings.HasPrefix(d.res.name, filter) {
-					continue
-				}
-				m := s.renderChild(ch, d.res)
-				props := m["properties"].(map[string]any)
-				props["deleted"], props["deletedTime"], props["version"] = true, timestamp(d.deleted), d.version
-				props["remainingRetentionDays"] = daysLeft(d.deleted, now, d.keep)
-				items = append(items, m)
+		now := s.now()
+		for _, d := range deleted {
+			if !strings.HasPrefix(d.res.name, filter) {
+				continue
 			}
+			m := s.renderChild(ch, d.res)
+			if ch == shares {
+				m["id"] = d.res.id + "_" + d.version
+			}
+			props := m["properties"].(map[string]any)
+			props["deleted"], props["deletedTime"], props["version"] = true, timestamp(d.deleted), d.version
+			props["remainingRetentionDays"] = daysLeft(d.deleted, now, d.keep)
+			items = append(items, m)
 		}
 		slices.SortStableFunc(items, func(a, b map[string]any) int {
 			return cmp.Or(cmp.Compare(key(a["name"].(string)), key(b["name"].(string))), compareDeleted(a, b))
@@ -594,6 +641,9 @@ func (s *Server) deleteChild(ch *child) handler {
 			return nil, err
 		}
 		res := s.resources[key(ch.id(c))]
+		if ch == shares {
+			return s.deleteShare(c, acct, res)
+		}
 		if ch.upsert && res != nil {
 			s.remove(res)
 		}
@@ -689,6 +739,30 @@ func (s *Server) SetShareUsage(id string, bytes int64) bool {
 	}
 	res.usage = bytes
 	return true
+}
+
+// getShare answers a read of the share res, or of one of its snapshots.
+func getShare(c *call, res *resource) (*reply, *apiError) {
+	expand, err := expandOf(c, "stats")
+	if err != nil {
+		return nil, err
+	}
+	at, err := snapshotHeader(c)
+	if err != nil {
+		return nil, err
+	}
+	if !at.IsZero() {
+		i := shareSnapshotAt(res, at)
+		if i < 0 {
+			return nil, shareSnapshotNotFound()
+		}
+		return ok200(renderShareSnapshot(res.shareSnapshots[i], expand["stats"])), nil
+	}
+	m := renderShare(res)
+	if expand["stats"] {
+		m["properties"].(map[string]any)["shareUsageBytes"] = res.usage
+	}
+	return ok200(m), nil
 }
 
 func renderShare(res *resource) map[string]any {
