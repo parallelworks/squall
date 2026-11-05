@@ -64,9 +64,10 @@
 //     changes the bucket's metageneration (inferred). A locked policy cannot
 //     be removed (403 retentionPolicyNotMet) or shortened (403 forbidden),
 //     with Cloud Storage's messages: the bucket lock page says these fail
-//     with 400, but Cloud Storage answers 403, as the API reference's
-//     PERMISSION_DENIED for them says. Only an emptied bucket can be
-//     deleted, so a locked one needs no further check.
+//     with 400, but Cloud Storage answers 403, the PERMISSION_DENIED that
+//     the retentionPolicy field description in the JSON API discovery
+//     document gives for them. Only an emptied bucket can be deleted, so a
+//     locked one needs no further check.
 //   - temporaryHold and eventBasedHold are set by an upload's metadata,
 //     objects.patch and objects.update, where null releases one, and
 //     defaultEventBasedHold puts an event-based hold on each uploaded
