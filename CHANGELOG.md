@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.34.0](https://github.com/parallelworks/squall/compare/v0.33.0...v0.34.0) (2026-11-05)
+
+
+### Features
+
+* **s3:** multipart uploads, Object Lock retention and legal holds, and request payment ([#98](https://github.com/parallelworks/squall/issues/98)) ([96326ef](https://github.com/parallelworks/squall/commit/96326ef4851311c802bc434770013181b8073ea6))
+
 ## [0.33.0](https://github.com/parallelworks/squall/compare/v0.32.0...v0.33.0) (2026-11-05)
 
 
