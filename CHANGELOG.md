@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.32.0](https://github.com/parallelworks/squall/compare/v0.31.0...v0.32.0) (2026-11-05)
+
+
+### Features
+
+* **azure:** NetApp resources report systemData, and NetApp volumes take snapshots ([#94](https://github.com/parallelworks/squall/issues/94)) ([671045c](https://github.com/parallelworks/squall/commit/671045cea26caef63f9f856ba33167f6d32f4faa))
+
 ## [0.31.0](https://github.com/parallelworks/squall/compare/v0.30.0...v0.31.0) (2026-11-04)
 
 
