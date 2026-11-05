@@ -242,6 +242,9 @@ func (s *Server) insertObject(r *http.Request) (any, *apiError) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	o, err := s.writeObject(bucketName, in, data, func(live int64) *apiError {
+		if live == 0 && r.URL.Query().Has("ifGenerationNotMatch") {
+			return conditionNotMet()
+		}
 		return checkMatch(r, "ifGenerationMatch", "ifGenerationNotMatch", live)
 	})
 	if err != nil {
@@ -429,6 +432,33 @@ type objectPatch struct {
 	TemporaryHold   *bool              `json:"temporaryHold"`
 	EventBasedHold  *bool              `json:"eventBasedHold"`
 	Retention       *Retention         `json:"retention"`
+	StorageClass    string             `json:"storageClass"`
+	outputOnly
+}
+
+// outputOnly holds the Object fields the server sets, which a read-modify-write sends back and which are ignored.
+type outputOnly struct {
+	Kind                    json.RawMessage `json:"kind"`
+	ID                      json.RawMessage `json:"id"`
+	SelfLink                json.RawMessage `json:"selfLink"`
+	MediaLink               json.RawMessage `json:"mediaLink"`
+	Generation              json.RawMessage `json:"generation"`
+	Metageneration          json.RawMessage `json:"metageneration"`
+	Size                    json.RawMessage `json:"size"`
+	MD5Hash                 json.RawMessage `json:"md5Hash"`
+	CRC32C                  json.RawMessage `json:"crc32c"`
+	Etag                    json.RawMessage `json:"etag"`
+	TimeCreated             json.RawMessage `json:"timeCreated"`
+	Updated                 json.RawMessage `json:"updated"`
+	TimeStorageClassUpdated json.RawMessage `json:"timeStorageClassUpdated"`
+	TimeFinalized           json.RawMessage `json:"timeFinalized"`
+	TimeDeleted             json.RawMessage `json:"timeDeleted"`
+	SoftDeleteTime          json.RawMessage `json:"softDeleteTime"`
+	HardDeleteTime          json.RawMessage `json:"hardDeleteTime"`
+	RetentionExpirationTime json.RawMessage `json:"retentionExpirationTime"`
+	ComponentCount          json.RawMessage `json:"componentCount"`
+	Owner                   json.RawMessage `json:"owner"`
+	RestoreToken            json.RawMessage `json:"restoreToken"`
 }
 
 func (s *Server) patchObject(r *http.Request) (any, *apiError) { return s.changeObject(r, false) }
@@ -465,6 +495,9 @@ func (s *Server) changeObject(r *http.Request, replace bool) (any, *apiError) {
 	}
 	if in.Bucket != "" && in.Bucket != b.Name || in.Name != "" && in.Name != o.Name {
 		return nil, invalid("squall: an object's bucket and name cannot be changed")
+	}
+	if in.StorageClass != "" && in.StorageClass != o.StorageClass {
+		return nil, invalid("squall: changing an object's storage class needs objects.rewrite, which is not supported")
 	}
 	temporary, eventBased, metadata := o.TemporaryHold, o.EventBasedHold, maps.Clone(o.Metadata)
 	contentType, contentEncoding := o.ContentType, o.ContentEncoding

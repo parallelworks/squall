@@ -2,6 +2,7 @@ package storage_test
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -261,6 +262,8 @@ func TestObjectRetention(t *testing.T) {
 	wantErr(t, "shorten without override", err, http.StatusForbidden, "forbidden", "without overriding unlocked retention intent")
 	_, err = b.Object("k").Update(t.Context(), gcs.ObjectAttrsToUpdate{EventBasedHold: true})
 	wantErr(t, "an event-based hold beside retention", err, http.StatusBadRequest, "invalid", "event-based hold")
+	_, err = b.Object("k").Update(t.Context(), gcs.ObjectAttrsToUpdate{Retention: &gcs.ObjectRetention{Mode: "Locked", RetainUntil: until}})
+	wantErr(t, "lock unlocked retention without override", err, http.StatusForbidden, "forbidden", "without overriding unlocked retention intent")
 	if _, err := b.Object("k").OverrideUnlockedRetention(true).Update(t.Context(), shorter); err != nil {
 		t.Fatalf("shorten with override: %v", err)
 	}
@@ -694,22 +697,99 @@ func TestNullHoldReleases(t *testing.T) {
 	}
 }
 
-func TestLoweringSoftDeleteKeepsEffectiveTime(t *testing.T) {
+func TestSoftDeleteEffectiveTimeFollowsHistory(t *testing.T) {
 	clk := newClock()
 	c := newClient(t, storage.New(storage.WithClock(clk.Now)))
-	b := c.Bucket("lowered")
-	if err := b.Create(t.Context(), project, &gcs.BucketAttrs{SoftDeletePolicy: &gcs.SoftDeletePolicy{RetentionDuration: 30 * 24 * time.Hour}}); err != nil {
+	b := c.Bucket("history")
+	if err := b.Create(t.Context(), project, nil); err != nil {
 		t.Fatal(err)
 	}
-	created := clk.Now()
-	clk.Advance(time.Hour)
-	lowered, err := b.Update(t.Context(), gcs.BucketAttrsToUpdate{SoftDeletePolicy: &gcs.SoftDeletePolicy{RetentionDuration: 7 * 24 * time.Hour}})
-	if err != nil || !lowered.SoftDeletePolicy.EffectiveTime.Equal(created) {
-		t.Fatalf("lowered = %+v, %v, want effective since %v", lowered.SoftDeletePolicy, err, created)
+	day := 24 * time.Hour
+	start := clk.Now()
+	var marks []time.Time
+	for _, step := range []struct {
+		keep time.Duration
+		want int
+	}{
+		{30 * day, 1},
+		{7 * day, 0},
+		{30 * day, 3},
+		{14 * day, 3},
+		{0, -1},
+		{7 * day, 6},
+	} {
+		clk.Advance(time.Hour)
+		marks = append(marks, clk.Now())
+		got, err := b.Update(t.Context(), gcs.BucketAttrsToUpdate{SoftDeletePolicy: &gcs.SoftDeletePolicy{RetentionDuration: step.keep}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := time.Time{}
+		switch {
+		case step.want == 0:
+			want = start
+		case step.want > 0:
+			want = marks[step.want-1]
+		}
+		if !got.SoftDeletePolicy.EffectiveTime.Equal(want) {
+			t.Fatalf("after %v at %v: effective %v, want %v", step.keep, clk.Now(), got.SoftDeletePolicy.EffectiveTime, want)
+		}
 	}
-	clk.Advance(time.Hour)
-	raised, err := b.Update(t.Context(), gcs.BucketAttrsToUpdate{SoftDeletePolicy: &gcs.SoftDeletePolicy{RetentionDuration: 60 * 24 * time.Hour}})
-	if err != nil || !raised.SoftDeletePolicy.EffectiveTime.Equal(clk.Now()) {
-		t.Fatalf("raised = %+v, %v", raised.SoftDeletePolicy, err)
+}
+
+func TestReadModifyWriteUpdate(t *testing.T) {
+	s := storage.New()
+	url := serve(t, s)
+	c, svc := clientAt(t, url), rawService(t, url)
+	if err := c.Bucket("rmw").SetObjectRetention(true).Create(t.Context(), project, nil); err != nil {
+		t.Fatal(err)
 	}
+	if _, err := writeWith(t, c, "rmw", "k", "v", gcs.ObjectAttrs{
+		Metadata: map[string]string{"a": "1"}, Retention: &gcs.ObjectRetention{Mode: "Unlocked", RetainUntil: time.Now().Add(time.Hour)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	o, err := svc.Objects.Get("rmw", "k").Context(t.Context()).Do()
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.Metadata["b"] = "2"
+	got, err := svc.Objects.Update("rmw", "k", o).Context(t.Context()).Do()
+	if err != nil || got.Metadata["a"] != "1" || got.Metadata["b"] != "2" || got.Retention == nil || got.Metageneration != 2 {
+		t.Fatalf("update with the body a get returned = %+v, %v", got, err)
+	}
+}
+
+func TestSoftDeletedTimeDeleted(t *testing.T) {
+	c := newClient(t, storage.New())
+	for _, versioned := range []bool{false, true} {
+		name := fmt.Sprintf("deleted-%t", versioned)
+		b := c.Bucket(name)
+		if err := b.Create(t.Context(), project, &gcs.BucketAttrs{VersioningEnabled: versioned}); err != nil {
+			t.Fatal(err)
+		}
+		o := write(t, c, name, "k", "v")
+		if err := b.Object("k").Delete(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if versioned {
+			if err := b.Object("k").Generation(o.Generation).Delete(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		soft := objects(t, b.Objects(t.Context(), &gcs.Query{SoftDeleted: true}))
+		if len(soft) != 1 || soft[0].Deleted.IsZero() != !versioned {
+			t.Fatalf("versioned %t: soft-deleted = %+v", versioned, soft)
+		}
+	}
+}
+
+func TestUploadIfGenerationNotMatchNeedsALiveObject(t *testing.T) {
+	c := newClient(t, storage.New())
+	if err := c.Bucket("not-match").Create(t.Context(), project, nil); err != nil {
+		t.Fatal(err)
+	}
+	w := c.Bucket("not-match").Object("k").If(gcs.Conditions{GenerationNotMatch: 5}).NewWriter(t.Context())
+	_, _ = w.Write([]byte("x"))
+	wantErr(t, "an upload with ifGenerationNotMatch and no live object", w.Close(), http.StatusPreconditionFailed, "conditionNotMet", "")
 }

@@ -97,3 +97,22 @@ func TestPolicyNeedsRetentionAndRestorePermissions(t *testing.T) {
 		t.Fatalf("update metadata: %v", err)
 	}
 }
+
+func TestPolicyNeedsOverrideToLockUnlockedRetention(t *testing.T) {
+	policy := access.Allow("storage.buckets.create", "storage.buckets.enableObjectRetention", "storage.objects.create",
+		"storage.objects.update", "storage.objects.setRetention")
+	c := newClient(t, storage.New(storage.WithPolicy(policy)))
+	b := c.Bucket("data")
+	if err := b.SetObjectRetention(true).Create(t.Context(), project, nil); err != nil {
+		t.Fatal(err)
+	}
+	until := time.Now().Add(time.Hour)
+	if _, err := writeWith(t, c, "data", "a.txt", "one", gcs.ObjectAttrs{Retention: &gcs.ObjectRetention{Mode: "Unlocked", RetainUntil: until}}); err != nil {
+		t.Fatal(err)
+	}
+	lock := gcs.ObjectAttrsToUpdate{Retention: &gcs.ObjectRetention{Mode: "Locked", RetainUntil: until}}
+	_, err := b.Object("a.txt").OverrideUnlockedRetention(true).Update(t.Context(), lock)
+	wantErr(t, "lock with override", err, http.StatusForbidden, "forbidden", "Permission 'storage.objects.overrideUnlockedRetention' denied")
+	_, err = b.Object("a.txt").Update(t.Context(), lock)
+	wantErr(t, "lock without override", err, http.StatusForbidden, "forbidden", "without overriding unlocked retention intent")
+}

@@ -76,14 +76,33 @@ func (s *Server) nextSoftDeletePolicy(b *bucket, in *softDeletePolicyInput) (*So
 		return new(*old), nil
 	}
 	p := &SoftDeletePolicy{RetentionDurationSeconds: seconds}
-	switch old := b.SoftDeletePolicy; {
-	case seconds == 0:
-	case old != nil && old.RetentionDurationSeconds > seconds:
-		p.EffectiveTime = old.EffectiveTime
-	default:
-		_, p.EffectiveTime = s.timestamp()
+	if seconds > 0 {
+		p.EffectiveTime = effectiveSince(b.softDeleteHistory, seconds, s.now()).UTC().Format(timeFormat)
 	}
 	return p, nil
+}
+
+// policyStep is a soft delete duration and when it took effect.
+type policyStep struct {
+	seconds int64
+	since   time.Time
+}
+
+// effectiveSince is when the latest unbroken run of durations at least seconds began, ending with one set at now.
+func effectiveSince(history []policyStep, seconds int64, now time.Time) time.Time {
+	since := now
+	for i := len(history) - 1; i >= 0 && history[i].seconds >= seconds; i-- {
+		since = history[i].since
+	}
+	return since
+}
+
+// recordSoftDelete adds b's soft delete duration to its history if it changed. The caller holds s.mu.
+func (s *Server) recordSoftDelete(b *bucket) {
+	seconds := b.SoftDeletePolicy.RetentionDurationSeconds
+	if n := len(b.softDeleteHistory); n == 0 || b.softDeleteHistory[n-1].seconds != seconds {
+		b.softDeleteHistory = append(b.softDeleteHistory, policyStep{seconds: seconds, since: s.now()})
+	}
 }
 
 func (s *Server) lockRetentionPolicy(r *http.Request) (any, *apiError) {
@@ -181,6 +200,9 @@ func (s *Server) checkRetention(b *bucket, old, next *Retention, override, event
 		if err != nil {
 			return nil, invalid("Invalid value for: %s is not a valid value", next.RetainUntilTime)
 		}
+		if old != nil && !eventHold && old.Mode == next.Mode && old.RetainUntilTime == t.UTC().Format(timeFormat) {
+			return old, nil
+		}
 		if t.Before(s.now()) {
 			return nil, invalid("Retain until time cannot be in the past.")
 		}
@@ -199,7 +221,7 @@ func (s *Server) checkRetention(b *bucket, old, next *Retention, override, event
 				Status: http.StatusForbidden, Reason: "forbidden",
 				Message: "The locked object retention cannot be removed. Its retention mode cannot be changed and its retention period cannot be shortened.",
 			}
-		case old.Mode != "Locked" && shortened && !override:
+		case old.Mode != "Locked" && (shortened || next.Mode == "Locked") && !override:
 			return nil, &apiError{
 				Status: http.StatusForbidden, Reason: "forbidden",
 				Message: "The unlocked object retention cannot be removed and its retention period cannot be shortened without overriding unlocked retention intent and permission.",

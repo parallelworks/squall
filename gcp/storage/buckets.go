@@ -104,7 +104,8 @@ type bucket struct {
 	// objects holds each name's generations, oldest first; the last is live unless it has TimeDeleted.
 	objects map[string][]*Object
 	// trash holds soft-deleted generations, in the order they were deleted.
-	trash []*Object
+	trash             []*Object
+	softDeleteHistory []policyStep
 	// nextPurge is when the first of trash goes for good.
 	nextPurge time.Time
 	// hardDelete is when a soft-deleted bucket goes for good.
@@ -471,6 +472,7 @@ func (s *Server) store(b Bucket) (*bucket, *apiError) {
 	}
 	stored := &bucket{Bucket: b, objects: map[string][]*Object{}}
 	stored.Bucket = stored.clone()
+	s.recordSoftDelete(stored)
 	s.buckets[b.Name] = stored
 	return stored, nil
 }
@@ -575,6 +577,7 @@ func (s *Server) patchBucket(r *http.Request) (any, *apiError) {
 		labels = nil
 	}
 	b.Labels, b.StorageClass, b.RetentionPolicy, b.SoftDeletePolicy = labels, class, retention, softDelete
+	s.recordSoftDelete(b)
 	if in.DefaultEventBasedHold != nil {
 		b.DefaultEventBasedHold = *in.DefaultEventBasedHold
 	} else if cleared("defaultEventBasedHold") {

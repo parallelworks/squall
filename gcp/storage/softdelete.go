@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"maps"
@@ -99,7 +100,7 @@ func (s *Server) softDeletedBucket(name string, gen int64) *bucket {
 func (s *Server) softDeletedBuckets() []Bucket {
 	var out []Bucket
 	for _, name := range slices.Sorted(maps.Keys(s.softBuckets)) {
-		gens := slices.SortedFunc(slices.Values(s.softBuckets[name]), func(a, b *bucket) int { return int(a.Generation - b.Generation) })
+		gens := slices.SortedFunc(slices.Values(s.softBuckets[name]), func(a, b *bucket) int { return cmp.Compare(a.Generation, b.Generation) })
 		for _, b := range gens {
 			out = append(out, b.clone())
 		}
@@ -174,6 +175,7 @@ func (s *Server) restoreObject(r *http.Request) (any, *apiError) {
 	if err := checkMatch(r, "ifGenerationMatch", "ifGenerationNotMatch", liveGen); err != nil {
 		return nil, err
 	}
+	// The reference says only ifGenerationNotMatch fails without a live object; the metageneration pair is inferred.
 	if live == nil && (r.URL.Query().Has("ifGenerationNotMatch") || r.URL.Query().Has("ifMetagenerationMatch") || r.URL.Query().Has("ifMetagenerationNotMatch")) {
 		return nil, conditionNotMet()
 	}
