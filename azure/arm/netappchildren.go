@@ -1,0 +1,316 @@
+package arm
+
+import (
+	"cmp"
+	"net/http"
+	"slices"
+	"strings"
+	"time"
+)
+
+var (
+	backupVaultKind = &kind{
+		typ: "Microsoft.NetApp/netAppAccounts/backupVaults", plural: "backupVaults", typeName: "BackupVault",
+		readOnly: []string{"provisioningState"},
+		located:  true,
+	}
+	netappBackupKind = &kind{
+		typ: "Microsoft.NetApp/netAppAccounts/backupVaults/backups", plural: "backups", typeName: "Backup",
+	}
+	backupPolicyKind = &kind{
+		typ: "Microsoft.NetApp/netAppAccounts/backupPolicies", plural: "backupPolicies", typeName: "BackupPolicy",
+		props:    []string{"dailyBackupsToKeep", "enabled", "monthlyBackupsToKeep", "weeklyBackupsToKeep"},
+		readOnly: []string{"backupPolicyId", "provisioningState", "volumeBackups", "volumesAssigned"},
+		located:  true, etag: weakETag,
+	}
+	snapshotPolicyKind = &kind{
+		typ: "Microsoft.NetApp/netAppAccounts/snapshotPolicies", plural: "snapshotPolicies", typeName: "SnapshotPolicy",
+		props:    []string{"dailySchedule", "enabled", "hourlySchedule", "monthlySchedule", "weeklySchedule"},
+		readOnly: []string{"provisioningState"},
+		located:  true, etag: weakETag,
+	}
+	volumeGroupKind = &kind{
+		typ: "Microsoft.NetApp/netAppAccounts/volumeGroups", plural: "volumeGroups", typeName: "VolumeGroupDetails",
+		props:    []string{"groupMetaData", "volumes"},
+		readOnly: []string{"provisioningState"},
+		located:  true,
+	}
+	cacheKind = &kind{
+		typ: "Microsoft.NetApp/netAppAccounts/capacityPools/caches", plural: "caches", typeName: "Cache",
+		top: []string{"zones"},
+		props: []string{
+			"cacheSubnetResourceId", "cifsChangeNotifications", "encryptionKeySource", "exportPolicy", "filePath",
+			"globalFileLocking", "kerberos", "keyVaultPrivateEndpointResourceId", "ldap", "ldapServerType",
+			"originClusterInformation", "peeringSubnetResourceId", "protocolTypes", "size", "smbSettings",
+			"throughputMibps", "writeBack",
+		},
+		readOnly: []string{
+			"actualThroughputMibps", "cacheState", "encryption", "fileAccessLogs", "language", "maximumNumberOfFiles",
+			"mountTargets", "provisioningState",
+		},
+		located: true, etag: weakETag,
+	}
+)
+
+const (
+	backupVaultPath    = netappAccount + "/backupVaults/{vault}"
+	netappBackupPath   = backupVaultPath + "/backups/{backup}"
+	backupPolicyPath   = netappAccount + "/backupPolicies/{policy}"
+	snapshotPolicyPath = netappAccount + "/snapshotPolicies/{policy}"
+	volumeGroupPath    = netappAccount + "/volumeGroups/{volumeGroup}"
+	cachePath          = netappPool + "/caches/{cache}"
+)
+
+func backupVaultID(c *call) string  { return netappAccountID(c) + "/backupVaults/" + c.val("vault") }
+func netappBackupID(c *call) string { return backupVaultID(c) + "/backups/" + c.val("backup") }
+func backupPolicyID(c *call) string { return netappAccountID(c) + "/backupPolicies/" + c.val("policy") }
+
+func snapshotPolicyID(c *call) string {
+	return netappAccountID(c) + "/snapshotPolicies/" + c.val("policy")
+}
+
+func volumeGroupID(c *call) string {
+	return netappAccountID(c) + "/volumeGroups/" + c.val("volumeGroup")
+}
+func cacheID(c *call) string { return poolID(c) + "/caches/" + c.val("cache") }
+
+// netappIDName is the name NetApp gives the resource of kind k with ID id.
+// A volume group is named on its own, not after its account.
+func netappIDName(k *kind, id string) string {
+	if k == volumeGroupKind {
+		return id[strings.LastIndex(id, "/")+1:]
+	}
+	return netappName(id)
+}
+
+func netappResourceName(res *resource) string { return netappIDName(res.kind, res.id) }
+
+// prepareVolumeGroup accepts a volume group that lists no volumes; creating
+// volumes with their group is not modeled. The caller holds s.mu.
+func (s *Server) prepareVolumeGroup(res *resource, p *parsed) (func(), *apiError) {
+	if p.tags != nil {
+		return nil, unsupported("a volume group takes no tags")
+	}
+	if v := p.props["volumes"]; v != nil {
+		if vols, ok := v.([]any); !ok || len(vols) > 0 {
+			return nil, unsupported("volume groups that create volumes are not modeled")
+		}
+	}
+	delete(p.props, "volumes")
+	return func() { s.update(res, p) }, nil
+}
+
+// prepareCache validates p as the new body of the cache res, and returns how
+// to apply it. A new cache takes an address in its cache subnet. The caller
+// holds s.mu.
+func (s *Server) prepareCache(res *resource, p *parsed) (func(), *apiError) {
+	subnet := str(p.props, "cacheSubnetResourceId")
+	if subnet == "" || str(p.props, "peeringSubnetResourceId") == "" || str(p.props, "filePath") == "" ||
+		str(p.props, "encryptionKeySource") == "" || p.props["size"] == nil || p.props["originClusterInformation"] == nil {
+		return nil, unsupported("a cache needs cacheSubnetResourceId, encryptionKeySource, filePath, originClusterInformation, peeringSubnetResourceId and size")
+	}
+	return s.holdAddress(res, p, subnet, "cacheSubnetResourceId")
+}
+
+// volumesNaming returns the NetApp volumes whose dataProtection names the
+// resource id as section.field, such as backup.backupPolicyId. The caller
+// holds s.mu.
+func (s *Server) volumesNaming(id, section, field string) []*resource {
+	var out []*resource
+	for _, res := range s.resources {
+		if res.kind != volumeKind {
+			continue
+		}
+		dp, _ := res.props["dataProtection"].(map[string]any)
+		sec, _ := dp[section].(map[string]any)
+		if ref := str(sec, field); ref != "" && key(ref) == key(id) {
+			out = append(out, res)
+		}
+	}
+	slices.SortFunc(out, func(a, b *resource) int { return cmp.Compare(key(a.id), key(b.id)) })
+	return out
+}
+
+// groupVolumes returns the volumes in the volume group g, ordered by ID. The caller holds s.mu.
+func (s *Server) groupVolumes(g *resource) []*resource {
+	var out []*resource
+	for _, res := range s.resources {
+		if res.kind == volumeKind && res.volumeGroup != "" && key(res.volumeGroup) == key(g.id) {
+			out = append(out, res)
+		}
+	}
+	slices.SortFunc(out, func(a, b *resource) int { return cmp.Compare(key(a.id), key(b.id)) })
+	return out
+}
+
+func (s *Server) renderGroupVolumes(g *resource) []any {
+	out := []any{}
+	for _, vol := range s.groupVolumes(g) {
+		m := s.renderNetApp(vol)
+		delete(m, "systemData")
+		delete(m, "location")
+		delete(m, "etag")
+		out = append(out, m)
+	}
+	return out
+}
+
+// renderNetAppListed renders res as a list shows it: a volume group without its volumes or systemData.
+func (s *Server) renderNetAppListed(res *resource) map[string]any {
+	m := s.renderNetApp(res)
+	if res.kind == volumeGroupKind {
+		delete(m, "systemData")
+		delete(m["properties"].(map[string]any), "volumes")
+	}
+	return m
+}
+
+// netappChildInUse fails the deletion of a backup vault that holds backups
+// or that a volume backs up to, a policy a volume uses, or a volume group
+// that holds volumes. The caller holds s.mu.
+func (s *Server) netappChildInUse(res *resource) *apiError {
+	if err := s.nestedInUse(res); err != nil {
+		return err
+	}
+	var users []*resource
+	switch res.kind {
+	case backupVaultKind:
+		users = s.volumesNaming(res.id, "backup", "backupVaultId")
+	case backupPolicyKind:
+		users = s.volumesNaming(res.id, "backup", "backupPolicyId")
+	case snapshotPolicyKind:
+		users = s.volumesNaming(res.id, "snapshot", "snapshotPolicyId")
+	case volumeGroupKind:
+		users = s.groupVolumes(res)
+	}
+	if len(users) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(users))
+	for _, u := range users {
+		names = append(names, netappName(u.id))
+	}
+	return newError(http.StatusConflict, "CannotDeleteResource",
+		"Can not delete resource '%s' while volumes use it: %s.", netappResourceName(res), strings.Join(names, ", "))
+}
+
+// addNetAppChild adds the finished resource of kind k named name under the
+// NetApp resource parent of kind pk, created at at, as a finished create of
+// it does. It returns nil unless the parent exists, once any create of it in
+// progress finishes, has not failed and is not being deleted, and holds no
+// resource of that name. The caller holds s.mu.
+func (s *Server) addNetAppChild(parentID string, pk, k *kind, name string, at time.Time) *resource {
+	if parent := s.resources[key(parentID)]; parent == nil || parent.kind != pk || parent.state == stateDeleting {
+		return nil
+	}
+	parent := s.settled(parentID)
+	if parent == nil || parent.state == stateFailed || name == "" || strings.Contains(name, "/") || at.IsZero() {
+		return nil
+	}
+	id := parent.id + "/" + k.plural + "/" + name
+	if s.resources[key(id)] != nil {
+		return nil
+	}
+	at = at.UTC()
+	res := &resource{
+		kind: k, id: id, sub: parent.sub, group: parent.group, loc: parent.loc,
+		top: map[string]any{}, props: map[string]any{}, state: stateSucceeded, created: at, modified: at, guid: s.newUUID(),
+	}
+	res.name = netappResourceName(res)
+	s.touch(res)
+	s.resources[key(id)] = res
+	return res
+}
+
+func (s *Server) addAccountChild(accountID string, k *kind, name string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res := s.addNetAppChild(accountID, netappAccountKind, k, name, s.now())
+	if res == nil {
+		return "", false
+	}
+	return res.id, true
+}
+
+// AddBackupVault adds the backup vault name to the NetApp account with ID id,
+// as a finished create of it does. It returns the vault's ID and reports
+// whether the account exists, once any create of it in progress finishes,
+// has not failed and is not being deleted, and has no vault of that name.
+func (s *Server) AddBackupVault(id, name string) (string, bool) {
+	return s.addAccountChild(id, backupVaultKind, name)
+}
+
+// AddBackupPolicy adds the backup policy name to the NetApp account with ID
+// id, as AddBackupVault adds a vault.
+func (s *Server) AddBackupPolicy(id, name string) (string, bool) {
+	return s.addAccountChild(id, backupPolicyKind, name)
+}
+
+// AddSnapshotPolicy adds the snapshot policy name to the NetApp account with
+// ID id, as AddBackupVault adds a vault.
+func (s *Server) AddSnapshotPolicy(id, name string) (string, bool) {
+	return s.addAccountChild(id, snapshotPolicyKind, name)
+}
+
+// AddBackup adds the backup name of the NetApp volume with ID volume, taken
+// at at, to the backup vault with ID vault, as a finished backup does. The
+// volume need not exist, as backups outlive their volumes. It returns the
+// backup's ID and reports whether the vault exists, once any create of it in
+// progress finishes, has not failed and is not being deleted, and has no
+// backup of that name.
+func (s *Server) AddBackup(vault, name, volume string, at time.Time) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if volume == "" {
+		return "", false
+	}
+	res := s.addNetAppChild(vault, backupVaultKind, netappBackupKind, name, at)
+	if res == nil {
+		return "", false
+	}
+	res.props["volumeResourceId"] = volume
+	return res.id, true
+}
+
+// AddVolumeGroup adds the volume group name, holding the NetApp volumes with
+// IDs volumes, to the NetApp account with ID id, as a finished create of it
+// does. It returns the group's ID and reports whether the account exists,
+// once any create of it in progress finishes, has not failed and is not being
+// deleted, and has no volume group of that name, and whether each volume
+// exists in the account and is in no other group.
+func (s *Server) AddVolumeGroup(id, name string, volumes ...string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var members []*resource
+	for _, v := range volumes {
+		vol := s.settled(v)
+		if vol == nil || vol.kind != volumeKind || vol.state == stateDeleting || vol.volumeGroup != "" ||
+			!strings.HasPrefix(key(vol.id), key(id)+"/") || slices.Contains(members, vol) {
+			return "", false
+		}
+		members = append(members, vol)
+	}
+	res := s.addNetAppChild(id, netappAccountKind, volumeGroupKind, name, s.now())
+	if res == nil {
+		return "", false
+	}
+	for _, vol := range members {
+		vol.volumeGroup = res.id
+	}
+	return res.id, true
+}
+
+// AddCache adds the cache name to the NetApp capacity pool with ID id, as a
+// finished create of it does, without a mount target. It returns the cache's
+// ID and reports whether the pool exists, once any create of it in progress
+// finishes, has not failed and is not being deleted, and has no cache of that
+// name.
+func (s *Server) AddCache(id, name string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res := s.addNetAppChild(id, poolKind, cacheKind, name, s.now())
+	if res == nil {
+		return "", false
+	}
+	return res.id, true
+}

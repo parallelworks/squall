@@ -844,3 +844,34 @@ func TestNetAppSnapshotShapes(t *testing.T) {
 		}
 	}
 }
+
+func TestNetAppAccountChildShapes(t *testing.T) {
+	s := arm.New()
+	newGroup(t, s)
+	acct := groupPath + "/providers/Microsoft.NetApp/netAppAccounts/a"
+	rec, out := do(t, s, http.MethodGet, acct+"/backupVaults", "")
+	e, _ := out["error"].(map[string]any)
+	if rec.Code != http.StatusNotFound || e["code"] != "ParentResourceNotFound" ||
+		e["message"] != "Failed to perform 'read' on resource(s) of type 'netAppAccounts/backupVaults', because the parent resource '"+acct+"' could not be found." {
+		t.Errorf("listing vaults of a missing account = %d %v", rec.Code, out)
+	}
+	if rec, out := do(t, s, http.MethodPut, acct, `{"location":"eastus"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("PUT %s = %d %v", acct, rec.Code, out)
+	}
+	if rec, out := do(t, s, http.MethodPut, acct+"/volumeGroups/g", `{"location":"eastus","tags":{"k":"v"}}`); rec.Code != http.StatusBadRequest {
+		t.Errorf("a volume group with tags = %d %v", rec.Code, out)
+	}
+	if rec, out := do(t, s, http.MethodPut, acct+"/volumeGroups/g", `{"location":"eastus","properties":{"volumes":{}}}`); rec.Code != http.StatusBadRequest {
+		t.Errorf("a volume group whose volumes is not a list = %d %v", rec.Code, out)
+	}
+	rec, out = do(t, s, http.MethodPut, acct+"/snapshotPolicies/p", `{"location":"eastus","properties":{"enabled":true}}`)
+	if rec.Code != http.StatusCreated || out["name"] != "a/p" || rec.Header().Get("Azure-AsyncOperation") != "" {
+		t.Errorf("a new snapshot policy = %d %v", rec.Code, out)
+	}
+	if rec, out := do(t, s, http.MethodPut, acct+"/snapshotPolicies/p", `{"location":"eastus","properties":{"enabled":false}}`); rec.Code != http.StatusOK {
+		t.Errorf("an updated snapshot policy = %d %v", rec.Code, out)
+	}
+	if rec, out := do(t, s, http.MethodPut, acct+"/backupVaults/v/backups/b", `{"properties":{}}`); rec.Code != http.StatusNotFound {
+		t.Errorf("a backup put = %d %v", rec.Code, out)
+	}
+}

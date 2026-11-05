@@ -77,6 +77,8 @@ type resource struct {
 	disk    *diskState
 	snap    *snapState
 	version *versionState
+	// volumeGroup is the ID of the NetApp volume group a volume is in, if any.
+	volumeGroup string
 	// held is the subnet address of a resource that takes one of its own,
 	// such as a NetApp volume.
 	held *heldAddress

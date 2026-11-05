@@ -50,8 +50,11 @@
 //     Properties, List Blobs, Put Blob, Put Block, Put Block List, Snapshot
 //     Blob, Get Blob Properties and Delete Blob, for block blobs;
 //   - Microsoft.NetApp: accounts, capacity pools and volumes (create or
-//     update, get, list in their group, account or pool, and delete) and
-//     volume snapshots (create, get, list and delete);
+//     update, get, list in their group, account or pool, and delete), volume
+//     snapshots (create, get, list and delete), an account's backup vaults,
+//     backup policies, snapshot policies and volume groups and a pool's
+//     caches (create or update, get, list and delete), and a backup vault's
+//     backups (get, list and delete);
 //   - Microsoft.StorageCache: Azure Managed Lustre file systems (create or
 //     update, get, list in a group and delete), and subnet checks;
 //   - Microsoft.CognitiveServices: accounts (create or update, get, list keys
@@ -672,9 +675,45 @@
 //     forceDelete, as Microsoft documents; the rest forceDelete cleans up is
 //     not modeled. A snapshot create in progress when its volume's delete
 //     begins finishes first, which is inferred. Snapshots are listed among
-//     their group's resources, which is inferred. Snapshot updates, restores
-//     and snapshot policies are not served. [Server.SnapshotVolume] adds a
-//     snapshot directly.
+//     their group's resources, which is inferred. Snapshot updates and
+//     restores are not served. [Server.SnapshotVolume] adds a snapshot
+//     directly.
+//   - A NetApp account's backup vaults, backup policies, snapshot policies
+//     and volume groups, and a pool's caches, report systemData as volumes
+//     do. NetApp names a volume group by its own name, and the others after
+//     the resources that hold them, such as account/vault, as the API's
+//     examples show. Their creates are long-running like other NetApp
+//     writes, except a snapshot policy's, which answers 201, or 200 for an
+//     update, at once, as the client expects. A volume group answers 201 for
+//     an update too, as the client accepts only 201, which is inferred.
+//     Listing any NetApp child under a parent that does not exist fails with
+//     404 ParentResourceNotFound, which is inferred, and under one with none
+//     lists none. Deleting an account that holds any of them, or a pool that
+//     holds a cache, fails with 409 CannotDeleteResource, as an account with
+//     pools does; that Azure refuses it is inferred. Deleting a backup vault
+//     that holds backups fails the same way, as Microsoft documents a vault
+//     must be emptied first; the status and code are inferred. Deleting a
+//     backup vault, backup policy or snapshot policy that a volume's
+//     dataProtection names, or a volume group that holds volumes, fails the
+//     same way, as Microsoft documents each must be unassigned or emptied
+//     first; the status, code and message are inferred. A backup policy
+//     shows a backupPolicyId and volumesAssigned, the volumes that name it;
+//     volumeBackups is not shown. A volume group that lists volumes fails
+//     with 400, as creating volumes with their group is not modeled, and one
+//     that sends tags does too, as the API gives it none.
+//     [Server.AddVolumeGroup] puts existing volumes in a group, which then
+//     lists them and each shows its volumeGroupName. A cache needs
+//     cacheSubnetResourceId, encryptionKeySource, filePath,
+//     originClusterInformation, peeringSubnetResourceId and size, as the API
+//     requires, and a new one shows a mount target with an address in its
+//     cache subnet; its cacheState, cluster peering, write-back and the
+//     calls beyond create, get, list and delete are not modeled. Backups are
+//     not created through the API; [Server.AddBackup] adds one to a vault,
+//     showing backupId, creationDate, completionDate and volumeResourceId,
+//     and it outlives its volume, as Microsoft documents. Which backup may be
+//     deleted is not checked. [Server.AddBackupVault],
+//     [Server.AddBackupPolicy], [Server.AddSnapshotPolicy] and
+//     [Server.AddCache] add the others directly.
 //   - A Managed Lustre change in progress answers with an
 //     Azure-AsyncOperation URL under
 //     Microsoft.StorageCache/locations/{location}/ascOperations; a delete
