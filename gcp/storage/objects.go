@@ -6,6 +6,7 @@ import (
 	"crypto/md5" //nolint:gosec // the API reports MD5 digests; nothing here relies on them for security
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/crc32"
@@ -18,10 +19,11 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
-// Object is one generation of an object, in the API's JSON shape; a noncurrent one has TimeDeleted.
+// Object is one generation of an object in the API's JSON shape; noncurrent has TimeDeleted, soft-deleted SoftDeleteTime.
 type Object struct {
 	Kind                    string            `json:"kind"`
 	ID                      string            `json:"id"`
@@ -43,12 +45,55 @@ type Object struct {
 	TimeStorageClassUpdated string            `json:"timeStorageClassUpdated"`
 	TimeDeleted             string            `json:"timeDeleted,omitzero"`
 	Metadata                map[string]string `json:"metadata,omitzero"`
+	TemporaryHold           *bool             `json:"temporaryHold,omitzero"`
+	EventBasedHold          *bool             `json:"eventBasedHold,omitzero"`
+	RetentionExpirationTime string            `json:"retentionExpirationTime,omitzero"`
+	Retention               *Retention        `json:"retention,omitzero"`
+	SoftDeleteTime          string            `json:"softDeleteTime,omitzero"`
+	HardDeleteTime          string            `json:"hardDeleteTime,omitzero"`
+
+	// retentionStart is when the object's time in its bucket began, for a retention policy.
+	retentionStart time.Time
+	hardDelete     time.Time
 }
 
 func (o *Object) clone() Object {
 	c := *o
 	c.Metadata = maps.Clone(o.Metadata)
+	if o.TemporaryHold != nil {
+		c.TemporaryHold = new(*o.TemporaryHold)
+	}
+	if o.EventBasedHold != nil {
+		c.EventBasedHold = new(*o.EventBasedHold)
+	}
+	if o.Retention != nil {
+		c.Retention = new(*o.Retention)
+	}
 	return c
+}
+
+// view is o as the API shows it in b. The caller holds s.mu.
+func (s *Server) view(b *bucket, o *Object) Object {
+	c := o.clone()
+	if p := b.RetentionPolicy; p != nil && o.SoftDeleteTime == "" && !isSet(o.EventBasedHold) {
+		c.RetentionExpirationTime = o.retentionStart.Add(time.Duration(p.RetentionPeriod) * time.Second).UTC().Format(timeFormat)
+	}
+	return c
+}
+
+// setHolds sets o's holds, starting its retention period again when an event-based hold is released. The caller holds s.mu.
+func (s *Server) setHolds(o *Object, temporary, eventBased *bool) {
+	if isSet(o.EventBasedHold) && !isSet(eventBased) {
+		o.retentionStart = s.now()
+	}
+	o.TemporaryHold, o.EventBasedHold = temporary, eventBased
+}
+
+// touchObject records a change to o's metadata. The caller holds s.mu.
+func (s *Server) touchObject(o *Object) {
+	o.Metageneration++
+	_, o.Updated = s.timestamp()
+	o.Etag = etag(o.Generation, o.Metageneration)
 }
 
 func (o *Object) live() bool { return o.TimeDeleted == "" }
@@ -62,6 +107,16 @@ func (b *bucket) liveObject(name string) *Object {
 	return gens[len(gens)-1]
 }
 
+// generation returns generation gen of name in b, live or noncurrent, or nil.
+func (b *bucket) generation(name string, gen int64) *Object {
+	for _, o := range b.objects[name] {
+		if o.Generation == gen {
+			return o
+		}
+	}
+	return nil
+}
+
 // retire makes name's live generation noncurrent if b is versioned, or removes it. The caller holds s.mu.
 func (s *Server) retire(b *bucket, name string) {
 	live := b.liveObject(name)
@@ -73,17 +128,26 @@ func (s *Server) retire(b *bucket, name string) {
 		live.Updated = live.TimeDeleted
 		return
 	}
-	b.drop(name, live.Generation)
+	s.discard(b, live)
 }
 
-// drop removes generation gen of name. The caller holds s.mu.
-func (b *bucket) drop(name string, gen int64) {
-	gens := slices.DeleteFunc(b.objects[name], func(o *Object) bool { return o.Generation == gen })
+// discard removes generation o from b, keeping it soft-deleted if b keeps deletions. The caller holds s.mu.
+func (s *Server) discard(b *bucket, o *Object) {
+	gens := slices.DeleteFunc(b.objects[o.Name], func(g *Object) bool { return g == o })
 	if len(gens) == 0 {
-		delete(b.objects, name)
+		delete(b.objects, o.Name)
+	} else {
+		b.objects[o.Name] = gens
+	}
+	keep := b.softDeleteDuration()
+	if keep == 0 {
 		return
 	}
-	b.objects[name] = gens
+	t, now := s.timestamp()
+	o.SoftDeleteTime, o.hardDelete = now, t.Add(keep)
+	o.HardDeleteTime = o.hardDelete.Format(timeFormat)
+	b.trash = append(b.trash, o)
+	b.keepUntil(o.hardDelete)
 }
 
 func noSuchObject(bucket, name string) *apiError {
@@ -104,6 +168,9 @@ type objectInput struct {
 	Metadata        map[string]string `json:"metadata"`
 	CRC32C          string            `json:"crc32c"`
 	MD5Hash         string            `json:"md5Hash"`
+	TemporaryHold   *bool             `json:"temporaryHold"`
+	EventBasedHold  *bool             `json:"eventBasedHold"`
+	Retention       *Retention        `json:"retention"`
 }
 
 // splitMultipart returns the metadata and media of a multipart/related upload.
@@ -175,12 +242,22 @@ func (s *Server) insertObject(r *http.Request) (any, *apiError) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	o, err := s.writeObject(bucketName, in, data, func(live int64) *apiError {
+		if live == 0 && r.URL.Query().Has("ifGenerationNotMatch") {
+			return conditionNotMet()
+		}
 		return checkMatch(r, "ifGenerationMatch", "ifGenerationNotMatch", live)
 	})
 	if err != nil {
 		return nil, err
 	}
-	return o.clone(), nil
+	return s.view(s.buckets[bucketName], o), nil
+}
+
+// checksums returns data's MD5 and CRC32C, as the API encodes them.
+func checksums(data []byte) (md5Hash, crc string) {
+	sum := md5.Sum(data) //nolint:gosec // a reported digest, not a security check
+	crc32c := binary.BigEndian.AppendUint32(nil, crc32.Checksum(data, crc32.MakeTable(crc32.Castagnoli)))
+	return base64.StdEncoding.EncodeToString(sum[:]), base64.StdEncoding.EncodeToString(crc32c)
 }
 
 // writeObject stores data as in.Name's newest generation once precondition passes. The caller holds s.mu.
@@ -191,9 +268,7 @@ func (s *Server) writeObject(bucketName string, in objectInput, data []byte, pre
 	if !validObjectName(in.Name) {
 		return nil, invalid("The specified object name is not valid.")
 	}
-	sum := md5.Sum(data) //nolint:gosec // a reported digest, not a security check
-	md5Hash := base64.StdEncoding.EncodeToString(sum[:])
-	crc := base64.StdEncoding.EncodeToString(binary.BigEndian.AppendUint32(nil, crc32.Checksum(data, crc32.MakeTable(crc32.Castagnoli))))
+	md5Hash, crc := checksums(data)
 	if in.CRC32C != "" && in.CRC32C != crc {
 		return nil, invalid("Provided CRC32C \"%s\" doesn't match calculated CRC32C \"%s\".", in.CRC32C, crc)
 	}
@@ -213,22 +288,49 @@ func (s *Server) writeObject(bucketName string, in objectInput, data []byte, pre
 			return nil, err
 		}
 	}
-	s.retire(b, in.Name)
-	t, now := s.timestamp()
-	s.lastGeneration = max(s.lastGeneration+1, t.UnixMicro())
-	gen := s.lastGeneration
-	escaped := url.PathEscape(in.Name)
-	o := &Object{
-		Kind: "storage#object", ID: fmt.Sprintf("%s/%s/%d", bucketName, in.Name, gen),
-		SelfLink:  apiBase + "b/" + bucketName + "/o/" + escaped,
-		MediaLink: downloadBase + "b/" + bucketName + "/o/" + escaped + "?generation=" + strconv.FormatInt(gen, 10) + "&alt=media",
-		Name:      in.Name, Bucket: bucketName, Generation: gen, Metageneration: 1,
-		ContentType: cmp.Or(in.ContentType, "application/octet-stream"), ContentEncoding: in.ContentEncoding,
-		StorageClass: b.StorageClass, Size: uint64(len(data)), MD5Hash: md5Hash, CRC32C: crc, Etag: etag(gen, 1),
-		TimeCreated: now, Updated: now, TimeStorageClassUpdated: now, Metadata: maps.Clone(in.Metadata),
+	eventHold := in.EventBasedHold
+	if eventHold == nil && b.DefaultEventBasedHold {
+		eventHold = new(true)
 	}
-	b.objects[in.Name] = append(b.objects[in.Name], o)
+	retention, err := s.checkRetention(b, nil, in.Retention, false, isSet(eventHold))
+	if err != nil {
+		return nil, err
+	}
+	if err := s.replaceLive(b, in.Name); err != nil {
+		return nil, err
+	}
+	o := s.newGeneration(b, in.Name, b.StorageClass)
+	o.ContentType, o.ContentEncoding = cmp.Or(in.ContentType, "application/octet-stream"), in.ContentEncoding
+	o.Size, o.MD5Hash, o.CRC32C, o.Metadata = uint64(len(data)), md5Hash, crc, maps.Clone(in.Metadata)
+	o.TemporaryHold, o.EventBasedHold, o.Retention = in.TemporaryHold, eventHold, retention
 	return o, nil
+}
+
+// replaceLive retires name's live generation in b, unless what protects it refuses. The caller holds s.mu.
+func (s *Server) replaceLive(b *bucket, name string) *apiError {
+	if live := b.liveObject(name); live != nil {
+		if err := s.guard(b, live, b.versioned()); err != nil {
+			return err
+		}
+	}
+	s.retire(b, name)
+	return nil
+}
+
+// newGeneration adds a live generation of name to b, to be filled in. The caller holds s.mu.
+func (s *Server) newGeneration(b *bucket, name, storageClass string) *Object {
+	t, now := s.timestamp()
+	gen := s.nextGeneration(t)
+	escaped := url.PathEscape(name)
+	o := &Object{
+		Kind: "storage#object", ID: fmt.Sprintf("%s/%s/%d", b.Name, name, gen),
+		SelfLink:  apiBase + "b/" + b.Name + "/o/" + escaped,
+		MediaLink: downloadBase + "b/" + b.Name + "/o/" + escaped + "?generation=" + strconv.FormatInt(gen, 10) + "&alt=media",
+		Name:      name, Bucket: b.Name, Generation: gen, Metageneration: 1, StorageClass: storageClass, Etag: etag(gen, 1),
+		TimeCreated: now, Updated: now, TimeStorageClassUpdated: now, retentionStart: t,
+	}
+	b.objects[name] = append(b.objects[name], o)
+	return o
 }
 
 func (s *Server) deleteObject(r *http.Request) (any, *apiError) {
@@ -243,15 +345,9 @@ func (s *Server) deleteObject(r *http.Request) (any, *apiError) {
 	if err != nil {
 		return nil, err
 	}
-	var target *Object
+	target := b.liveObject(name)
 	if byGeneration {
-		for _, o := range b.objects[name] {
-			if o.Generation == gen {
-				target = o
-			}
-		}
-	} else {
-		target = b.liveObject(name)
+		target = b.generation(name, gen)
 	}
 	if target == nil {
 		return nil, noSuchObject(bucketName, name)
@@ -259,12 +355,197 @@ func (s *Server) deleteObject(r *http.Request) (any, *apiError) {
 	if err := checkMatch(r, "ifGenerationMatch", "ifGenerationNotMatch", target.Generation); err != nil {
 		return nil, err
 	}
+	if err := s.guard(b, target, !byGeneration && b.versioned()); err != nil {
+		return nil, err
+	}
 	if byGeneration {
-		b.drop(name, gen)
+		s.discard(b, target)
 	} else {
 		s.retire(b, name)
 	}
 	return nil, nil
+}
+
+// target returns the generation a call on an object names, live unless it has a generation parameter.
+func (s *Server) target(r *http.Request, permission string) (*bucket, *Object, *apiError) {
+	gen, byGeneration, err := int64Param(r, "generation")
+	if err != nil {
+		return nil, nil, err
+	}
+	bucketName, name := r.PathValue("bucket"), r.PathValue("object")
+	b, err := s.lookup(bucketName, permission)
+	if err != nil {
+		return nil, nil, err
+	}
+	o := b.liveObject(name)
+	if byGeneration {
+		o = b.generation(name, gen)
+	}
+	if o == nil {
+		return nil, nil, noSuchObject(bucketName, name)
+	}
+	if err := checkMatch(r, "ifGenerationMatch", "ifGenerationNotMatch", o.Generation); err != nil {
+		return nil, nil, err
+	}
+	if err := checkMatch(r, "ifMetagenerationMatch", "ifMetagenerationNotMatch", o.Metageneration); err != nil {
+		return nil, nil, err
+	}
+	return b, o, nil
+}
+
+func (s *Server) getObject(r *http.Request) (any, *apiError) {
+	soft, gen, _, err := softDeletedGeneration(r)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !soft {
+		b, o, err := s.target(r, "storage.objects.get")
+		if err != nil {
+			return nil, err
+		}
+		return s.view(b, o), nil
+	}
+	bucketName, name := r.PathValue("bucket"), r.PathValue("object")
+	b, err := s.lookup(bucketName, "storage.objects.get")
+	if err != nil {
+		return nil, err
+	}
+	o := b.trashed(name, gen)
+	if o == nil {
+		return nil, noSuchObject(bucketName, name)
+	}
+	if err := checkMatch(r, "ifMetagenerationMatch", "ifMetagenerationNotMatch", o.Metageneration); err != nil {
+		return nil, err
+	}
+	return o.clone(), nil
+}
+
+// objectPatch is what objects.patch and objects.update take.
+type objectPatch struct {
+	Bucket          string             `json:"bucket"`
+	Name            string             `json:"name"`
+	ContentType     *string            `json:"contentType"`
+	ContentEncoding *string            `json:"contentEncoding"`
+	Metadata        map[string]*string `json:"metadata"`
+	TemporaryHold   *bool              `json:"temporaryHold"`
+	EventBasedHold  *bool              `json:"eventBasedHold"`
+	Retention       *Retention         `json:"retention"`
+	StorageClass    string             `json:"storageClass"`
+	outputOnly
+}
+
+// outputOnly holds the Object fields the server sets, which a read-modify-write sends back and which are ignored.
+type outputOnly struct {
+	Kind                    json.RawMessage `json:"kind"`
+	ID                      json.RawMessage `json:"id"`
+	SelfLink                json.RawMessage `json:"selfLink"`
+	MediaLink               json.RawMessage `json:"mediaLink"`
+	Generation              json.RawMessage `json:"generation"`
+	Metageneration          json.RawMessage `json:"metageneration"`
+	Size                    json.RawMessage `json:"size"`
+	MD5Hash                 json.RawMessage `json:"md5Hash"`
+	CRC32C                  json.RawMessage `json:"crc32c"`
+	Etag                    json.RawMessage `json:"etag"`
+	TimeCreated             json.RawMessage `json:"timeCreated"`
+	Updated                 json.RawMessage `json:"updated"`
+	TimeStorageClassUpdated json.RawMessage `json:"timeStorageClassUpdated"`
+	TimeFinalized           json.RawMessage `json:"timeFinalized"`
+	TimeDeleted             json.RawMessage `json:"timeDeleted"`
+	SoftDeleteTime          json.RawMessage `json:"softDeleteTime"`
+	HardDeleteTime          json.RawMessage `json:"hardDeleteTime"`
+	RetentionExpirationTime json.RawMessage `json:"retentionExpirationTime"`
+	ComponentCount          json.RawMessage `json:"componentCount"`
+	Owner                   json.RawMessage `json:"owner"`
+	RestoreToken            json.RawMessage `json:"restoreToken"`
+}
+
+func (s *Server) patchObject(r *http.Request) (any, *apiError) { return s.changeObject(r, false) }
+
+func (s *Server) updateObject(r *http.Request) (any, *apiError) { return s.changeObject(r, true) }
+
+// changeObject applies objects.patch, or with replace objects.update, which sets every writable field.
+func (s *Server) changeObject(r *http.Request, replace bool) (any, *apiError) {
+	if err := checkACLs(r); err != nil {
+		return nil, err
+	}
+	override, err := boolParam(r, "overrideUnlockedRetention")
+	if err != nil {
+		return nil, err
+	}
+	body, err := readBody(r, maxBody)
+	if err != nil {
+		return nil, err
+	}
+	var in objectPatch
+	if err := unmarshalStrict(body, &in); err != nil {
+		return nil, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return nil, invalid("Invalid JSON payload received: %v", err)
+	}
+	cleared := func(field string) bool { return string(fields[field]) == "null" }
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, o, err := s.target(r, "storage.objects.update")
+	if err != nil {
+		return nil, err
+	}
+	if in.Bucket != "" && in.Bucket != b.Name || in.Name != "" && in.Name != o.Name {
+		return nil, invalid("squall: an object's bucket and name cannot be changed")
+	}
+	if in.StorageClass != "" && in.StorageClass != o.StorageClass {
+		return nil, invalid("squall: changing an object's storage class needs objects.rewrite, which is not supported")
+	}
+	temporary, eventBased, metadata := o.TemporaryHold, o.EventBasedHold, maps.Clone(o.Metadata)
+	contentType, contentEncoding := o.ContentType, o.ContentEncoding
+	if replace {
+		temporary, eventBased, metadata = in.TemporaryHold, in.EventBasedHold, nil
+		contentType, contentEncoding = "application/octet-stream", ""
+	}
+	if in.TemporaryHold != nil || cleared("temporaryHold") {
+		temporary = in.TemporaryHold
+	}
+	if in.EventBasedHold != nil || cleared("eventBasedHold") {
+		eventBased = in.EventBasedHold
+	}
+	if in.ContentType != nil {
+		contentType = cmp.Or(*in.ContentType, "application/octet-stream")
+	} else if cleared("contentType") {
+		contentType = "application/octet-stream"
+	}
+	if in.ContentEncoding != nil {
+		contentEncoding = *in.ContentEncoding
+	} else if cleared("contentEncoding") {
+		contentEncoding = ""
+	}
+	if metadata == nil || cleared("metadata") {
+		metadata = map[string]string{}
+	}
+	for k, v := range in.Metadata {
+		if v == nil {
+			delete(metadata, k)
+		} else {
+			metadata[k] = *v
+		}
+	}
+	retention := o.Retention
+	if replace || in.Retention != nil || cleared("retention") {
+		if retention, err = s.checkRetention(b, o.Retention, in.Retention, override, isSet(eventBased)); err != nil {
+			return nil, err
+		}
+	} else if retention != nil && isSet(eventBased) {
+		return nil, retentionConflict()
+	}
+	if len(metadata) == 0 {
+		metadata = nil
+	}
+	s.setHolds(o, temporary, eventBased)
+	o.Retention, o.Metadata, o.ContentType, o.ContentEncoding = retention, metadata, contentType, contentEncoding
+	s.touchObject(o)
+	return s.view(b, o), nil
 }
 
 type objectList struct {
@@ -285,7 +566,11 @@ func (s *Server) listObjects(r *http.Request) (any, *apiError) {
 			return nil, invalid("squall: objects.list does not support %s", p)
 		}
 	}
-	for _, p := range []string{"includeTrailingDelimiter", "includeFoldersAsPrefixes", "softDeleted"} {
+	soft, err := boolParam(r, "softDeleted")
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range []string{"includeTrailingDelimiter", "includeFoldersAsPrefixes"} {
 		if on, err := boolParam(r, p); err != nil {
 			return nil, err
 		} else if on {
@@ -303,14 +588,29 @@ func (s *Server) listObjects(r *http.Request) (any, *apiError) {
 	if err != nil {
 		return nil, err
 	}
+	listed := func(name string) bool {
+		return strings.HasPrefix(name, prefix) && name >= start && (end == "" || name < end)
+	}
 	var all []Object
-	for _, name := range slices.Sorted(maps.Keys(b.objects)) {
-		if !strings.HasPrefix(name, prefix) || name < start || end != "" && name >= end {
-			continue
+	if soft {
+		if b.softDeleteDuration() == 0 && len(b.trash) == 0 {
+			return nil, invalid("Soft delete policy is required to list soft-deleted versions")
 		}
-		for _, o := range b.objects[name] {
-			if versions || o.live() {
+		for _, o := range b.trash {
+			if listed(o.Name) {
 				all = append(all, o.clone())
+			}
+		}
+		slices.SortFunc(all, func(a, b Object) int { return strings.Compare(versionKey(a), versionKey(b)) })
+	} else {
+		for _, name := range slices.Sorted(maps.Keys(b.objects)) {
+			if !listed(name) {
+				continue
+			}
+			for _, o := range b.objects[name] {
+				if versions || o.live() {
+					all = append(all, s.view(b, o))
+				}
 			}
 		}
 	}
@@ -332,7 +632,7 @@ func (s *Server) Objects(bucketName string) []Object {
 	var out []Object
 	for _, name := range slices.Sorted(maps.Keys(b.objects)) {
 		for _, o := range b.objects[name] {
-			out = append(out, o.clone())
+			out = append(out, s.view(b, o))
 		}
 	}
 	return out
@@ -346,5 +646,5 @@ func (s *Server) PutObject(bucketName, name string, data []byte) (Object, error)
 	if err != nil {
 		return Object{}, err
 	}
-	return o.clone(), nil
+	return s.view(s.buckets[bucketName], o), nil
 }

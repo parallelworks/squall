@@ -34,7 +34,7 @@ failure replays from its seed.
 | [`gcp/resourcemanager`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/resourcemanager) | Cloud Resource Manager: projects (get by ID or number, getIamPolicy, setIamPolicy with etag checks, testIamPermissions answered from the server's access policy), seeded by the test. |
 | [`gcp/servicenetworking`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/servicenetworking) | Service Networking: private service connections (create, list by network, patch with force, deleteConnection), checked against a `gcp/compute` server's networks and allocated ranges and peering the network there, and their long-running operations (get). |
 | [`gcp/serviceusage`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/serviceusage) | Service Usage: services (enable, disable, get, list by state) in projects seeded by the test and named by number or ID, and their long-running operations (get). |
-| [`gcp/storage`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/storage) | Cloud Storage: buckets (insert, get, list, patch labels, versioning and CORS, delete) and objects (multipart and media uploads, list with versions, delete by generation). |
+| [`gcp/storage`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/storage) | Cloud Storage: buckets (insert, get, list, patch labels, versioning, CORS, retention policies, soft delete policies and Requester Pays, lock a retention policy, delete with soft delete, list and restore soft-deleted ones) and objects (multipart and media uploads, get, patch and update metadata, temporary, event-based and default holds, object retention, list with versions or soft-deleted generations, delete by generation, restore). |
 
 Coverage grows with use: each stand-in implements the methods someone needed,
 answers anything else with 404, and documents how faithful it is. Contributions
@@ -410,14 +410,23 @@ For Cloud Storage:
   the caller's own bucket fails with 409, as the client's retry of a create
   that took effect does.
 - Bucket names and labels follow the API's rules; locations are upper-cased
-  but not checked. Fields the server does not model, such as lifecycle rules
-  or retention, are rejected with 400. A patch with a field set to null
-  clears it, and a label set to null is deleted.
+  but not checked. Fields the server does not model, such as lifecycle rules,
+  are rejected with 400. A patch with a field set to null clears it, and a
+  label set to null is deleted.
+- Retention policies, holds and object retention refuse deletes and
+  overwrites with Cloud Storage's 403s; a locked policy can only grow. Soft
+  delete is on by default for 7 days: deleted and replaced generations are
+  listed with `softDeleted=true` and restored until their `hardDeleteTime` on
+  the server's clock (`WithClock`), and deleted buckets are kept the same
+  way. Requester Pays is enforced only under `WithPolicy`. `SetObjectHolds`,
+  `SetObjectRetention`, `SetRetentionPolicy` and `PutSoftDeletedObject` set
+  up protected or soft-deleted state directly.
 - Objects keep their size, MD5 and CRC32C, which an upload's checksums must
   match. With versioning on, overwrites and deletes keep the old generation as
   noncurrent, and a bucket with any generation left cannot be deleted. Page
   tokens are positions, so a listing survives deletes between pages.
-  Resumable uploads, reads, IAM policies and HMAC keys are not supported.
+  Resumable uploads, media reads, IAM policies and HMAC keys are not
+  supported.
 - A fault rule's `Resource` is the path below `/storage/v1/`, such as
   `b/my-bucket/o/my-object`, and for an insert the bucket or object it makes.
 
