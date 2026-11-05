@@ -155,10 +155,18 @@ func (b *bucket) requesterPays() bool { return b.Billing != nil && b.Billing.Req
 func (b *bucket) empty() bool { return len(b.objects) == 0 }
 
 // touch records a change to b's metadata. The caller holds s.mu.
-func (s *Server) touch(b *bucket) {
+func (s *Server) touch(b *bucket) { touchAt(b, s.now()) }
+
+// touchAt records a change to b's metadata made at t.
+func touchAt(b *bucket, t time.Time) {
 	b.Metageneration++
-	b.Updated = s.now().UTC().Format(timeFormat)
+	b.Updated = t.UTC().Format(timeFormat)
 	b.Etag = etag(b.Metageneration)
+}
+
+// sameObjectRetention reports whether a body's objectRetention, nil for none, matches have.
+func sameObjectRetention(in, have *BucketObjectRetention) bool {
+	return in == nil && have == nil || in != nil && have != nil && in.Mode == have.Mode
 }
 
 // etag encodes its numbers as tagged varints, so it changes whenever they do.
@@ -311,22 +319,21 @@ type softDeletePolicyInput struct {
 
 // bucketOutputOnly holds the Bucket fields the server sets, which a read-modify-write sends back and which are ignored.
 type bucketOutputOnly struct {
-	Kind            json.RawMessage `json:"kind"`
-	ID              json.RawMessage `json:"id"`
-	SelfLink        json.RawMessage `json:"selfLink"`
-	ProjectNumber   json.RawMessage `json:"projectNumber"`
-	TimeCreated     json.RawMessage `json:"timeCreated"`
-	Updated         json.RawMessage `json:"updated"`
-	Metageneration  json.RawMessage `json:"metageneration"`
-	Etag            json.RawMessage `json:"etag"`
-	LocationType    json.RawMessage `json:"locationType"`
-	Generation      json.RawMessage `json:"generation"`
-	SoftDeleteTime  json.RawMessage `json:"softDeleteTime"`
-	HardDeleteTime  json.RawMessage `json:"hardDeleteTime"`
-	Owner           json.RawMessage `json:"owner"`
-	ObjectRetention json.RawMessage `json:"objectRetention"`
-	SatisfiesPZS    json.RawMessage `json:"satisfiesPZS"`
-	SatisfiesPZI    json.RawMessage `json:"satisfiesPZI"`
+	Kind           json.RawMessage `json:"kind"`
+	ID             json.RawMessage `json:"id"`
+	SelfLink       json.RawMessage `json:"selfLink"`
+	ProjectNumber  json.RawMessage `json:"projectNumber"`
+	TimeCreated    json.RawMessage `json:"timeCreated"`
+	Updated        json.RawMessage `json:"updated"`
+	Metageneration json.RawMessage `json:"metageneration"`
+	Etag           json.RawMessage `json:"etag"`
+	LocationType   json.RawMessage `json:"locationType"`
+	Generation     json.RawMessage `json:"generation"`
+	SoftDeleteTime json.RawMessage `json:"softDeleteTime"`
+	HardDeleteTime json.RawMessage `json:"hardDeleteTime"`
+	Owner          json.RawMessage `json:"owner"`
+	SatisfiesPZS   json.RawMessage `json:"satisfiesPZS"`
+	SatisfiesPZI   json.RawMessage `json:"satisfiesPZI"`
 }
 
 // bucketInput is what buckets.insert and buckets.patch take.
@@ -344,6 +351,7 @@ type bucketInput struct {
 	DefaultEventBasedHold *bool                  `json:"defaultEventBasedHold"`
 	SoftDeletePolicy      *softDeletePolicyInput `json:"softDeletePolicy"`
 	Billing               *Billing               `json:"billing"`
+	ObjectRetention       *BucketObjectRetention `json:"objectRetention"`
 	bucketOutputOnly
 	// Lifecycle is accepted without rules, since the client sends it empty.
 	Lifecycle *struct {
@@ -407,6 +415,9 @@ func (s *Server) insertBucket(r *http.Request) (any, *apiError) {
 	}
 	if objectRetention {
 		b.ObjectRetention = &BucketObjectRetention{Mode: "Enabled"}
+	}
+	if in.ObjectRetention != nil && !sameObjectRetention(in.ObjectRetention, b.ObjectRetention) {
+		return nil, invalid("squall: objectRetention is set by the enableObjectRetention parameter, which this body does not match")
 	}
 	if p := in.RetentionPolicy; p != nil {
 		if p.RetentionPeriod == nil {
@@ -564,10 +575,12 @@ func (s *Server) patchBucket(r *http.Request) (any, *apiError) {
 	if err := checkMatch(r, "ifMetagenerationMatch", "ifMetagenerationNotMatch", b.Metageneration); err != nil {
 		return nil, err
 	}
-	if in.Name != "" && in.Name != b.Name || in.Location != "" && !strings.EqualFold(in.Location, b.Location) || in.RPO != "" && in.RPO != b.RPO ||
+	if in.Name != "" && in.Name != b.Name || in.Location != "" && !strings.EqualFold(in.Location, b.Location) ||
 		in.CustomPlacementConfig != nil && (b.CustomPlacementConfig == nil || !slices.Equal(in.CustomPlacementConfig.DataLocations, b.CustomPlacementConfig.DataLocations)) {
-		return nil, invalid("squall: a patch may change only labels, versioning, cors, storageClass, encryption, " +
-			"retentionPolicy, defaultEventBasedHold, softDeletePolicy and billing")
+		return nil, invalid("squall: name, location and customPlacementConfig are set on insert and cannot change")
+	}
+	if (in.ObjectRetention != nil || cleared("objectRetention")) && !sameObjectRetention(in.ObjectRetention, b.ObjectRetention) {
+		return nil, invalid("squall: object retention can be turned on for an existing bucket only in the console, and never off")
 	}
 	labels := maps.Clone(b.Labels)
 	if labels == nil || cleared("labels") {
@@ -590,11 +603,11 @@ func (s *Server) patchBucket(r *http.Request) (any, *apiError) {
 			return nil, invalid("Invalid argument: storage class '%s' is not valid.", class)
 		}
 	}
-	retention, err := s.nextRetentionPolicy(b, in.RetentionPolicy, cleared("retentionPolicy"))
+	changed := s.now()
+	retention, err := nextRetentionPolicy(b, in.RetentionPolicy, cleared("retentionPolicy"), changed)
 	if err != nil {
 		return nil, err
 	}
-	changed := s.now()
 	softDelete, err := nextSoftDeletePolicy(b, in.SoftDeletePolicy, changed)
 	if err != nil {
 		return nil, err
@@ -627,7 +640,10 @@ func (s *Server) patchBucket(r *http.Request) (any, *apiError) {
 	} else if cleared("encryption") {
 		b.Encryption = nil
 	}
-	s.touch(b)
+	if in.RPO != "" || cleared("rpo") {
+		b.RPO = in.RPO
+	}
+	touchAt(b, changed)
 	return b.clone(), nil
 }
 

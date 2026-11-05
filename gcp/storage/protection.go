@@ -30,8 +30,8 @@ func badSoftDelete() *apiError {
 	return invalid("Soft delete policy must have a retention duration between 7 days and 90 days.")
 }
 
-// nextRetentionPolicy is b's retention policy after a patch sets it to in, or removes it. The caller holds s.mu.
-func (s *Server) nextRetentionPolicy(b *bucket, in *retentionPolicyInput, removed bool) (*RetentionPolicy, *apiError) {
+// nextRetentionPolicy is b's retention policy after a patch at now sets it to in, or removes it. The caller holds s.mu.
+func nextRetentionPolicy(b *bucket, in *retentionPolicyInput, removed bool, now time.Time) (*RetentionPolicy, *apiError) {
 	old := b.RetentionPolicy
 	locked := old != nil && old.IsLocked
 	if removed {
@@ -59,8 +59,7 @@ func (s *Server) nextRetentionPolicy(b *bucket, in *retentionPolicyInput, remove
 	if old != nil && old.RetentionPeriod == period {
 		return new(*old), nil
 	}
-	_, now := s.timestamp()
-	return &RetentionPolicy{RetentionPeriod: period, EffectiveTime: now, IsLocked: locked}, nil
+	return &RetentionPolicy{RetentionPeriod: period, EffectiveTime: now.UTC().Format(timeFormat), IsLocked: locked}, nil
 }
 
 // nextSoftDeletePolicy is b's soft delete policy after a patch at now sets it to in. The caller holds s.mu.

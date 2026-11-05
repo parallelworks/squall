@@ -136,3 +136,41 @@ func TestPolicyNeedsSetRetentionToRemoveRetention(t *testing.T) {
 	_, err = svc.Objects.Update("data", "a.txt", &rawstorage.Object{}).OverrideUnlockedRetention(true).Context(t.Context()).Do()
 	wantErr(t, "remove retention by leaving it out", err, http.StatusForbidden, "forbidden", "Permission 'storage.objects.setRetention' denied")
 }
+
+func TestPolicyChecksTheGenerationAnUpdateNames(t *testing.T) {
+	policy := access.Allow("storage.buckets.create", "storage.buckets.enableObjectRetention", "storage.objects.create",
+		"storage.objects.update", "storage.objects.overrideUnlockedRetention")
+	s := storage.New(storage.WithPolicy(policy))
+	url := serve(t, s)
+	c, svc := clientAt(t, url), rawService(t, url)
+	if err := c.Bucket("versions").SetObjectRetention(true).Create(t.Context(), project, &gcs.BucketAttrs{VersioningEnabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	put := func(name, data string) storage.Object {
+		t.Helper()
+		o, err := s.PutObject("versions", name, []byte(data))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return o
+	}
+	first := put("a.txt", "one")
+	if _, err := s.SetObjectRetention("versions", "a.txt", &storage.Retention{Mode: "Unlocked", RetainUntilTime: time.Now().Add(time.Hour).Format(time.RFC3339)}); err != nil {
+		t.Fatal(err)
+	}
+	put("a.txt", "two")
+	_, err := svc.Objects.Update("versions", "a.txt", &rawstorage.Object{}).Generation(first.Generation).OverrideUnlockedRetention(true).Context(t.Context()).Do()
+	wantErr(t, "remove a noncurrent generation's retention", err, http.StatusForbidden, "forbidden", "Permission 'storage.objects.setRetention' denied")
+	if _, err := svc.Objects.Update("versions", "a.txt", &rawstorage.Object{}).Context(t.Context()).Do(); err != nil {
+		t.Fatalf("update the live generation, which has no retention: %v", err)
+	}
+
+	older := put("b.txt", "one")
+	put("b.txt", "two")
+	if _, err := s.SetObjectRetention("versions", "b.txt", &storage.Retention{Mode: "Unlocked", RetainUntilTime: time.Now().Add(time.Hour).Format(time.RFC3339)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Objects.Update("versions", "b.txt", &rawstorage.Object{}).Generation(older.Generation).Context(t.Context()).Do(); err != nil {
+		t.Fatalf("update a noncurrent generation without retention while the live one has it: %v", err)
+	}
+}

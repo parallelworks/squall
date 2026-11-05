@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/parallelworks/squall/access"
@@ -63,7 +64,7 @@ func (s *Server) needs(method, resource string, r *http.Request) []string {
 		add(bodySetsRetention(peekBody(r, maxBody)), "storage.objects.setRetention")
 		add(q.Get("overrideUnlockedRetention") == "true", "storage.objects.overrideUnlockedRetention")
 	case "storage.objects.update":
-		add(bodySetsRetention(peekBody(r, maxBody)) || s.retained(resource), "storage.objects.setRetention")
+		add(bodySetsRetention(peekBody(r, maxBody)) || s.retained(resource, q.Get("generation")), "storage.objects.setRetention")
 		add(q.Get("overrideUnlockedRetention") == "true", "storage.objects.overrideUnlockedRetention")
 	case "storage.objects.restore":
 		add(s.exists(resource), "storage.objects.delete")
@@ -85,8 +86,8 @@ func bodySetsRetention(meta []byte) bool {
 	return ok
 }
 
-// retained reports whether resource, as "b/<bucket>/o/<object>", names a live object with retention.
-func (s *Server) retained(resource string) bool {
+// retained reports whether resource, as "b/<bucket>/o/<object>", at generation or else live, has retention.
+func (s *Server) retained(resource, generation string) bool {
 	bucketName, name, ok := strings.Cut(strings.TrimPrefix(resource, "b/"), "/o/")
 	if !ok {
 		return false
@@ -98,6 +99,9 @@ func (s *Server) retained(resource string) bool {
 		return false
 	}
 	o := b.liveObject(name)
+	if gen, err := strconv.ParseInt(generation, 10, 64); err == nil {
+		o = b.generation(name, gen)
+	}
 	return o != nil && o.Retention != nil
 }
 

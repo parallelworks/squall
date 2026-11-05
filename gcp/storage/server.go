@@ -31,21 +31,25 @@
 //     default; US, EU and ASIA are multi-regions, NAM4, EUR4, EUR5, EUR7, EUR8
 //     and ASIA1 and any location with a customPlacementConfig dual-regions,
 //     and the rest regions. Project numbers are derived from project IDs.
-//   - Bucket fields other than name, location, storageClass, labels,
-//     versioning, cors, customPlacementConfig, encryption, rpo,
-//     retentionPolicy, defaultEventBasedHold, softDeletePolicy and billing
-//     are rejected with 400, as are ACLs other than private and
-//     projectPrivate. cors, encryption and rpo are recorded, not enforced.
-//     There are no IAM policies on buckets or objects, and no lifecycle,
-//     autoclass, hardDeletePause or hierarchical namespace. buckets.patch
-//     has patch semantics: it merges labels, deleting one set to null, and
-//     clears labels, versioning, cors, encryption, retentionPolicy,
-//     defaultEventBasedHold or billing set to null; a null softDeletePolicy
-//     is rejected with 400. Insert and patch ignore the fields the server
-//     sets, effectiveTime and isLocked in the policies included, and a patch
-//     takes name, location, customPlacementConfig and rpo unchanged, so the
-//     body a get returns can be sent back. Every bucket reports a generation
-//     (inferred).
+//   - Writable bucket fields other than name, location, storageClass,
+//     labels, versioning, cors, customPlacementConfig, encryption, rpo,
+//     retentionPolicy, defaultEventBasedHold, softDeletePolicy, billing and
+//     objectRetention are rejected with 400, as are other unknown fields and
+//     ACLs other than private and projectPrivate. cors, encryption and rpo
+//     are recorded, not enforced. There are no IAM policies on buckets or
+//     objects, and no lifecycle, autoclass, hardDeletePause or hierarchical
+//     namespace. buckets.patch has patch semantics: it merges labels,
+//     deleting one set to null, and clears labels, versioning, cors,
+//     encryption, rpo, retentionPolicy, defaultEventBasedHold or billing set
+//     to null; a null softDeletePolicy is rejected with 400. Insert and
+//     patch ignore the fields the server sets, effectiveTime and isLocked in
+//     the policies included, and a patch accepts the insert-only name,
+//     location and customPlacementConfig only unchanged, so the body a get
+//     returns can be sent back. objectRetention is set only by
+//     enableObjectRetention on insert, since the JSON API offers no way to
+//     turn it on later, so a body's objectRetention must match it: on
+//     insert what the parameter gives, and on patch what the bucket has,
+//     with 400 otherwise. Every bucket reports a generation (inferred).
 //   - Objects record their size, MD5 and CRC32C, not their data; a crc32c or
 //     md5Hash in the upload's metadata must match the data. Resumable
 //     uploads, media reads (objects.get with alt=media answers 404), copies,

@@ -220,6 +220,65 @@ func TestSoftDeleteEffectiveTimeOnAMovingClock(t *testing.T) {
 	}
 }
 
+func TestBucketObjectRetentionInBodies(t *testing.T) {
+	s := storage.New()
+	for _, tc := range []struct {
+		target, body string
+		status       int
+	}{
+		{"/storage/v1/b?project=p&enableObjectRetention=true", `{"name":"or-on","objectRetention":{"mode":"Enabled"}}`, http.StatusOK},
+		{"/storage/v1/b?project=p", `{"name":"or-off","objectRetention":null}`, http.StatusOK},
+		{"/storage/v1/b?project=p", `{"name":"or-mismatch","objectRetention":{"mode":"Enabled"}}`, http.StatusBadRequest},
+	} {
+		if code, body := do(t, s, http.MethodPost, tc.target, "application/json", tc.body); code != tc.status {
+			t.Fatalf("insert %s = %d %s, want %d", tc.body, code, body, tc.status)
+		}
+	}
+	for _, tc := range []struct {
+		bucket, body string
+		status       int
+	}{
+		{"or-on", `{"objectRetention":{"mode":"Enabled"},"labels":{"a":"b"}}`, http.StatusOK},
+		{"or-on", `{"objectRetention":null}`, http.StatusBadRequest},
+		{"or-off", `{"objectRetention":{"mode":"Enabled"}}`, http.StatusBadRequest},
+		{"or-off", `{"objectRetention":null}`, http.StatusOK},
+	} {
+		if code, body := do(t, s, http.MethodPatch, "/storage/v1/b/"+tc.bucket, "application/json", tc.body); code != tc.status {
+			t.Fatalf("patch %s with %s = %d %s, want %d", tc.bucket, tc.body, code, body, tc.status)
+		}
+	}
+}
+
+func TestBucketPatchReadsTheClockOnce(t *testing.T) {
+	var mu sync.Mutex
+	now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	s := storage.New(storage.WithClock(func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		now = now.Add(time.Second)
+		return now
+	}))
+	do(t, s, http.MethodPost, "/storage/v1/b?project=p", "application/json", `{"name":"once"}`)
+	_, body := do(t, s, http.MethodPatch, "/storage/v1/b/once", "application/json",
+		`{"retentionPolicy":{"retentionPeriod":"60"},"softDeletePolicy":{"retentionDurationSeconds":"1209600"},"rpo":"ASYNC_TURBO"}`)
+	var b struct {
+		Updated         string `json:"updated"`
+		RPO             string `json:"rpo"`
+		RetentionPolicy struct {
+			EffectiveTime string `json:"effectiveTime"`
+		} `json:"retentionPolicy"`
+		SoftDeletePolicy struct {
+			EffectiveTime string `json:"effectiveTime"`
+		} `json:"softDeletePolicy"`
+	}
+	if err := json.Unmarshal([]byte(body), &b); err != nil {
+		t.Fatal(err)
+	}
+	if b.RPO != "ASYNC_TURBO" || b.RetentionPolicy.EffectiveTime != b.Updated || b.SoftDeletePolicy.EffectiveTime != b.Updated {
+		t.Fatalf("patch = %s", body)
+	}
+}
+
 func FuzzServeHTTP(f *testing.F) {
 	multipartBody := "--x\r\nContent-Type: application/json\r\n\r\n{\"name\":\"o\"}\r\n--x\r\nContent-Type: text/plain\r\n\r\nhi\r\n--x--\r\n"
 	for _, seed := range []struct{ method, target, contentType, body string }{

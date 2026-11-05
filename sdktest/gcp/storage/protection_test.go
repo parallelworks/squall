@@ -815,3 +815,15 @@ func TestBucketReadModifyWrite(t *testing.T) {
 		t.Fatalf("patch with a get's body = %+v, %v", got, err)
 	}
 }
+
+func TestPatchRPO(t *testing.T) {
+	c := newClient(t, storage.New())
+	b := c.Bucket("rpo")
+	if err := b.Create(t.Context(), project, &gcs.BucketAttrs{Location: "nam4"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := b.Update(t.Context(), gcs.BucketAttrsToUpdate{RPO: gcs.RPOAsyncTurbo})
+	if err != nil || got.RPO != gcs.RPOAsyncTurbo {
+		t.Fatalf("patch rpo = %+v, %v", got, err)
+	}
+}
