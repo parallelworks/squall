@@ -99,7 +99,11 @@ func (s *Server) retained(resource, generation string) bool {
 		return false
 	}
 	o := b.liveObject(name)
-	if gen, err := strconv.ParseInt(generation, 10, 64); err == nil {
+	if generation != "" {
+		gen, err := strconv.ParseInt(generation, 10, 64)
+		if err != nil {
+			return false
+		}
 		o = b.generation(name, gen)
 	}
 	return o != nil && o.Retention != nil

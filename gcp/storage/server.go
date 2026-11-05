@@ -46,10 +46,11 @@
 //     the policies included, and a patch accepts the insert-only name,
 //     location and customPlacementConfig only unchanged, so the body a get
 //     returns can be sent back. objectRetention is set only by
-//     enableObjectRetention on insert, since the JSON API offers no way to
-//     turn it on later, so a body's objectRetention must match it: on
-//     insert what the parameter gives, and on patch what the bucket has,
-//     with 400 otherwise. Every bucket reports a generation (inferred).
+//     enableObjectRetention on insert, since the docs give only the console
+//     for turning it on for an existing bucket, so a body's objectRetention
+//     must match it: on insert what the parameter gives, and on patch what
+//     the bucket has, with 400 otherwise. Every bucket reports a generation
+//     (inferred).
 //   - Objects record their size, MD5 and CRC32C, not their data; a crc32c or
 //     md5Hash in the upload's metadata must match the data. Resumable
 //     uploads, media reads (objects.get with alt=media answers 404), copies,
@@ -179,7 +180,10 @@
 // projection=full needs nothing more: Cloud Storage leaves out the ACLs a
 // caller may not read rather than refusing the call, and the official
 // clients ask for it on every get and list. Permissions are not checked
-// against the bucket they act on: a grant covers every bucket.
+// against the bucket they act on: a grant covers every bucket. They are
+// worked out before the call takes the server's lock, so a concurrent call
+// that changes what they depend on, such as an object's retention, in
+// between can leave a call checked against the state just before it.
 //
 // A lost response aborts the handler with [http.ErrAbortHandler] after
 // sending the response header, so the [http.Server] serving it closes the

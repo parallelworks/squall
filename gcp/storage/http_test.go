@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/parallelworks/squall/access"
 	"github.com/parallelworks/squall/gcp/storage"
 )
 
@@ -276,6 +277,23 @@ func TestBucketPatchReadsTheClockOnce(t *testing.T) {
 	}
 	if b.RPO != "ASYNC_TURBO" || b.RetentionPolicy.EffectiveTime != b.Updated || b.SoftDeletePolicy.EffectiveTime != b.Updated {
 		t.Fatalf("patch = %s", body)
+	}
+}
+
+func TestUpdateWithAnInvalidGenerationUnderAPolicy(t *testing.T) {
+	s := storage.New(storage.WithPolicy(access.Allow("storage.objects.update")))
+	if _, err := s.PutBucket(storage.Bucket{Name: "gens", Project: "p", ObjectRetention: &storage.BucketObjectRetention{Mode: "Enabled"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PutObject("gens", "k", []byte("v")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetObjectRetention("gens", "k", &storage.Retention{Mode: "Unlocked", RetainUntilTime: "2099-01-01T00:00:00Z"}); err != nil {
+		t.Fatal(err)
+	}
+	code, body := do(t, s, http.MethodPut, "/storage/v1/b/gens/o/k?generation=soon", "application/json", "{}")
+	if code != http.StatusBadRequest || !strings.Contains(body, "Invalid value for generation") {
+		t.Fatalf("update = %d %s", code, body)
 	}
 }
 
