@@ -112,19 +112,45 @@ func (s *Server) netappParentMissing(c *call, l *netappLevel) *apiError {
 // backupVolumeFilter reads which volume a backups list names, if any: its
 // $filter, or its volumeResourceId parameter, is the volume's resource ID.
 func backupVolumeFilter(c *call) (string, *apiError) {
-	filter, param := strings.TrimSpace(c.query("$filter")), strings.TrimSpace(c.query("volumeResourceId"))
-	if filter != "" && param != "" && key(filter) != key(param) {
-		return "", unsupported("$filter '%s' and volumeResourceId '%s' name different volumes", filter, param)
+	q := c.r.URL.Query()
+	var ids []string
+	for _, name := range []string{"$filter", "volumeResourceId"} {
+		vals := q[name]
+		if len(vals) > 1 {
+			return "", unsupported("%s is given %d times", name, len(vals))
+		}
+		if len(vals) == 0 || strings.TrimSpace(vals[0]) == "" {
+			continue
+		}
+		id := strings.TrimSpace(vals[0])
+		if !isVolumeID(id) {
+			return "", unsupported("the backups %s '%s' is not supported; give a NetApp volume's resource ID", name, id)
+		}
+		ids = append(ids, id)
 	}
-	volume := cmp.Or(filter, param)
-	if volume == "" {
+	if len(ids) == 2 && key(ids[0]) != key(ids[1]) {
+		return "", unsupported("$filter '%s' and volumeResourceId '%s' name different volumes", ids[0], ids[1])
+	}
+	if len(ids) == 0 {
 		return "", nil
 	}
-	if !strings.HasPrefix(key(volume), "/subscriptions/") || !strings.Contains(key(volume), "/providers/microsoft.netapp/netappaccounts/") ||
-		!strings.Contains(key(volume), "/volumes/") || strings.ContainsAny(volume, " '\"") {
-		return "", unsupported("the backups filter '%s' is not supported; give the volume's resource ID", volume)
+	return ids[0], nil
+}
+
+// isVolumeID reports whether id is a NetApp volume's resource ID, and nothing more.
+func isVolumeID(id string) bool {
+	want := []string{"subscriptions", "", "resourceGroups", "", "providers", "Microsoft.NetApp", "netAppAccounts", "", "capacityPools", "", "volumes", ""}
+	parts := strings.Split(id, "/")
+	if len(parts) != len(want)+1 || parts[0] != "" {
+		return false
 	}
-	return volume, nil
+	for i, w := range want {
+		part := parts[i+1]
+		if w == "" && (part == "" || strings.ContainsAny(part, " '\"")) || w != "" && !strings.EqualFold(part, w) {
+			return false
+		}
+	}
+	return true
 }
 
 // prepareVolumeGroup accepts a volume group that lists no volumes; creating

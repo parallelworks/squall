@@ -713,12 +713,14 @@
 //     beyond create, get, list and delete are not modeled. Backups are not
 //     created through the API; [Server.AddBackup] adds one to a vault, showing
 //     backupId, creationDate, completionDate and volumeResourceId, and it
-//     outlives its volume, as Microsoft documents. A backups list's $filter is
-//     a volume's resource ID, compared without regard to case, and lists that
-//     volume's backups, as Microsoft's PowerShell cmdlet and its recorded
-//     tests send it; a volumeResourceId parameter, which Microsoft's .NET
-//     client sends instead, does the same. Any other filter fails with 400.
-//     Which backup may be deleted is not checked. [Server.AddBackupVault],
+//     outlives its volume, as Microsoft documents. A backups list's $filter, a
+//     volume's resource ID compared without regard to case, lists that
+//     volume's backups, as the API's description of $filter says; that Azure
+//     filters on it is inferred. A volumeResourceId parameter does the same:
+//     Microsoft's .NET client sends the filter as that parameter, as its code
+//     notes the service expects. Anything but a NetApp volume's ID, either one
+//     given twice, or the two naming different volumes fails with 400. Which
+//     backup may be deleted is not checked. [Server.AddBackupVault],
 //     [Server.AddBackupPolicy], [Server.AddSnapshotPolicy] and
 //     [Server.AddCache] add the others directly.
 //   - A Managed Lustre change in progress answers with an

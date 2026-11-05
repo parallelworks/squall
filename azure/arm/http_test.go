@@ -891,6 +891,9 @@ func TestNetAppAccountChildShapes(t *testing.T) {
 		{"volumeResourceId=" + url.QueryEscape(vol) + "&$filter=" + url.QueryEscape(strings.ToUpper(vol)), 1},
 		{"volumeResourceId=" + url.QueryEscape(vol) + "&$filter=" + url.QueryEscape(vol+"x"), -1},
 		{"volumeResourceId=v", -1},
+		{"volumeResourceId=" + url.QueryEscape(vol) + "&volumeResourceId=" + url.QueryEscape(vol), -1},
+		{"$filter=" + url.QueryEscape(vol) + "&$filter=" + url.QueryEscape(vol), -1},
+		{"volumeResourceId=" + url.QueryEscape(vol) + "&$filter=" + url.QueryEscape("volumeResourceId eq 'x'"), -1},
 	} {
 		rec, out := do(t, s, http.MethodGet, acct+"/backupVaults/v/backups?api-version=2024-01-01&"+tc.query, "")
 		value, _ := out["value"].([]any)

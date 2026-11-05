@@ -736,12 +736,14 @@ For Azure Resource Manager:
   volumes in a group instead. A cache takes an address in its cache subnet;
   its peering, `cacheState` and write-back are not modeled. Backups are not
   created through the API: `AddBackup` adds one to a vault, and it outlives
-  its volume, as Microsoft documents. A backups list's `$filter` is a volume's
-  resource ID (case-insensitive), as Microsoft's PowerShell cmdlet and its
-  recorded tests send it, and the `volumeResourceId` parameter Microsoft's
-  .NET client sends works the same; any other filter is rejected with 400.
-  `AddBackupVault`, `AddBackupPolicy`, `AddSnapshotPolicy` and `AddCache` add
-  the rest directly.
+  its volume, as Microsoft documents. A backups list's `$filter`, a volume's
+  resource ID (case-insensitive), lists that volume's backups, as the API's
+  description of `$filter` says (that Azure filters on it is inferred); the
+  `volumeResourceId` parameter, which Microsoft's .NET client sends because
+  its code notes the service expects it, does the same. Anything but a NetApp
+  volume's ID, either one given twice, or the two naming different volumes is
+  rejected with 400. `AddBackupVault`, `AddBackupPolicy`, `AddSnapshotPolicy`
+  and `AddCache` add the rest directly.
 - Fault method names are the Azure RBAC action, such as
   `Microsoft.Compute/virtualMachines/write`, and a rule's `Resource` is the
   resource ID in the call's path. Blob service faults name the operation,

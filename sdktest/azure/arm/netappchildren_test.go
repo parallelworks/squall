@@ -384,7 +384,10 @@ func TestNetAppBackupVaultHoldsBackups(t *testing.T) {
 	if names, err := listed(new(strings.ToUpper(other))); err != nil || !slices.Equal(names, []string{"acct/vault/b2"}) {
 		t.Fatalf("backups of a volume named in upper case = %v, %v", names, err)
 	}
-	for _, f := range []string{"backupType eq 'Manual'", "volumeResourceId eq '" + other + "'", "vol"} {
+	for _, f := range []string{
+		"backupType eq 'Manual'", "volumeResourceId eq '" + other + "'", "vol", *vol.ID + "/snapshots/s", *vol.ID + "/",
+		strings.TrimSuffix(*vol.ID, "/vol"), accountOf(*vol.ID) + "/volumes/vol",
+	} {
 		if _, err := listed(new(f)); code(err) != "BadRequest" || status(err) != http.StatusBadRequest {
 			t.Fatalf("backups listed with $filter %s = %v", f, err)
 		}
