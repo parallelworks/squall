@@ -40,6 +40,10 @@ type ObjectVersion struct {
 	// ETag is the quoted hex MD5 of the object's data; empty for a delete marker.
 	ETag         string
 	LastModified time.Time
+	// RetentionMode is GOVERNANCE or COMPLIANCE for a version given a retention period, which may have expired.
+	RetentionMode string
+	RetainUntil   time.Time
+	LegalHold     bool
 }
 
 type version struct {
@@ -50,10 +54,14 @@ type version struct {
 	size         int64
 	etag         string
 	modified     time.Time
+	lock         objectLock
 }
 
 func (v *version) export(key string, latest bool) ObjectVersion {
-	return ObjectVersion{Key: key, VersionID: v.id, IsLatest: latest, DeleteMarker: v.deleteMarker, Size: v.size, ETag: v.etag, LastModified: v.modified}
+	return ObjectVersion{
+		Key: key, VersionID: v.id, IsLatest: latest, DeleteMarker: v.deleteMarker, Size: v.size, ETag: v.etag, LastModified: v.modified,
+		RetentionMode: v.lock.mode, RetainUntil: v.lock.until, LegalHold: v.lock.hold == legalHoldOn,
+	}
 }
 
 // newVersion returns a version written now, "null" unless versioning is on. The caller holds s.mu.
@@ -108,13 +116,16 @@ type deleted struct {
 }
 
 // remove deletes version id of key, or with no id deletes key as the bucket's versioning says. The caller holds s.mu.
-func (s *Server) remove(b *bucket, key, id string) deleted {
+func (s *Server) remove(b *bucket, key, id string, bypass bool, method string) (deleted, *apiError) {
 	if id != "" {
 		out := deleted{Key: key, VersionID: id}
 		versions := b.objects[key]
 		i := slices.IndexFunc(versions, func(v *version) bool { return v.id == id })
 		if i < 0 {
-			return out
+			return out, nil
+		}
+		if err := s.protects(versions[i], bypass, method, b.Name+"/"+key); err != nil {
+			return deleted{}, err
 		}
 		if versions[i].deleteMarker {
 			out.DeleteMarker, out.DeleteMarkerVersionID = true, id
@@ -125,16 +136,16 @@ func (s *Server) remove(b *bucket, key, id string) deleted {
 		} else {
 			b.objects[key] = versions
 		}
-		return out
+		return out, nil
 	}
 	if b.Versioning == "" {
 		b.forget(key)
-		return deleted{Key: key}
+		return deleted{Key: key}, nil
 	}
 	marker := s.newVersion(b)
 	marker.deleteMarker = true
 	b.write(key, marker)
-	return deleted{Key: key, DeleteMarker: true, DeleteMarkerVersionID: marker.id}
+	return deleted{Key: key, DeleteMarker: true, DeleteMarkerVersionID: marker.id}, nil
 }
 
 func (s *Server) putObject(c *call) (*reply, *apiError) {
@@ -147,10 +158,12 @@ func (s *Server) putObject(c *call) (*reply, *apiError) {
 	if acl := c.r.Header.Get("x-amz-acl"); acl != "" && acl != "private" && acl != "bucket-owner-full-control" {
 		return nil, &apiError{Status: http.StatusBadRequest, Code: "AccessControlListNotSupported", Message: "The bucket does not allow ACLs"}
 	}
-	for h := range c.r.Header {
-		if strings.HasPrefix(strings.ToLower(h), "x-amz-object-lock-") || strings.EqualFold(h, "x-amz-tagging") {
-			return nil, invalidArgument("squall: the %s header is not supported", h)
-		}
+	if c.r.Header.Get("X-Amz-Tagging") != "" {
+		return nil, invalidArgument("squall: the x-amz-tagging header is not supported")
+	}
+	lock, err := s.lockHeaders(c.r.Header)
+	if err != nil {
+		return nil, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -158,7 +171,14 @@ func (s *Server) putObject(c *call) (*reply, *apiError) {
 	if err != nil {
 		return nil, err
 	}
+	if err := checkLockable(b, lock); err != nil {
+		return nil, err
+	}
+	if (lock.mode != "" || b.DefaultRetention != nil) && !hasChecksum(c.r.Header) {
+		return nil, lockChecksumMissing("Put Object")
+	}
 	v := s.storeObject(b, c.key, c.body)
+	s.applyLock(b, v, lock)
 	header := map[string]string{"ETag": v.etag}
 	if b.Versioning != "" {
 		header["x-amz-version-id"] = v.id
@@ -168,11 +188,25 @@ func (s *Server) putObject(c *call) (*reply, *apiError) {
 
 // storeObject writes data as key's newest version. The caller holds s.mu.
 func (s *Server) storeObject(b *bucket, key string, data []byte) *version {
-	sum := md5.Sum(data) //nolint:gosec // an ETag, not a security check
+	return s.storeVersion(b, key, int64(len(data)), etagOf(data))
+}
+
+// storeVersion writes a version of size bytes with etag as key's newest. The caller holds s.mu.
+func (s *Server) storeVersion(b *bucket, key string, size int64, etag string) *version {
 	v := s.newVersion(b)
-	v.size, v.etag = int64(len(data)), `"`+hex.EncodeToString(sum[:])+`"`
+	v.size, v.etag = size, etag
 	b.write(key, v)
 	return v
+}
+
+func etagOf(data []byte) string {
+	sum := md5.Sum(data) //nolint:gosec // an ETag, not a security check
+	return `"` + hex.EncodeToString(sum[:]) + `"`
+}
+
+// bypassing reports whether c asks to bypass governance retention.
+func bypassing(c *call) bool {
+	return strings.EqualFold(c.r.Header.Get("X-Amz-Bypass-Governance-Retention"), "true")
 }
 
 func (s *Server) deleteObject(c *call) (*reply, *apiError) {
@@ -188,7 +222,10 @@ func (s *Server) deleteObject(c *call) (*reply, *apiError) {
 	if err != nil {
 		return nil, err
 	}
-	d := s.remove(b, c.key, id)
+	d, err := s.remove(b, c.key, id, bypassing(c), "s3.DeleteObject")
+	if err != nil {
+		return nil, err
+	}
 	header := map[string]string{}
 	if d.DeleteMarker {
 		header["x-amz-delete-marker"] = "true"
@@ -253,7 +290,11 @@ func (s *Server) deleteObjects(c *call) (*reply, *apiError) {
 			out.Errors = append(out.Errors, deleteErrorXML{o.Key, o.VersionID, "AccessDenied", "Access Denied"})
 			continue
 		}
-		d := s.remove(b, o.Key, o.VersionID)
+		d, err := s.remove(b, o.Key, o.VersionID, bypassing(c), "s3.DeleteObjects")
+		if err != nil {
+			out.Errors = append(out.Errors, deleteErrorXML{o.Key, o.VersionID, err.Code, err.Message})
+			continue
+		}
 		if !in.Quiet {
 			out.Deleted = append(out.Deleted, d)
 		}
@@ -400,13 +441,9 @@ func (s *Server) listObjectsV2(c *call) (*reply, *apiError) {
 	if err != nil {
 		return nil, err
 	}
-	encode := func(v string) string { return v }
-	switch c.query.Get("encoding-type") {
-	case "":
-	case "url":
-		encode = func(v string) string { return strings.ReplaceAll(url.QueryEscape(v), "%2F", "/") }
-	default:
-		return nil, invalidArgument("Invalid Encoding Method specified in Request")
+	encode, err := encodingOf(c)
+	if err != nil {
+		return nil, err
 	}
 	var fetchOwner bool
 	switch c.query.Get("fetch-owner") {
@@ -477,6 +514,17 @@ func (s *Server) listObjectsV2(c *call) (*reply, *apiError) {
 		last, lastKind = entry, kind
 	}
 	return &reply{body: out}, nil
+}
+
+// encodingOf reads a listing's encoding-type into how it encodes keys and prefixes.
+func encodingOf(c *call) (func(string) string, *apiError) {
+	switch c.query.Get("encoding-type") {
+	case "":
+		return func(v string) string { return v }, nil
+	case "url":
+		return func(v string) string { return strings.ReplaceAll(url.QueryEscape(v), "%2F", "/") }, nil
+	}
+	return nil, invalidArgument("Invalid Encoding Method specified in Request")
 }
 
 func entryXML(v ObjectVersion) versionXML {

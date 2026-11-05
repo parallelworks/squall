@@ -25,7 +25,7 @@ failure replays from its seed.
 | [`aws/cur`](https://pkg.go.dev/github.com/parallelworks/squall/aws/cur) | AWS Cost and Usage Reports: report definitions (put with the API's field rules, a per-account limit and a check that the S3 bucket's policy allows report delivery, describe with pages, delete). |
 | [`aws/ec2`](https://pkg.go.dev/github.com/parallelworks/squall/aws/ec2) | Amazon EC2: instances (run with client tokens, describe with filters and pages, start, stop, terminate, change type or which attached volumes terminating deletes), images (describe, register from snapshots, deregister), instance types, EBS volumes (create, describe, attach, detach, delete), EBS snapshots (create, copy across regions, describe with filters and pages, delete), placement groups, tags, Elastic IP addresses (allocate, describe, release, associate with an interface or instance, disassociate), network interfaces (create with client tokens, describe, delete), and VPC networking: VPCs and their DNS attributes, subnets, availability zones, internet gateways (create, attach, detach, delete), NAT gateways on Elastic IP addresses, route tables with their routes and subnet associations, DHCP options, security groups (create, describe groups and rules with filters and pages, authorize and revoke ingress and egress rules, delete) with each VPC's default group, and VPC attachments to transit gateways the test sets up, refusing deletes with dependencies as EC2 does. |
 | [`aws/route53`](https://pkg.go.dev/github.com/parallelworks/squall/aws/route53) | Amazon Route 53: private hosted zones (create with caller references, get, list by name with pages, delete), their VPC associations, tags, and record sets (change in atomic batches with CREATE, UPSERT and DELETE, list with pages), and changes (get). |
-| [`aws/s3`](https://pkg.go.dev/github.com/parallelworks/squall/aws/s3) | Amazon S3: general purpose buckets (create, head, list with pages and filters, delete), their tags, versioning, policy and CORS rules, and objects (put, delete one or many, list with pages, prefixes and delimiters, list versions and delete markers). |
+| [`aws/s3`](https://pkg.go.dev/github.com/parallelworks/squall/aws/s3) | Amazon S3: general purpose buckets (create, head, list with pages and filters, delete), their tags, versioning, policy, CORS rules and request payment, objects (put, delete one or many, list with pages, prefixes and delimiters, list versions and delete markers), multipart uploads (create, upload parts, complete with S3's part checks, abort, list uploads and parts with pages), and Object Lock: bucket configuration with default retention, per-version GOVERNANCE and COMPLIANCE retention and legal holds that refuse deletes of a locked version, with governance bypass, on the server's clock. |
 | [`azure/arm`](https://pkg.go.dev/github.com/parallelworks/squall/azure/arm) | Azure Resource Manager: resource groups (get, create or update, list with tag filters, list the resources in one, delete with everything in them that nothing outside uses), virtual machines (create or update, get, list, instance view, deallocate, start, delete) and their extensions (create or update, get, list, delete), Uniform scale sets (create or update, update, get, list, delete, delete instances) and their VMs, managed disks (VM OS disks included) and snapshots, with cross-region incremental snapshot copies whose completionPercent climbs to 100, Azure Compute Gallery galleries, image definitions and image versions with their replication status, virtual networks and their subnets, NAT gateways, public load balancers with backend pools and outbound rules, network security groups, network interfaces and public IP addresses, the IP configurations of scale set VMs, private DNS zones, virtual network links and A record sets, resource provider registration, storage accounts with their blob containers (soft-deleted ones listed, legal holds and immutability policies that block deletes), file shares with usage stats, snapshots and soft delete, queues and tables, Azure NetApp Files accounts, capacity pools, volumes, volume snapshots, caches, backup vaults with their backups, backup policies, snapshot policies and volume groups, the Blob service's data plane (containers, and block blobs put, listed with versions, snapshots, soft-deleted and uncommitted blobs, and deleted) with RBAC data actions and account network rules, Cost Management exports at a subscription's scope, Log Analytics workspaces (create or update, recover, get, list, delete with soft deletion) and the default workspace Application Insights makes for a component that names none, Cognitive Services deployments with partner model attestations, and long-running operations to poll. |
 | [`azure/graph`](https://pkg.go.dev/github.com/parallelworks/squall/azure/graph) | Microsoft Graph: the organization (list), a directory's domains (list) and users (create with Microsoft Entra's name and password rules, get by ID or user principal name, delete, permanently delete once deleted), with application permissions checked as Graph documents them. |
 | [`gcp/bigquery`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/bigquery) | BigQuery: datasets (insert with the API's ID and label rules, get, list with pages, patch friendly name, description and labels with etag checks, delete refusing a dataset that holds tables unless `deleteContents`), optionally refused in a project where a `gcp/serviceusage` server has not enabled the API. |
@@ -351,10 +351,28 @@ For Amazon S3:
   deleted. `DeleteBucket` fails with `BucketNotEmpty` while any version or
   delete marker remains.
 - Objects keep their size and ETag, not their data. Checksums are not
-  verified, and multipart uploads, copies, object tags and lifecycle are not
-  supported. Policies and CORS rules are recorded, not enforced. S3 documents
-  in-progress multipart uploads as blocking `DeleteBucket` only for directory
-  buckets.
+  verified, and copies, object tags and lifecycle are not supported. Policies
+  and CORS rules are recorded, not enforced, and so is request payment: with
+  one account, every caller owns the bucket and pays nothing extra.
+- Multipart uploads check their parts on completion as S3 does
+  (`InvalidPartOrder`, `InvalidPart`, `EntityTooSmall` for a part under 5 MiB
+  before the last), and completing one ends it, so a retry after a lost
+  response fails with `NoSuchUpload`. `MultipartUploads` reports the parts an
+  upload holds, which S3 bills as storage, and `CreateMultipartUpload` starts
+  one directly. S3 documents in-progress uploads as blocking `DeleteBucket`
+  only for directory buckets, so deleting a general purpose bucket discards
+  them.
+- Object Lock refuses to delete a version under an unexpired retention or a
+  legal hold with 403 `AccessDenied`, by the server's clock. `COMPLIANCE`
+  never yields; `GOVERNANCE` yields to `x-amz-bypass-governance-retention`
+  from a caller granted `s3:BypassGovernanceRetention`. A delete without a
+  version ID adds a delete marker, and `DeleteBucket` fails while any version
+  remains. Changing a `GOVERNANCE` retention to `COMPLIANCE` also needs the
+  bypass, which is inferred: S3 documents it only for shortening and removal,
+  but lets no one alter governance lock settings without special permissions.
+  Object Lock writes need Content-MD5 or a checksum, multipart parts
+  included. `SetRetention` and `SetLegalHold` lock a version directly. Event
+  holds are not supported.
 - A fault rule's `Resource` is the bucket name, or `bucket/key` for an object
   call. A lost `HeadBucket` breaks off inside its status line, since a sent
   header would read as an answer.

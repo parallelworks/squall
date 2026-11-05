@@ -38,6 +38,12 @@ type Bucket struct {
 	Policy string
 	// CORS is the CORSConfiguration XML as sent, empty for none.
 	CORS string
+	// ObjectLock is whether Object Lock is enabled, which needs Versioning "Enabled".
+	ObjectLock bool
+	// DefaultRetention is the retention an Object Lock bucket gives new versions, nil for none.
+	DefaultRetention *DefaultRetention
+	// RequesterPays is whether the bucket's request payment configuration names the requester as payer.
+	RequesterPays bool
 }
 
 type bucket struct {
@@ -46,11 +52,16 @@ type bucket struct {
 	objects map[string][]*version
 	// nullSeqs holds each key's last "null" version's sequence number, kept after a delete so a marker naming it keeps its place.
 	nullSeqs map[string]uint64
+	// uploads holds the in-progress multipart uploads by upload ID.
+	uploads map[string]*upload
 }
 
 func (b *bucket) clone() Bucket {
 	c := b.Bucket
 	c.Tags = maps.Clone(b.Tags)
+	if b.DefaultRetention != nil {
+		c.DefaultRetention = new(*b.DefaultRetention)
+	}
 	return c
 }
 
@@ -129,9 +140,7 @@ func (s *Server) createBucket(c *call) (*reply, *apiError) {
 	if o := c.r.Header.Get("x-amz-object-ownership"); o != "" && o != "BucketOwnerEnforced" {
 		return nil, invalidArgument("squall: object ownership %s is not supported", o)
 	}
-	if strings.EqualFold(c.r.Header.Get("x-amz-bucket-object-lock-enabled"), "true") {
-		return nil, invalidArgument("squall: object lock is not supported")
-	}
+	locked := strings.EqualFold(c.r.Header.Get("x-amz-bucket-object-lock-enabled"), "true")
 	var cfg createBucketConfiguration
 	if len(c.body) > 0 {
 		if err := decodeXML(c.body, &cfg); err != nil {
@@ -173,7 +182,11 @@ func (s *Server) createBucket(c *call) (*reply, *apiError) {
 			Message: fmt.Sprintf("The %s location constraint is incompatible for the region specific endpoint this request was sent to.", constraint),
 		}
 	}
-	s.buckets[c.bucket] = &bucket{Name: c.bucket, Region: c.region, CreationDate: s.now().UTC(), objects: map[string][]*version{}}
+	b := &bucket{Name: c.bucket, Region: c.region, CreationDate: s.now().UTC(), objects: map[string][]*version{}}
+	if locked {
+		b.ObjectLock, b.Versioning = true, versioningEnabled
+	}
+	s.buckets[c.bucket] = b
 	location := "/" + c.bucket
 	if c.region != "us-east-1" {
 		location = "http://" + c.bucket + ".s3.amazonaws.com/"
@@ -274,7 +287,7 @@ func (s *Server) listBuckets(c *call) (*reply, *apiError) {
 }
 
 type taggingXML struct {
-	XMLName xml.Name `xml:"Tagging"`
+	XMLName xml.Name
 	TagSet  []tagXML `xml:"TagSet>Tag"`
 }
 
@@ -311,7 +324,7 @@ func validTagText(s string) bool {
 
 func parseTags(body []byte) (map[string]string, *apiError) {
 	var in taggingXML
-	if err := decodeXML(body, &in); err != nil {
+	if err := decodeRootXML(body, "Tagging", &in); err != nil {
 		return nil, err
 	}
 	if len(in.TagSet) > maxTags {
@@ -365,9 +378,9 @@ func (s *Server) deleteBucketTagging(c *call) (*reply, *apiError) {
 }
 
 type versioningXML struct {
-	XMLName   xml.Name `xml:"VersioningConfiguration"`
-	Status    string   `xml:"Status,omitempty"`
-	MfaDelete string   `xml:"MfaDelete,omitempty"`
+	XMLName   xml.Name
+	Status    string `xml:"Status,omitempty"`
+	MfaDelete string `xml:"MfaDelete,omitempty"`
 }
 
 func (s *Server) getBucketVersioning(c *call) (*reply, *apiError) {
@@ -382,7 +395,7 @@ func (s *Server) getBucketVersioning(c *call) (*reply, *apiError) {
 
 func (s *Server) putBucketVersioning(c *call) (*reply, *apiError) {
 	var in versioningXML
-	if err := decodeXML(c.body, &in); err != nil {
+	if err := decodeRootXML(c.body, "VersioningConfiguration", &in); err != nil {
 		return nil, err
 	}
 	if in.MfaDelete != "" {
@@ -396,6 +409,12 @@ func (s *Server) putBucketVersioning(c *call) (*reply, *apiError) {
 	b, err := s.lookup(c)
 	if err != nil {
 		return nil, err
+	}
+	if b.ObjectLock && in.Status != versioningEnabled {
+		return nil, &apiError{
+			Status: http.StatusConflict, Code: "InvalidBucketState",
+			Message: "An Object Lock configuration is present on this bucket, so the versioning state cannot be changed.", Bucket: c.bucket,
+		}
 	}
 	b.Versioning = in.Status
 	return &reply{}, nil
@@ -454,6 +473,43 @@ func (s *Server) putBucketCors(c *call) (*reply, *apiError) {
 	return &reply{}, nil
 }
 
+type requestPaymentXML struct {
+	XMLName xml.Name
+	Payer   string `xml:"Payer"`
+}
+
+func (s *Server) getBucketRequestPayment(c *call) (*reply, *apiError) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, err := s.lookup(c)
+	if err != nil {
+		return nil, err
+	}
+	out := requestPaymentXML{XMLName: xml.Name{Space: namespace, Local: "RequestPaymentConfiguration"}, Payer: "BucketOwner"}
+	if b.RequesterPays {
+		out.Payer = "Requester"
+	}
+	return &reply{body: out}, nil
+}
+
+func (s *Server) putBucketRequestPayment(c *call) (*reply, *apiError) {
+	var in requestPaymentXML
+	if err := decodeRoot(c, "RequestPaymentConfiguration", &in); err != nil {
+		return nil, err
+	}
+	if in.Payer != "Requester" && in.Payer != "BucketOwner" {
+		return nil, malformedXML()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, err := s.lookup(c)
+	if err != nil {
+		return nil, err
+	}
+	b.RequesterPays = in.Payer == "Requester"
+	return &reply{}, nil
+}
+
 // Buckets returns every bucket the account owns, ordered by name.
 func (s *Server) Buckets() []Bucket {
 	s.mu.Lock()
@@ -487,6 +543,18 @@ func (s *Server) PutBucket(b Bucket) (Bucket, error) {
 	if b.Versioning != "" && b.Versioning != versioningEnabled && b.Versioning != versioningSuspended {
 		return Bucket{}, fmt.Errorf("squall: versioning %q is not one of Enabled and Suspended", b.Versioning)
 	}
+	if b.ObjectLock && b.Versioning != versioningEnabled {
+		return Bucket{}, errors.New("squall: Object Lock needs versioning Enabled")
+	}
+	if b.DefaultRetention != nil {
+		if !b.ObjectLock {
+			return Bucket{}, errors.New("squall: a default retention needs Object Lock")
+		}
+		if err := b.DefaultRetention.valid(); err != nil {
+			return Bucket{}, err
+		}
+		b.DefaultRetention = new(*b.DefaultRetention)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.foreign[b.Name]; ok {
@@ -499,7 +567,7 @@ func (s *Server) PutBucket(b Bucket) (Bucket, error) {
 	b.Tags = maps.Clone(b.Tags)
 	stored := &bucket{Bucket: b, objects: map[string][]*version{}}
 	if old, ok := s.buckets[b.Name]; ok {
-		stored.objects, stored.nullSeqs = old.objects, old.nullSeqs
+		stored.objects, stored.nullSeqs, stored.uploads = old.objects, old.nullSeqs, old.uploads
 	}
 	s.buckets[b.Name] = stored
 	return stored.clone(), nil

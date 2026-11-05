@@ -14,10 +14,17 @@
 // It covers buckets (CreateBucket, HeadBucket, ListBuckets, DeleteBucket),
 // their tags (PutBucketTagging, GetBucketTagging, DeleteBucketTagging),
 // versioning (PutBucketVersioning, GetBucketVersioning), policy
-// (PutBucketPolicy) and CORS rules (PutBucketCors), and the objects in them
-// (PutObject, DeleteObject, DeleteObjects, ListObjectsV2, ListObjectVersions), with the real
-// API's error codes. Other operations answer 404 with the code
-// NotImplemented. Where it differs from S3:
+// (PutBucketPolicy), CORS rules (PutBucketCors), Object Lock configuration
+// (PutObjectLockConfiguration, GetObjectLockConfiguration) and request
+// payment (PutBucketRequestPayment, GetBucketRequestPayment), the objects in
+// them (PutObject, DeleteObject, DeleteObjects, ListObjectsV2,
+// ListObjectVersions) with their retention (PutObjectRetention,
+// GetObjectRetention) and legal holds (PutObjectLegalHold,
+// GetObjectLegalHold), and multipart uploads (CreateMultipartUpload,
+// UploadPart, CompleteMultipartUpload, AbortMultipartUpload,
+// ListMultipartUploads, ListParts), with the real API's error codes. Other
+// operations answer 404 with the code NotImplemented. Where it differs from
+// S3:
 //
 //   - Signatures are not checked. The region comes from the credential scope
 //     of the SigV4 Authorization header (or the X-Amz-Credential query
@@ -38,8 +45,8 @@
 //     IllegalLocationConstraintException. Creating a bucket the account
 //     already owns succeeds in us-east-1 and fails with
 //     BucketAlreadyOwnedByYou elsewhere. Object ownership is always bucket
-//     owner enforced: an ACL other than private fails, and object lock and
-//     directory buckets are not supported.
+//     owner enforced: an ACL other than private fails, and directory
+//     buckets are not supported.
 //   - ListBuckets returns the account's buckets ordered by name, in every
 //     region, and filters by prefix and bucket-region, which must be the
 //     request's region. As in S3, a request with any of its parameters pages,
@@ -51,10 +58,79 @@
 //     verified, and bodies sent with aws-chunked encoding are decoded without
 //     checking their chunk signatures. Version IDs are 32 hex digits, and
 //     "null" for an object written while versioning is off or suspended.
-//     Multipart uploads, copies, storage classes, object tags, lifecycle and
-//     replication are not supported. S3 documents in-progress multipart
-//     uploads as blocking DeleteBucket only for directory buckets, so for a
-//     general purpose bucket only versions and delete markers do.
+//     Copies, storage classes, object tags, lifecycle and replication are
+//     not supported.
+//   - A multipart upload's parts record their size and ETag like objects,
+//     and are up to 16 MiB each. CompleteMultipartUpload checks the parts
+//     are in ascending order, were uploaded with the ETags given, and are at
+//     least 5 MiB but for the last, and makes a version whose ETag is the MD5
+//     of the parts' MD5s and their count, the form S3's take, which it does
+//     not document. Completing an upload ends it, so a retry after a lost
+//     response fails with NoSuchUpload. Uploads of one key list in the order
+//     they began, and upload IDs are 32 hex digits. ListMultipartUploads
+//     takes S3's prefix, delimiter, markers and max-uploads, and counts
+//     common prefixes toward a page as ListObjectsV2 does, which is
+//     inferred. As S3 documents, it leaves out a common prefix not after
+//     key-marker, even one holding later keys, where ListObjectsV2's
+//     start-after keeps it. NextKeyMarker and NextUploadIdMarker name the
+//     last upload listed, as in S3's examples; a truncated page that ends
+//     on a common prefix names that prefix instead, which is inferred.
+//     Like max-keys, max-uploads and max-parts above 1000 return
+//     1000; one below 1 fails with 400 InvalidArgument, which is inferred.
+//     A part's checksums are not kept, and ListParts and
+//     ListMultipartUploads report no checksum algorithm; UploadPartCopy and
+//     the If-Match and If-None-Match headers are not supported. Parts are
+//     stored data, which S3 bills until the upload is completed or
+//     aborted, so [Server.MultipartUploads] reports them with their sizes.
+//     S3 documents in-progress uploads as blocking DeleteBucket only for
+//     directory buckets, so deleting a general purpose bucket discards its
+//     uploads, and only versions and delete markers block it.
+//   - Object Lock follows S3's rules. Creating a bucket with
+//     x-amz-bucket-object-lock-enabled turns on versioning, which can then
+//     not be suspended (409 InvalidBucketState, whose message is inferred);
+//     PutObjectLockConfiguration enables Object Lock on a bucket whose
+//     versioning is Enabled, and on one whose versioning is not fails with
+//     409 InvalidBucketState, inferred. A default retention needs a mode and
+//     one of Days and Years (MalformedXML otherwise), and gives each new
+//     version, from PutObject or CompleteMultipartUpload, a retention until
+//     that long after the version is made. PutObject and
+//     CreateMultipartUpload take a mode and retain-until date together and
+//     a legal hold, on a bucket with Object Lock only (400 InvalidRequest,
+//     inferred). PutObject that sets a retention, explicitly or by default,
+//     needs Content-MD5 or a checksum, as S3 documents, and so does each
+//     UploadPart of an upload that will; the error message is inferred.
+//     PutObjectLockConfiguration, PutObjectRetention and PutObjectLegalHold
+//     need one too, as the SDKs always send, and a body under another root
+//     element fails with MalformedXML. Retention runs by the server's clock
+//     ([WithClock]), and retain-until dates are kept to the millisecond, the
+//     precision S3's timestamps carry.
+//     Deleting a version under an unexpired retention or a legal hold fails
+//     with 403 AccessDenied, key by key in DeleteObjects; its message is
+//     inferred from S3's answers. A COMPLIANCE retention never yields, and a
+//     GOVERNANCE one yields to x-amz-bypass-governance-retention: true from a
+//     caller [WithPolicy] grants s3:BypassGovernanceRetention. A delete
+//     without a version ID adds a delete marker, as S3 does, and DeleteBucket
+//     fails while any version remains. PutObjectRetention may extend a
+//     retention in the same mode; shortening it, changing its mode or
+//     removing it needs the same bypass, which a COMPLIANCE retention
+//     refuses. S3 documents the bypass for shortening and removal; that
+//     changing GOVERNANCE to COMPLIANCE needs it too is inferred from
+//     governance mode letting no one alter lock settings without special
+//     permissions. A version with no retention or no legal hold answers
+//     GetObjectRetention or GetObjectLegalHold with 404
+//     NoSuchObjectLockConfiguration, and a call naming a delete marker's
+//     version fails with 405 MethodNotAllowed; both are inferred, as are the
+//     InvalidArgument messages for a retain-until date in the past, an
+//     unknown mode or legal hold status, and a mode without a date. Event
+//     holds, variable retention and default event holds are rejected with
+//     400 InvalidArgument; the x-amz-bucket-object-lock-token header is
+//     ignored, as S3 no longer needs it. [Server.SetRetention] and
+//     [Server.SetLegalHold] lock a version directly, whatever its lock.
+//   - Request payment is recorded. There is one account, which owns every
+//     bucket it can reach, and S3 does not ask a bucket owner for
+//     x-amz-request-payer, so a Requester Pays bucket answers as any other
+//     and responses carry no x-amz-request-charged. Like the Object Lock
+//     PUTs, PutBucketRequestPayment needs Content-MD5 or a checksum.
 //   - DeleteBucket fails with BucketNotEmpty while any object version or
 //     delete marker remains. ListObjectVersions orders versions by key and
 //     then newest first, and its markers are positions, so a page may follow
@@ -69,9 +145,9 @@
 //     Owners are the account's canonical ID, without a display name.
 //   - Tags follow S3's rules: up to 50, keys of 1 to 128 characters, values
 //     of up to 256, Unicode letters, numbers, separators and "+-=._:/@", no
-//     duplicates and no "aws:" prefix. PutBucketTagging with an empty tag set removes
-//     the tags, so GetBucketTagging fails with NoSuchTagSet, as it does for
-//     a bucket never tagged. Bucket policies must be JSON and are recorded,
+//     duplicates and no "aws:" prefix. PutBucketTagging with an empty tag
+//     set removes the tags, so GetBucketTagging fails with NoSuchTagSet, as
+//     it does for a bucket never tagged. Bucket policies must be JSON and are recorded,
 //     not enforced; CORS rules are checked for an allowed method and origin
 //     and recorded.
 //   - Query parameters the server does not support are rejected with 400
@@ -81,9 +157,15 @@
 // [WithPolicy] grants the caller a set of IAM actions and refuses a call that
 // needs one it lacks with 403 AccessDenied, before any fault. Each operation
 // needs the action the S3 user guide lists for it, such as s3:ListBucket for
-// HeadBucket and ListObjectsV2; deleting a version needs s3:DeleteObjectVersion instead of
-// s3:DeleteObject, an ACL header on PutObject s3:PutObjectAcl, and an
-// object ownership header on CreateBucket s3:PutBucketOwnershipControls.
+// HeadBucket and ListObjectsV2; deleting a version needs
+// s3:DeleteObjectVersion instead of s3:DeleteObject, an ACL header on PutObject s3:PutObjectAcl, an object
+// ownership header on CreateBucket s3:PutBucketOwnershipControls, and
+// enabling Object Lock there s3:PutBucketObjectLockConfiguration and
+// s3:PutBucketVersioning. A retention header on PutObject or
+// CreateMultipartUpload needs s3:PutObjectRetention and a legal hold header
+// s3:PutObjectLegalHold. Bypassing a governance retention needs
+// s3:BypassGovernanceRetention, checked only when the bypass decides the
+// call, and refused with 403 AccessDenied naming it.
 // DeleteObjects is checked key by key, as S3 checks it: a key the policy may
 // not delete is an AccessDenied error in the result, and the rest are
 // deleted. Actions are not checked against the resources they act on or
@@ -148,6 +230,7 @@ type Server struct {
 	buckets     map[string]*bucket
 	foreign     map[string]string
 	nextVersion uint64
+	nextUpload  uint64
 }
 
 // Option configures a [Server].
@@ -216,33 +299,43 @@ var subresources = []string{
 // operations maps a method, scope and subresource to its operation; an empty one is not implemented.
 func (s *Server) operations() map[string]operation {
 	return map[string]operation{
-		"GET service":            {"ListBuckets", listBucketsParams, s.listBuckets},
-		"PUT bucket":             {"CreateBucket", nil, s.createBucket},
-		"HEAD bucket":            {"HeadBucket", nil, s.headBucket},
-		"DELETE bucket":          {"DeleteBucket", nil, s.deleteBucket},
-		"GET bucket?tagging":     {"GetBucketTagging", nil, s.getBucketTagging},
-		"PUT bucket?tagging":     {"PutBucketTagging", nil, s.putBucketTagging},
-		"DELETE bucket?tagging":  {"DeleteBucketTagging", nil, s.deleteBucketTagging},
-		"GET bucket?versioning":  {"GetBucketVersioning", nil, s.getBucketVersioning},
-		"PUT bucket?versioning":  {"PutBucketVersioning", nil, s.putBucketVersioning},
-		"PUT bucket?policy":      {"PutBucketPolicy", nil, s.putBucketPolicy},
-		"PUT bucket?cors":        {"PutBucketCors", nil, s.putBucketCors},
-		"GET bucket?versions":    {"ListObjectVersions", []string{"prefix", "key-marker", "version-id-marker", "max-keys"}, s.listObjectVersions},
-		"GET bucket?list-type":   {"ListObjectsV2", listObjectsV2Params, s.listObjectsV2},
-		"POST bucket?delete":     {"DeleteObjects", nil, s.deleteObjects},
-		"PUT object":             {"PutObject", nil, s.putObject},
-		"DELETE object":          {"DeleteObject", []string{"versionId"}, s.deleteObject},
-		"HEAD service":           {},
-		"PUT service":            {},
-		"DELETE service":         {},
-		"POST service":           {},
-		"GET bucket?location":    {},
-		"GET object":             {},
-		"HEAD object":            {},
-		"POST object?uploads":    {},
-		"GET bucket?uploads":     {},
-		"PUT object?partNumber":  {},
-		"DELETE object?uploadId": {},
+		"GET service":               {"ListBuckets", listBucketsParams, s.listBuckets},
+		"PUT bucket":                {"CreateBucket", nil, s.createBucket},
+		"HEAD bucket":               {"HeadBucket", nil, s.headBucket},
+		"DELETE bucket":             {"DeleteBucket", nil, s.deleteBucket},
+		"GET bucket?tagging":        {"GetBucketTagging", nil, s.getBucketTagging},
+		"PUT bucket?tagging":        {"PutBucketTagging", nil, s.putBucketTagging},
+		"DELETE bucket?tagging":     {"DeleteBucketTagging", nil, s.deleteBucketTagging},
+		"GET bucket?versioning":     {"GetBucketVersioning", nil, s.getBucketVersioning},
+		"PUT bucket?versioning":     {"PutBucketVersioning", nil, s.putBucketVersioning},
+		"PUT bucket?policy":         {"PutBucketPolicy", nil, s.putBucketPolicy},
+		"PUT bucket?cors":           {"PutBucketCors", nil, s.putBucketCors},
+		"GET bucket?versions":       {"ListObjectVersions", []string{"prefix", "key-marker", "version-id-marker", "max-keys"}, s.listObjectVersions},
+		"GET bucket?list-type":      {"ListObjectsV2", listObjectsV2Params, s.listObjectsV2},
+		"POST bucket?delete":        {"DeleteObjects", nil, s.deleteObjects},
+		"GET bucket?object-lock":    {"GetObjectLockConfiguration", nil, s.getObjectLockConfiguration},
+		"PUT bucket?object-lock":    {"PutObjectLockConfiguration", nil, s.putObjectLockConfiguration},
+		"GET bucket?requestPayment": {"GetBucketRequestPayment", nil, s.getBucketRequestPayment},
+		"PUT bucket?requestPayment": {"PutBucketRequestPayment", nil, s.putBucketRequestPayment},
+		"GET bucket?uploads":        {"ListMultipartUploads", listUploadsParams, s.listMultipartUploads},
+		"PUT object":                {"PutObject", nil, s.putObject},
+		"DELETE object":             {"DeleteObject", []string{"versionId"}, s.deleteObject},
+		"POST object?uploads":       {"CreateMultipartUpload", nil, s.createMultipartUpload},
+		"PUT object?partNumber":     {"UploadPart", []string{"uploadId"}, s.uploadPart},
+		"POST object?uploadId":      {"CompleteMultipartUpload", nil, s.completeMultipartUpload},
+		"DELETE object?uploadId":    {"AbortMultipartUpload", nil, s.abortMultipartUpload},
+		"GET object?uploadId":       {"ListParts", []string{"max-parts", "part-number-marker"}, s.listParts},
+		"GET object?retention":      {"GetObjectRetention", []string{"versionId"}, s.getObjectRetention},
+		"PUT object?retention":      {"PutObjectRetention", []string{"versionId"}, s.putObjectRetention},
+		"GET object?legal-hold":     {"GetObjectLegalHold", []string{"versionId"}, s.getObjectLegalHold},
+		"PUT object?legal-hold":     {"PutObjectLegalHold", []string{"versionId"}, s.putObjectLegalHold},
+		"HEAD service":              {},
+		"PUT service":               {},
+		"DELETE service":            {},
+		"POST service":              {},
+		"GET bucket?location":       {},
+		"GET object":                {},
+		"HEAD object":               {},
 	}
 }
 
@@ -330,7 +423,7 @@ func (s *Server) parse(w http.ResponseWriter, r *http.Request) (operation, *call
 		}
 	}
 	limit, tooLarge := int64(maxBody), "MaxMessageLengthExceeded"
-	if op.name == "PutObject" {
+	if op.name == "PutObject" || op.name == "UploadPart" {
 		limit, tooLarge = maxObject, "EntityTooLarge"
 	}
 	c.body, err = readBody(w, r, limit, tooLarge)
@@ -440,6 +533,18 @@ func writeXML(w http.ResponseWriter, status int, body any) {
 // requestID returns a fresh request ID in the 16 hex digit form S3 uses.
 func (s *Server) requestID() string {
 	return fmt.Sprintf("%016X", s.requests.Add(1))
+}
+
+// decodeRootXML reads an XML request body into v, failing with MalformedXML unless its root element is root.
+func decodeRootXML(body []byte, root string, v any) *apiError {
+	var head struct{ XMLName xml.Name }
+	if err := decodeXML(body, &head); err != nil {
+		return err
+	}
+	if head.XMLName.Local != root {
+		return malformedXML()
+	}
+	return decodeXML(body, v)
 }
 
 // decodeXML reads an XML request body into v.

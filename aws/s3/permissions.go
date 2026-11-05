@@ -3,6 +3,7 @@ package s3
 import (
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/parallelworks/squall/access"
 )
@@ -23,6 +24,14 @@ var actions = map[string]string{
 	"PutBucketCors":       "s3:PutBucketCORS",
 	"ListObjectVersions":  "s3:ListBucketVersions",
 	"ListObjectsV2":       "s3:ListBucket",
+
+	"GetObjectLockConfiguration": "s3:GetBucketObjectLockConfiguration",
+	"PutObjectLockConfiguration": "s3:PutBucketObjectLockConfiguration",
+	"CreateMultipartUpload":      "s3:PutObject",
+	"UploadPart":                 "s3:PutObject",
+	"CompleteMultipartUpload":    "s3:PutObject",
+	"ListMultipartUploads":       "s3:ListBucketMultipartUploads",
+	"ListParts":                  "s3:ListMultipartUploadParts",
 }
 
 // needs returns the IAM actions a call to op needs, or nil for DeleteObjects,
@@ -43,9 +52,18 @@ func needs(op string, c *call) []string {
 		if c.r.Header.Get("x-amz-object-ownership") != "" {
 			perms = append(perms, "s3:PutBucketOwnershipControls")
 		}
-	case "PutObject":
+		if strings.EqualFold(c.r.Header.Get("x-amz-bucket-object-lock-enabled"), "true") {
+			perms = append(perms, "s3:PutBucketObjectLockConfiguration", "s3:PutBucketVersioning")
+		}
+	case "PutObject", "CreateMultipartUpload":
 		if c.r.Header.Get("x-amz-acl") != "" {
 			perms = append(perms, "s3:PutObjectAcl")
+		}
+		if c.r.Header.Get("X-Amz-Object-Lock-Mode") != "" || c.r.Header.Get("X-Amz-Object-Lock-Retain-Until-Date") != "" {
+			perms = append(perms, "s3:PutObjectRetention")
+		}
+		if c.r.Header.Get("X-Amz-Object-Lock-Legal-Hold") != "" {
+			perms = append(perms, "s3:PutObjectLegalHold")
 		}
 	}
 	return perms
