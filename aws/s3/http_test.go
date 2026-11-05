@@ -264,6 +264,7 @@ func TestMultipartAndLockShapes(t *testing.T) {
 		}, "", http.StatusBadRequest, "InvalidArgument"},
 		{"a bad legal hold", http.MethodPut, "/vault/k", map[string]string{"x-amz-object-lock-legal-hold": "on"}, "", http.StatusBadRequest, "InvalidArgument"},
 		{"an event hold", http.MethodPut, "/vault/k", map[string]string{"x-amz-object-lock-event-hold": "ON"}, "", http.StatusBadRequest, "InvalidArgument"},
+		{"a completion under another root", http.MethodPost, "/vault/k?uploadId=x", nil, "<Complete><Part><PartNumber>1</PartNumber><ETag>x</ETag></Part></Complete>", http.StatusBadRequest, "MalformedXML"},
 		{"a part without an upload", http.MethodPut, "/vault/k?partNumber=1", nil, "", http.StatusBadRequest, "InvalidArgument"},
 		{"a part of an unknown upload", http.MethodPut, "/vault/k?partNumber=1&uploadId=nope", nil, "", http.StatusNotFound, "NoSuchUpload"},
 		{"part zero", http.MethodPut, "/vault/k?partNumber=0&uploadId=nope", nil, "", http.StatusBadRequest, "InvalidArgument"},

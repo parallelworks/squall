@@ -182,7 +182,7 @@ func (s *Server) completeMultipartUpload(c *call) (*reply, *apiError) {
 		}
 	}
 	var in completeXML
-	if err := decodeXML(c.body, &in); err != nil {
+	if err := decodeRootXML(c.body, "CompleteMultipartUpload", &in); err != nil {
 		return nil, err
 	}
 	if len(in.Parts) == 0 || len(in.Parts) > maxParts {
