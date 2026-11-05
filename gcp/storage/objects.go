@@ -560,7 +560,7 @@ func (s *Server) listObjects(r *http.Request) (any, *apiError) {
 	}
 	var all []Object
 	if soft {
-		if b.softDeleteDuration() == 0 {
+		if b.softDeleteDuration() == 0 && len(b.trash) == 0 {
 			return nil, invalid("Soft delete policy is required to list soft-deleted versions")
 		}
 		for _, o := range b.trash {

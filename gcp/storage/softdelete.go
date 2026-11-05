@@ -156,7 +156,7 @@ func (s *Server) restoreObject(r *http.Request) (any, *apiError) {
 	if err != nil {
 		return nil, err
 	}
-	if b.softDeleteDuration() == 0 {
+	if b.softDeleteDuration() == 0 && len(b.trash) == 0 {
 		return nil, &apiError{Status: http.StatusBadRequest, Reason: "SoftDeletePolicyRequired", Message: "Soft delete policy is required to restore soft-deleted objects."}
 	}
 	src := b.trashed(name, gen)
@@ -174,7 +174,7 @@ func (s *Server) restoreObject(r *http.Request) (any, *apiError) {
 	if err := checkMatch(r, "ifGenerationMatch", "ifGenerationNotMatch", liveGen); err != nil {
 		return nil, err
 	}
-	if live == nil && (r.URL.Query().Has("ifMetagenerationMatch") || r.URL.Query().Has("ifMetagenerationNotMatch")) {
+	if live == nil && (r.URL.Query().Has("ifGenerationNotMatch") || r.URL.Query().Has("ifMetagenerationMatch") || r.URL.Query().Has("ifMetagenerationNotMatch")) {
 		return nil, conditionNotMet()
 	}
 	if err := checkMatch(r, "ifMetagenerationMatch", "ifMetagenerationNotMatch", liveMeta); err != nil {

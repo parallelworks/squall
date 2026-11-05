@@ -480,6 +480,9 @@ func (s *Server) getBucket(r *http.Request) (any, *apiError) {
 	if err != nil {
 		return nil, err
 	}
+	if hasGen && !soft {
+		return nil, required("softDeleted")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if soft {
@@ -492,9 +495,6 @@ func (s *Server) getBucket(r *http.Request) (any, *apiError) {
 	b, err := s.lookup(r.PathValue("bucket"), "storage.buckets.get")
 	if err != nil {
 		return nil, err
-	}
-	if hasGen && gen != b.Generation {
-		return nil, notFoundBucket()
 	}
 	if err := checkMatch(r, "ifMetagenerationMatch", "ifMetagenerationNotMatch", b.Metageneration); err != nil {
 		return nil, err

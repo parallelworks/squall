@@ -50,22 +50,23 @@
 //     generation noncurrent, and objects.list with versions=true lists those
 //     too, ordered by name and then generation. Deleting a bucket fails with
 //     409 conflict while any generation, live or noncurrent, remains.
-//   - A retention policy's retentionPeriod is greater than 0 and less than
-//     100 years, and its effectiveTime is when it was set or its period last
-//     changed (inferred). Each object reports retentionExpirationTime, its
-//     time in the bucket plus the period. Deleting or replacing an object
-//     before then, or before its own retention's retainUntilTime, fails with
-//     403 retentionPolicyNotMet and Cloud Storage's message; the time in it
-//     is in UTC, where Cloud Storage writes Pacific time. Making a live
-//     object noncurrent in a versioned bucket is allowed, as documented.
-//     lockRetentionPolicy needs ifMetagenerationMatch (400 required without
-//     it, 412 conditionNotMet on a mismatch), fails with 400 invalid without
-//     an unlocked policy, and changes the bucket's metageneration
-//     (inferred). A locked policy cannot be removed (403
-//     retentionPolicyNotMet) or shortened (403 forbidden), with Cloud
-//     Storage's messages: the bucket lock page says these fail with 400, but
-//     Cloud Storage answers 403. Only an emptied bucket can be deleted, so a
-//     locked one needs no further check.
+//   - A retention policy's retentionPeriod is greater than 0 and at most
+//     3,155,760,000 seconds (100 years), and its effectiveTime is when it
+//     was set or its period last changed (inferred). Each object reports
+//     retentionExpirationTime, its time in the bucket plus the period.
+//     Deleting or replacing an object before then, or before its own
+//     retention's retainUntilTime, fails with 403 retentionPolicyNotMet and
+//     Cloud Storage's message; the time in it is in UTC, where Cloud Storage
+//     writes Pacific time. Making a live object noncurrent in a versioned
+//     bucket is allowed, as documented. lockRetentionPolicy needs
+//     ifMetagenerationMatch (400 required without it, 412 conditionNotMet on
+//     a mismatch), fails with 400 invalid without an unlocked policy, and
+//     changes the bucket's metageneration (inferred). A locked policy cannot
+//     be removed (403 retentionPolicyNotMet) or shortened (403 forbidden),
+//     with Cloud Storage's messages: the bucket lock page says these fail
+//     with 400, but Cloud Storage answers 403, as the API reference's
+//     PERMISSION_DENIED for them says. Only an emptied bucket can be
+//     deleted, so a locked one needs no further check.
 //   - temporaryHold and eventBasedHold are set by an upload's metadata,
 //     objects.patch and objects.update, where null releases one, and
 //     defaultEventBasedHold puts an event-based hold on each uploaded
@@ -85,34 +86,39 @@
 //     storage.objects.setRetention, and retention beside an event-based hold
 //     with 400 invalid (both inferred). The 100-year cap on retainUntilTime
 //     is not checked.
-//   - softDeletePolicy.retentionDurationSeconds is 0, which turns soft delete
-//     off, or 7 to 90 days, and a new bucket keeps deletions for 7 days. A
+//   - softDeletePolicy.retentionDurationSeconds is 0, which turns soft
+//     delete off, or 7 to 90 days, and a new bucket keeps deletions for 7
+//     days. Its effectiveTime is when the duration last rose, since lowering
+//     it leaves a policy with greater retention in effect from then. A
 //     generation that leaves the bucket, by a delete, by being replaced in a
 //     bucket without versioning or by a delete of a noncurrent generation,
 //     is kept soft-deleted with softDeleteTime and hardDeleteTime, on the
 //     policy at the time. objects.list with softDeleted=true lists them (400
-//     invalid with soft delete off), objects.get with softDeleted=true and a
-//     generation reads one, and objects.restore makes a copy the live
-//     generation, in STANDARD with the metadata, holds and retention it had
-//     when deleted, retiring the live one as an overwrite would; the
-//     soft-deleted generation stays until its hardDeleteTime (inferred).
-//     A restore of a live or noncurrent generation fails with 412
-//     objectNotSoftDeleted, and in a bucket with soft delete off with 400
-//     SoftDeletePolicyRequired; both messages are inferred. A soft-deleted
-//     generation cannot be deleted by objects.delete, which answers 404
-//     (inferred). A bucket holding only soft-deleted generations can be
-//     deleted, and is then kept soft-deleted for its policy's duration or
-//     until the last of its soft-deleted generations goes, whichever is
-//     later, even with soft delete since turned off. buckets.list and
-//     buckets.get with softDeleted=true (and a generation for get) read it;
-//     a get of a live bucket with another generation answers 404.
-//     buckets.restore brings it back with its
-//     generation, metageneration and soft-deleted objects (inferred),
-//     failing with 409 conflict while a live bucket has its name (message
-//     inferred). Everything soft-deleted goes for good at its hardDeleteTime
-//     on the server's clock, and is held in memory until then: with the
-//     7-day default, every deleted or replaced generation stays, so a
-//     long-running test that churns objects may set
+//     invalid with soft delete off and none kept), objects.get with
+//     softDeleted=true and a generation reads one, and objects.restore makes
+//     a copy the live generation, in STANDARD with the metadata, holds and
+//     retention it had when deleted, retiring the live one as an overwrite
+//     would; the soft-deleted generation stays until its hardDeleteTime
+//     (inferred). A restore of a live or noncurrent generation fails with
+//     412 objectNotSoftDeleted, and in a bucket with soft delete off and
+//     none kept with 400 SoftDeletePolicyRequired; both messages are
+//     inferred. ifGenerationNotMatch and the metageneration pair fail with
+//     412 when there is no live object. A soft-deleted generation cannot be
+//     deleted by objects.delete, which answers 404 (inferred). A bucket
+//     holding only soft-deleted generations can be deleted, and is then kept
+//     soft-deleted for its policy's duration or until the last of its
+//     soft-deleted generations goes, whichever is later, even with soft
+//     delete since turned off (inferred); once restored, those generations
+//     can still be listed and restored. buckets.list and buckets.get with
+//     softDeleted=true read it; buckets.get takes a generation only with
+//     softDeleted=true and answers 400 required otherwise, as its reference
+//     says. buckets.restore brings it back with its generation,
+//     metageneration and soft-deleted objects (inferred), failing with 409
+//     conflict while a live bucket has its name (message inferred).
+//     Everything soft-deleted goes for good at its hardDeleteTime on the
+//     server's clock, and is held in memory until then: with the 7-day
+//     default, every deleted or replaced generation stays, so a long-running
+//     test that churns objects may set
 //     softDeletePolicy.retentionDurationSeconds to 0 to keep none.
 //   - billing.requesterPays is recorded and, under [WithPolicy], enforced: a
 //     call on a Requester Pays bucket with a userProject also needs
@@ -121,16 +127,16 @@
 //     fails with 400 and Cloud Storage's message "Bucket is a requester pays
 //     bucket but no user project provided." The page names the error
 //     UserProjectMissing, which is the XML API's code; the JSON API's reason
-//     here, required, is inferred.
-//     Without a policy, the caller may bill the bucket's project, so nothing
-//     is refused.
+//     here, required, is inferred. Without a policy, the caller may bill the
+//     bucket's project, so nothing is refused.
 //   - objects.list takes prefix, startOffset, endOffset, versions,
 //     softDeleted, pageToken and maxResults; a delimiter, matchGlob, filter,
 //     includeTrailingDelimiter or includeFoldersAsPrefixes is rejected with
 //     400. objects.patch and objects.update change contentType,
 //     contentEncoding, metadata, the holds and retention. Page tokens are
-//     positions, so a page may follow one whose items were deleted. Bucket preconditions are ifMetagenerationMatch and
-//     ifMetagenerationNotMatch, and object ones ifGenerationMatch,
+//     positions, so a page may follow one whose items were deleted. Bucket
+//     preconditions are ifMetagenerationMatch and ifMetagenerationNotMatch,
+//     and object ones ifGenerationMatch,
 //     ifGenerationNotMatch and, but for uploads and deletes, the
 //     metageneration pair. The fields parameter is accepted and ignored:
 //     responses are always whole, and userProject is checked only as the
@@ -171,6 +177,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"path"
 	"slices"
 	"strconv"
@@ -296,8 +303,10 @@ func (s *Server) registerRoutes() {
 		slices.Concat(objectConds, []string{"projection", "copySourceAcl"})...)
 	// ServeMux allows a wildcard only at the end, and objects.restore puts a verb after the object name.
 	s.mux.HandleFunc("POST "+object, func(w http.ResponseWriter, r *http.Request) {
-		name, ok := strings.CutSuffix(r.PathValue("object"), "/restore")
-		if !ok {
+		_, escaped, _ := strings.Cut(r.URL.EscapedPath(), "/o/")
+		escaped, ok := strings.CutSuffix(escaped, "/restore")
+		name, err := url.PathUnescape(escaped)
+		if !ok || strings.Contains(escaped, "/") || err != nil {
 			notImplemented(w, r)
 			return
 		}

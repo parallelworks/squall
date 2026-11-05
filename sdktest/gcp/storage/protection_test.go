@@ -145,7 +145,13 @@ func TestUnlockedRetentionPolicyChanges(t *testing.T) {
 	if err := b.Create(t.Context(), project, nil); err != nil {
 		t.Fatal(err)
 	}
-	for _, period := range []time.Duration{-time.Second, 100 * 366 * 24 * time.Hour} {
+	if _, err := b.Update(t.Context(), gcs.BucketAttrsToUpdate{RetentionPolicy: &gcs.RetentionPolicy{RetentionPeriod: 3_155_760_000 * time.Second}}); err != nil {
+		t.Fatalf("the maximum period: %v", err)
+	}
+	if _, err := b.Update(t.Context(), gcs.BucketAttrsToUpdate{RetentionPolicy: &gcs.RetentionPolicy{}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, period := range []time.Duration{-time.Second, 3_155_760_001 * time.Second} {
 		_, err := b.Update(t.Context(), gcs.BucketAttrsToUpdate{RetentionPolicy: &gcs.RetentionPolicy{RetentionPeriod: period}})
 		wantErr(t, "an out of range period", err, http.StatusBadRequest, "invalid", "greater than 0 and less than 100 years")
 	}
@@ -363,6 +369,15 @@ func TestRestoreObjects(t *testing.T) {
 	}
 	_, err = b.Object("k").Generation(second.Generation).Restore(t.Context(), &gcs.RestoreOptions{})
 	wantErr(t, "restore over a held object", err, http.StatusForbidden, "forbidden", "Temporary hold")
+
+	if _, err := s.SetObjectHolds("restorable", "k", false, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Object("k").Delete(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	_, err = b.Object("k").Generation(first.Generation).If(gcs.Conditions{GenerationNotMatch: 5}).Restore(t.Context(), &gcs.RestoreOptions{})
+	wantErr(t, "restore with ifGenerationNotMatch and no live object", err, http.StatusPreconditionFailed, "conditionNotMet", "")
 
 	clk.Advance(7 * 24 * time.Hour)
 	if _, err := b.Object("k").Generation(first.Generation).Restore(t.Context(), &gcs.RestoreOptions{}); !errors.Is(err, gcs.ErrObjectNotExist) {
@@ -593,6 +608,24 @@ func TestSoftDeletedBucketsOutliveTheirObjects(t *testing.T) {
 	if _, err := c.Bucket("shortened").Object("k").Generation(soft[0].Generation).Restore(t.Context(), &gcs.RestoreOptions{}); err != nil {
 		t.Fatalf("restore an object that outlived the shortened policy: %v", err)
 	}
+	if _, err := svc.Buckets.Restore("turned-off", kept[1].Generation).Context(t.Context()).Do(); err != nil {
+		t.Fatal(err)
+	}
+	soft = objects(t, c.Bucket("turned-off").Objects(t.Context(), &gcs.Query{SoftDeleted: true}))
+	if len(soft) != 1 {
+		t.Fatalf("soft-deleted objects in a restored bucket with soft delete off = %+v", soft)
+	}
+	if _, err := c.Bucket("turned-off").Object("k").Generation(soft[0].Generation).Restore(t.Context(), &gcs.RestoreOptions{}); err != nil {
+		t.Fatalf("restore an object kept after soft delete was turned off: %v", err)
+	}
+	for _, name := range []string{"shortened", "turned-off"} {
+		if err := c.Bucket(name).Object("k").Delete(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Bucket(name).Delete(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
 	clk.Advance(60 * 24 * time.Hour)
 	if kept := s.SoftDeletedBuckets(); len(kept) != 0 {
 		t.Fatalf("soft-deleted buckets after their objects expired = %+v", kept)
@@ -638,11 +671,8 @@ func TestLiveBucketGetByGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Buckets.Get("live").Generation(got.Generation).Context(t.Context()).Do(); err != nil {
-		t.Fatalf("get the live generation: %v", err)
-	}
-	_, err = svc.Buckets.Get("live").Generation(got.Generation + 1).Context(t.Context()).Do()
-	wantErr(t, "get another generation", err, http.StatusNotFound, "notFound", "")
+	_, err = svc.Buckets.Get("live").Generation(got.Generation).Context(t.Context()).Do()
+	wantErr(t, "get a generation without softDeleted", err, http.StatusBadRequest, "required", "softDeleted")
 }
 
 func TestNullHoldReleases(t *testing.T) {
@@ -661,5 +691,25 @@ func TestNullHoldReleases(t *testing.T) {
 	}
 	if err := c.Bucket("nulls").Object("k").Delete(t.Context()); err != nil {
 		t.Fatalf("delete after a null hold: %v", err)
+	}
+}
+
+func TestLoweringSoftDeleteKeepsEffectiveTime(t *testing.T) {
+	clk := newClock()
+	c := newClient(t, storage.New(storage.WithClock(clk.Now)))
+	b := c.Bucket("lowered")
+	if err := b.Create(t.Context(), project, &gcs.BucketAttrs{SoftDeletePolicy: &gcs.SoftDeletePolicy{RetentionDuration: 30 * 24 * time.Hour}}); err != nil {
+		t.Fatal(err)
+	}
+	created := clk.Now()
+	clk.Advance(time.Hour)
+	lowered, err := b.Update(t.Context(), gcs.BucketAttrsToUpdate{SoftDeletePolicy: &gcs.SoftDeletePolicy{RetentionDuration: 7 * 24 * time.Hour}})
+	if err != nil || !lowered.SoftDeletePolicy.EffectiveTime.Equal(created) {
+		t.Fatalf("lowered = %+v, %v, want effective since %v", lowered.SoftDeletePolicy, err, created)
+	}
+	clk.Advance(time.Hour)
+	raised, err := b.Update(t.Context(), gcs.BucketAttrsToUpdate{SoftDeletePolicy: &gcs.SoftDeletePolicy{RetentionDuration: 60 * 24 * time.Hour}})
+	if err != nil || !raised.SoftDeletePolicy.EffectiveTime.Equal(clk.Now()) {
+		t.Fatalf("raised = %+v, %v", raised.SoftDeletePolicy, err)
 	}
 }

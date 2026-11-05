@@ -16,7 +16,7 @@ type Retention struct {
 
 const untilFormat = "2006-01-02T15:04:05.000000Z07:00"
 
-func validRetentionPeriod(seconds int64) bool { return seconds > 0 && seconds < maxRetentionPeriod }
+func validRetentionPeriod(seconds int64) bool { return seconds > 0 && seconds <= maxRetentionPeriod }
 
 func validSoftDelete(seconds int64) bool {
 	return seconds == 0 || seconds >= minSoftDelete && seconds <= maxSoftDelete
@@ -76,7 +76,11 @@ func (s *Server) nextSoftDeletePolicy(b *bucket, in *softDeletePolicyInput) (*So
 		return new(*old), nil
 	}
 	p := &SoftDeletePolicy{RetentionDurationSeconds: seconds}
-	if seconds > 0 {
+	switch old := b.SoftDeletePolicy; {
+	case seconds == 0:
+	case old != nil && old.RetentionDurationSeconds > seconds:
+		p.EffectiveTime = old.EffectiveTime
+	default:
 		_, p.EffectiveTime = s.timestamp()
 	}
 	return p, nil
