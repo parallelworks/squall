@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 )
 
 var (
@@ -40,12 +41,18 @@ var (
 		},
 		located: true, etag: weakETag,
 	}
+	netappSnapshotKind = &kind{
+		typ: "Microsoft.NetApp/netAppAccounts/capacityPools/volumes/snapshots", plural: "snapshots", typeName: "Snapshot",
+		readOnly: []string{"created", "provisioningState", "snapshotId"},
+		located:  true,
+	}
 )
 
 const (
-	netappAccount = rg + "/providers/Microsoft.NetApp/netAppAccounts/{account}"
-	netappPool    = netappAccount + "/capacityPools/{pool}"
-	netappVolume  = netappPool + "/volumes/{volume}"
+	netappAccount  = rg + "/providers/Microsoft.NetApp/netAppAccounts/{account}"
+	netappPool     = netappAccount + "/capacityPools/{pool}"
+	netappVolume   = netappPool + "/volumes/{volume}"
+	netappSnapshot = netappVolume + "/snapshots/{snapshot}"
 )
 
 func netappAccountID(c *call) string {
@@ -55,6 +62,8 @@ func netappAccountID(c *call) string {
 func poolID(c *call) string { return netappAccountID(c) + "/capacityPools/" + c.val("pool") }
 
 func volumeID(c *call) string { return poolID(c) + "/volumes/" + c.val("volume") }
+
+func netappSnapshotID(c *call) string { return volumeID(c) + "/snapshots/" + c.val("snapshot") }
 
 // netappName is the name NetApp gives the resource id names: its own name
 // after those of the resources that hold it, such as account/pool/volume.
@@ -79,19 +88,27 @@ func netappOps(c *call, location string) opPaths {
 	return opPaths{status: path, result: path, resultStatus: http.StatusOK}
 }
 
-// netappLevel is a NetApp resource type: accounts, capacity pools or volumes.
+// netappLevel is a NetApp resource type: accounts, capacity pools, volumes or snapshots.
 type netappLevel struct {
 	kind    *kind
 	path    string
 	id      func(*call) string
 	parent  func(*call) string
 	prepare func(s *Server, res *resource, p *parsed) (func(), *apiError)
+	// updatedStatus answers a put to an existing one, if not 200.
+	updatedStatus int
+	// syncUpdate finishes a put to an existing one before answering.
+	syncUpdate bool
 }
 
 var netappLevels = []*netappLevel{
 	{kind: netappAccountKind, path: netappAccount, id: netappAccountID},
 	{kind: poolKind, path: netappPool, id: poolID, parent: netappAccountID, prepare: (*Server).preparePool},
 	{kind: volumeKind, path: netappVolume, id: volumeID, parent: poolID, prepare: (*Server).prepareVolume},
+	{
+		kind: netappSnapshotKind, path: netappSnapshot, id: netappSnapshotID, parent: volumeID,
+		prepare: (*Server).prepareNetAppSnapshot, updatedStatus: http.StatusCreated, syncUpdate: true,
+	},
 }
 
 func (s *Server) registerNetAppRoutes() {
@@ -106,7 +123,10 @@ func (s *Server) registerNetAppRoutes() {
 }
 
 func (s *Server) putNetApp(l *netappLevel) handler {
-	spec := putSpec{kind: l.kind, id: l.id, parent: l.parent, paths: netappOps, render: renderNetApp}
+	spec := putSpec{
+		kind: l.kind, id: l.id, parent: l.parent, paths: netappOps, render: renderNetApp,
+		updatedStatus: l.updatedStatus, syncUpdate: l.syncUpdate,
+	}
 	spec.prepare = func(res *resource, p *parsed) (func(), *apiError) {
 		res.name = netappName(res.id)
 		if l.prepare == nil {
@@ -133,6 +153,46 @@ func (s *Server) prepareVolume(res *resource, p *parsed) (func(), *apiError) {
 		return nil, unsupported("a volume needs creationToken, subnetId and usageThreshold")
 	}
 	return s.holdAddress(res, p, subnet, "subnetId")
+}
+
+// maxVolumeSnapshots is how many snapshots Azure lets a volume hold.
+const maxVolumeSnapshots = 255
+
+// prepareNetAppSnapshot accepts a snapshot, which has nothing to change, so
+// a put to an existing one leaves it as it is. The caller holds s.mu.
+func (s *Server) prepareNetAppSnapshot(res *resource, p *parsed) (func(), *apiError) {
+	if p.tags != nil {
+		return nil, unsupported("a NetApp snapshot takes no tags")
+	}
+	if s.resources[key(res.id)] != res {
+		vol, _, _ := strings.Cut(res.id, "/snapshots/")
+		if err := s.checkSnapshotRoom(vol); err != nil {
+			return nil, err
+		}
+	}
+	return func() {}, nil
+}
+
+// checkSnapshotRoom fails a new snapshot of the volume vol once it holds the
+// most Azure allows. The caller holds s.mu.
+func (s *Server) checkSnapshotRoom(vol string) *apiError {
+	if len(s.volumeSnapshots(vol)) >= maxVolumeSnapshots {
+		return newError(http.StatusConflict, "SnapshotLimitReached",
+			"Volume '%s' already has the maximum of %d snapshots.", netappName(vol), maxVolumeSnapshots)
+	}
+	return nil
+}
+
+// volumeSnapshots returns the snapshots of the volume vol. The caller holds s.mu.
+func (s *Server) volumeSnapshots(vol string) []*resource {
+	prefix := key(vol) + "/snapshots/"
+	var out []*resource
+	for k, snap := range s.resources {
+		if snap.kind == netappSnapshotKind && strings.HasPrefix(k, prefix) {
+			out = append(out, snap)
+		}
+	}
+	return out
 }
 
 func (s *Server) getNetApp(l *netappLevel) handler {
@@ -174,6 +234,9 @@ func (s *Server) deleteNetApp(l *netappLevel) handler {
 		if err := s.writableGroup(c); err != nil {
 			return nil, err
 		}
+		if f := c.query("forceDelete"); l.kind == volumeKind && f != "" && !strings.EqualFold(f, "true") && !strings.EqualFold(f, "false") {
+			return nil, unsupported("forceDelete must be true or false, not '%s'", f)
+		}
 		res, err := s.claim(l.id(c), "")
 		if err != nil {
 			return nil, err
@@ -184,8 +247,22 @@ func (s *Server) deleteNetApp(l *netappLevel) handler {
 		if err := s.checkUnused(res); err != nil {
 			return nil, err
 		}
+		if res.kind == volumeKind {
+			for _, snap := range s.volumeSnapshots(res.id) {
+				s.finish(snap.pending)
+			}
+		}
 		op := s.change(c, res, netappOps(c, res.loc), 0, stateDeleting, func() { s.remove(res) })
 		return acceptedOnePath(c, op, resultLocation), nil
+	}
+}
+
+// removeVolumeSnapshots deletes the snapshots of the volume res, as deleting
+// a volume does, with or without forceDelete. The caller holds s.mu.
+func (s *Server) removeVolumeSnapshots(res *resource) {
+	for _, snap := range s.volumeSnapshots(res.id) {
+		s.finish(snap.pending)
+		delete(s.resources, key(snap.id))
 	}
 }
 
@@ -205,10 +282,13 @@ func (s *Server) nestedInUse(res *resource) *apiError {
 func renderNetApp(res *resource) map[string]any {
 	m, props := envelope(res)
 	m["name"] = netappName(res.id)
+	m["systemData"] = systemData(res)
 	if res.state == stateCreating {
 		return m
 	}
 	switch res.kind {
+	case netappSnapshotKind:
+		props["snapshotId"], props["created"] = res.guid, timestamp(res.created)
 	case poolKind:
 		props["poolId"] = res.guid
 	case volumeKind:
@@ -292,4 +372,32 @@ func (s *Server) Volumes() []Volume {
 	}
 	slices.SortFunc(out, func(a, b Volume) int { return cmp.Compare(a.ID, b.ID) })
 	return out
+}
+
+// SnapshotVolume adds the snapshot name, created at at, to the NetApp volume
+// with ID id, as a finished create of it does. It returns the snapshot's ID
+// and reports whether the volume exists, once any create of it in progress
+// finishes, has not failed and is not being deleted, has no snapshot of that
+// name and has room for another.
+func (s *Server) SnapshotVolume(id, name string, at time.Time) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if vol := s.resources[key(id)]; vol == nil || vol.kind != volumeKind || vol.state == stateDeleting {
+		return "", false
+	}
+	vol := s.settled(id)
+	if vol == nil || vol.state == stateFailed ||
+		name == "" || strings.Contains(name, "/") || at.IsZero() {
+		return "", false
+	}
+	snapID := vol.id + "/snapshots/" + name
+	if s.resources[key(snapID)] != nil || s.checkSnapshotRoom(vol.id) != nil {
+		return "", false
+	}
+	at = at.UTC()
+	s.resources[key(snapID)] = &resource{
+		kind: netappSnapshotKind, id: snapID, name: netappName(snapID), sub: vol.sub, group: vol.group, loc: vol.loc,
+		top: map[string]any{}, props: map[string]any{}, state: stateSucceeded, created: at, modified: at, guid: s.newUUID(),
+	}
+	return snapID, true
 }

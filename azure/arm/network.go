@@ -98,6 +98,10 @@ type putSpec struct {
 	acceptedRender bool
 	// createdStatus answers a create that finishes at once, if not 201.
 	createdStatus int
+	// updatedStatus answers an update, if not 200.
+	updatedStatus int
+	// syncUpdate finishes an update before answering, as sync does.
+	syncUpdate bool
 	// createState is the state a create in progress shows, if not Creating.
 	createState string
 	// finish, when set, ends the change once it is done, failing its
@@ -171,7 +175,7 @@ func (s *Server) put(spec putSpec) handler {
 		if existing != nil && existing.loc != p.location {
 			return nil, wrongLocation(existing.name, existing.loc, p.location, c.val("rg"))
 		}
-		res, status, state := existing, http.StatusOK, stateUpdating
+		res, status, state := existing, cmp.Or(spec.updatedStatus, http.StatusOK), stateUpdating
 		if res == nil {
 			res, status, state = s.newResource(c, spec.kind, id, p), cmp.Or(spec.createdStatus, http.StatusCreated), cmp.Or(spec.createState, stateCreating)
 		}
@@ -208,7 +212,7 @@ func (s *Server) put(spec putSpec) handler {
 		}
 		commit()
 		s.resources[key(id)] = res
-		if spec.sync {
+		if spec.sync || spec.syncUpdate && existing != nil {
 			return &reply{status: status, body: render()}, nil
 		}
 		op := s.changeOr(c, res, paths, 0, state, func() *apiError {
