@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.35.0](https://github.com/parallelworks/squall/compare/v0.34.0...v0.35.0) (2026-11-05)
+
+
+### Features
+
+* **storage:** retention policies, bucket lock, object holds and retention, soft delete and Requester Pays ([#99](https://github.com/parallelworks/squall/issues/99)) ([8a5816c](https://github.com/parallelworks/squall/commit/8a5816c707ef0f1bfbc24cd7d5b26d72cd64bd33))
+
 ## [0.34.0](https://github.com/parallelworks/squall/compare/v0.33.0...v0.34.0) (2026-11-05)
 
 
