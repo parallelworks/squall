@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -21,6 +22,10 @@ import (
 const (
 	maxLabels      = 64
 	maxLabelLength = 63
+
+	maxRetentionPeriod = 3_155_760_000
+	minSoftDelete      = 7 * 24 * 60 * 60
+	maxSoftDelete      = 90 * 24 * 60 * 60
 )
 
 // Bucket is a bucket, in the API's JSON shape.
@@ -43,6 +48,14 @@ type Bucket struct {
 	CustomPlacementConfig *CustomPlacementConfig `json:"customPlacementConfig,omitzero"`
 	Encryption            *Encryption            `json:"encryption,omitzero"`
 	RPO                   string                 `json:"rpo,omitzero"`
+	Generation            int64                  `json:"generation,string"`
+	RetentionPolicy       *RetentionPolicy       `json:"retentionPolicy,omitzero"`
+	DefaultEventBasedHold bool                   `json:"defaultEventBasedHold,omitzero"`
+	ObjectRetention       *BucketObjectRetention `json:"objectRetention,omitzero"`
+	SoftDeletePolicy      *SoftDeletePolicy      `json:"softDeletePolicy,omitzero"`
+	Billing               *Billing               `json:"billing,omitzero"`
+	SoftDeleteTime        string                 `json:"softDeleteTime,omitzero"`
+	HardDeleteTime        string                 `json:"hardDeleteTime,omitzero"`
 
 	// Project is the ID of the project the bucket is in; it is not in the JSON.
 	Project string `json:"-"`
@@ -63,10 +76,39 @@ type Encryption struct {
 	DefaultKmsKeyName string `json:"defaultKmsKeyName,omitzero"`
 }
 
+// RetentionPolicy is the minimum age an object in a bucket must reach before it can be deleted or replaced.
+type RetentionPolicy struct {
+	RetentionPeriod int64  `json:"retentionPeriod,string"`
+	EffectiveTime   string `json:"effectiveTime"`
+	IsLocked        bool   `json:"isLocked,omitzero"`
+}
+
+// SoftDeletePolicy is how long a bucket keeps what is deleted from it; zero keeps nothing.
+type SoftDeletePolicy struct {
+	RetentionDurationSeconds int64  `json:"retentionDurationSeconds,string"`
+	EffectiveTime            string `json:"effectiveTime,omitzero"`
+}
+
+// BucketObjectRetention says whether objects in a bucket take their own retention, with Mode "Enabled".
+type BucketObjectRetention struct {
+	Mode string `json:"mode"`
+}
+
+// Billing is a bucket's billing setting.
+type Billing struct {
+	RequesterPays bool `json:"requesterPays"`
+}
+
 type bucket struct {
 	Bucket
 	// objects holds each name's generations, oldest first; the last is live unless it has TimeDeleted.
 	objects map[string][]*Object
+	// trash holds soft-deleted generations, in the order they were deleted.
+	trash []*Object
+	// nextPurge is when the first of trash goes for good.
+	nextPurge time.Time
+	// hardDelete is when a soft-deleted bucket goes for good.
+	hardDelete time.Time
 }
 
 func (b *bucket) clone() Bucket {
@@ -74,6 +116,18 @@ func (b *bucket) clone() Bucket {
 	c.Labels = maps.Clone(b.Labels)
 	if b.Versioning != nil {
 		c.Versioning = new(*b.Versioning)
+	}
+	if b.RetentionPolicy != nil {
+		c.RetentionPolicy = new(*b.RetentionPolicy)
+	}
+	if b.ObjectRetention != nil {
+		c.ObjectRetention = new(*b.ObjectRetention)
+	}
+	if b.SoftDeletePolicy != nil {
+		c.SoftDeletePolicy = new(*b.SoftDeletePolicy)
+	}
+	if b.Billing != nil {
+		c.Billing = new(*b.Billing)
 	}
 	c.CORS = slices.Clone(b.CORS)
 	if b.CustomPlacementConfig != nil {
@@ -86,6 +140,16 @@ func (b *bucket) clone() Bucket {
 }
 
 func (b *bucket) versioned() bool { return b.Versioning != nil && b.Versioning.Enabled }
+
+// softDeleteDuration is how long b keeps what is deleted from it.
+func (b *bucket) softDeleteDuration() time.Duration {
+	if b.SoftDeletePolicy == nil {
+		return 0
+	}
+	return time.Duration(b.SoftDeletePolicy.RetentionDurationSeconds) * time.Second
+}
+
+func (b *bucket) requesterPays() bool { return b.Billing != nil && b.Billing.RequesterPays }
 
 func (b *bucket) empty() bool { return len(b.objects) == 0 }
 
@@ -190,6 +254,7 @@ func forbidden(permission string) *apiError {
 // lookup returns the named bucket, or the error a call needing permission fails with. The caller holds s.mu.
 func (s *Server) lookup(name, permission string) (*bucket, *apiError) {
 	if b, ok := s.buckets[name]; ok {
+		s.purgeTrash(b)
 		return b, nil
 	}
 	if s.foreign[name] {
@@ -213,6 +278,33 @@ func normalCORS(cors json.RawMessage) (json.RawMessage, *apiError) {
 	return slices.Clone(cors), nil
 }
 
+// int64Value is an int64 the API takes as a JSON string or number.
+type int64Value int64
+
+func (v *int64Value) UnmarshalJSON(data []byte) error {
+	text := string(data)
+	if text == "null" {
+		return nil
+	}
+	if unquoted, err := strconv.Unquote(text); err == nil {
+		text = unquoted
+	}
+	n, err := strconv.ParseInt(text, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid value for an int64 field: %s", data)
+	}
+	*v = int64Value(n)
+	return nil
+}
+
+type retentionPolicyInput struct {
+	RetentionPeriod *int64Value `json:"retentionPeriod"`
+}
+
+type softDeletePolicyInput struct {
+	RetentionDurationSeconds *int64Value `json:"retentionDurationSeconds"`
+}
+
 // bucketInput is what buckets.insert and buckets.patch take.
 type bucketInput struct {
 	Name                  string                 `json:"name"`
@@ -224,6 +316,10 @@ type bucketInput struct {
 	CustomPlacementConfig *CustomPlacementConfig `json:"customPlacementConfig"`
 	Encryption            *Encryption            `json:"encryption"`
 	RPO                   string                 `json:"rpo"`
+	RetentionPolicy       *retentionPolicyInput  `json:"retentionPolicy"`
+	DefaultEventBasedHold *bool                  `json:"defaultEventBasedHold"`
+	SoftDeletePolicy      *softDeletePolicyInput `json:"softDeletePolicy"`
+	Billing               *Billing               `json:"billing"`
 	// Lifecycle is accepted without rules, since the client sends it empty.
 	Lifecycle *struct {
 		Rule []json.RawMessage `json:"rule"`
@@ -255,10 +351,9 @@ func (s *Server) insertBucket(r *http.Request) (any, *apiError) {
 	if err := checkACLs(r); err != nil {
 		return nil, err
 	}
-	if retention, err := boolParam(r, "enableObjectRetention"); err != nil {
+	objectRetention, err := boolParam(r, "enableObjectRetention")
+	if err != nil {
 		return nil, err
-	} else if retention {
-		return nil, invalid("squall: object retention is not supported")
 	}
 	body, err := readBody(r, maxBody)
 	if err != nil {
@@ -280,6 +375,25 @@ func (s *Server) insertBucket(r *http.Request) (any, *apiError) {
 	b := Bucket{
 		Name: in.Name, Location: in.Location, StorageClass: in.StorageClass, Labels: labels, Versioning: in.Versioning,
 		CORS: in.CORS, CustomPlacementConfig: in.CustomPlacementConfig, Encryption: in.Encryption, RPO: in.RPO, Project: project,
+		Billing: in.Billing,
+	}
+	if in.DefaultEventBasedHold != nil {
+		b.DefaultEventBasedHold = *in.DefaultEventBasedHold
+	}
+	if objectRetention {
+		b.ObjectRetention = &BucketObjectRetention{Mode: "Enabled"}
+	}
+	if p := in.RetentionPolicy; p != nil {
+		if p.RetentionPeriod == nil {
+			return nil, badRetentionPeriod()
+		}
+		b.RetentionPolicy = &RetentionPolicy{RetentionPeriod: int64(*p.RetentionPeriod)}
+	}
+	if p := in.SoftDeletePolicy; p != nil {
+		if p.RetentionDurationSeconds == nil {
+			return nil, badSoftDelete()
+		}
+		b.SoftDeletePolicy = &SoftDeletePolicy{RetentionDurationSeconds: int64(*p.RetentionDurationSeconds)}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -313,6 +427,15 @@ func (s *Server) store(b Bucket) (*bucket, *apiError) {
 	if c := b.CustomPlacementConfig; c != nil && len(c.DataLocations) != 2 {
 		return nil, invalid("Invalid argument: a custom dual-region takes exactly two data locations.")
 	}
+	if p := b.RetentionPolicy; p != nil && !validRetentionPeriod(p.RetentionPeriod) {
+		return nil, badRetentionPeriod()
+	}
+	if p := b.SoftDeletePolicy; p != nil && !validSoftDelete(p.RetentionDurationSeconds) {
+		return nil, badSoftDelete()
+	}
+	if o := b.ObjectRetention; o != nil && o.Mode != "Enabled" {
+		return nil, invalid("Invalid value for: %s is not a valid value", o.Mode)
+	}
 	if s.foreign[b.Name] {
 		return nil, &apiError{
 			Status: http.StatusConflict, Reason: "conflict",
@@ -325,10 +448,22 @@ func (s *Server) store(b Bucket) (*bucket, *apiError) {
 			Message: "You already own this bucket. Please select another name.",
 		}
 	}
-	now := s.now().UTC().Format(timeFormat)
+	t, now := s.timestamp()
 	b.Kind, b.ID, b.SelfLink = "storage#bucket", b.Name, apiBase+"b/"+b.Name
 	b.ProjectNumber = projectNumber(b.Project)
 	b.TimeCreated, b.Updated, b.Metageneration, b.Etag = now, now, 1, etag(1)
+	b.Generation = s.nextGeneration(t)
+	b.SoftDeleteTime, b.HardDeleteTime = "", ""
+	if b.RetentionPolicy != nil {
+		b.RetentionPolicy.EffectiveTime = cmp.Or(b.RetentionPolicy.EffectiveTime, now)
+	}
+	if b.SoftDeletePolicy == nil {
+		b.SoftDeletePolicy = &SoftDeletePolicy{RetentionDurationSeconds: minSoftDelete}
+	}
+	b.SoftDeletePolicy.EffectiveTime = ""
+	if b.SoftDeletePolicy.RetentionDurationSeconds > 0 {
+		b.SoftDeletePolicy.EffectiveTime = now
+	}
 	b.Location = strings.ToUpper(cmp.Or(b.Location, "US"))
 	b.LocationType = locationType(b.Location, b.CustomPlacementConfig)
 	if len(b.Labels) == 0 {
@@ -341,8 +476,19 @@ func (s *Server) store(b Bucket) (*bucket, *apiError) {
 }
 
 func (s *Server) getBucket(r *http.Request) (any, *apiError) {
+	soft, gen, err := softDeletedGeneration(r)
+	if err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if soft {
+		b := s.softDeletedBucket(r.PathValue("bucket"), gen)
+		if b == nil {
+			return nil, notFoundBucket()
+		}
+		return b.clone(), nil
+	}
 	b, err := s.lookup(r.PathValue("bucket"), "storage.buckets.get")
 	if err != nil {
 		return nil, err
@@ -369,7 +515,8 @@ func (s *Server) patchBucket(r *http.Request) (any, *apiError) {
 		return nil, err
 	}
 	if in.Name != "" || in.Location != "" || in.CustomPlacementConfig != nil || in.RPO != "" {
-		return nil, invalid("squall: a patch may change only labels, versioning, cors, storageClass and encryption")
+		return nil, invalid("squall: a patch may change only labels, versioning, cors, storageClass, encryption, " +
+			"retentionPolicy, defaultEventBasedHold, softDeletePolicy and billing")
 	}
 	cors, err := normalCORS(in.CORS)
 	if err != nil {
@@ -380,6 +527,9 @@ func (s *Server) patchBucket(r *http.Request) (any, *apiError) {
 		return nil, invalid("Invalid JSON payload received: %v", err)
 	}
 	cleared := func(field string) bool { return string(fields[field]) == "null" }
+	if cleared("softDeletePolicy") {
+		return nil, invalid("squall: softDeletePolicy cannot be null; a retentionDurationSeconds of 0 turns soft delete off")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b, err := s.lookup(r.PathValue("bucket"), "storage.buckets.update")
@@ -410,10 +560,28 @@ func (s *Server) patchBucket(r *http.Request) (any, *apiError) {
 			return nil, invalid("Invalid argument: storage class '%s' is not valid.", class)
 		}
 	}
+	retention, err := s.nextRetentionPolicy(b, in.RetentionPolicy, cleared("retentionPolicy"))
+	if err != nil {
+		return nil, err
+	}
+	softDelete, err := s.nextSoftDeletePolicy(b, in.SoftDeletePolicy)
+	if err != nil {
+		return nil, err
+	}
 	if len(labels) == 0 {
 		labels = nil
 	}
-	b.Labels, b.StorageClass = labels, class
+	b.Labels, b.StorageClass, b.RetentionPolicy, b.SoftDeletePolicy = labels, class, retention, softDelete
+	if in.DefaultEventBasedHold != nil {
+		b.DefaultEventBasedHold = *in.DefaultEventBasedHold
+	} else if cleared("defaultEventBasedHold") {
+		b.DefaultEventBasedHold = false
+	}
+	if in.Billing != nil {
+		b.Billing = new(*in.Billing)
+	} else if cleared("billing") {
+		b.Billing = nil
+	}
 	if in.Versioning != nil {
 		b.Versioning = new(*in.Versioning)
 	} else if cleared("versioning") {
@@ -446,6 +614,7 @@ func (s *Server) deleteBucket(r *http.Request) (any, *apiError) {
 		return nil, &apiError{Status: http.StatusConflict, Reason: "conflict", Message: "The bucket you tried to delete is not empty."}
 	}
 	delete(s.buckets, name)
+	s.softDeleteBucket(b)
 	return nil, nil
 }
 
@@ -463,16 +632,31 @@ func (s *Server) listBuckets(r *http.Request) (any, *apiError) {
 	if _, err := boolParam(r, "returnPartialSuccess"); err != nil {
 		return nil, err
 	}
+	soft, err := boolParam(r, "softDeleted")
+	if err != nil {
+		return nil, err
+	}
 	prefix := r.URL.Query().Get("prefix")
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var all []Bucket
-	for _, name := range slices.Sorted(maps.Keys(s.buckets)) {
-		if b := s.buckets[name]; b.Project == project && strings.HasPrefix(name, prefix) {
-			all = append(all, b.clone())
+	key := func(b Bucket) string { return b.Name }
+	if soft {
+		s.purgeBuckets()
+		for _, b := range s.softDeletedBuckets() {
+			if b.Project == project && strings.HasPrefix(b.Name, prefix) {
+				all = append(all, b)
+			}
+		}
+		key = func(b Bucket) string { return fmt.Sprintf("%s\x00%020d", b.Name, b.Generation) }
+	} else {
+		for _, name := range slices.Sorted(maps.Keys(s.buckets)) {
+			if b := s.buckets[name]; b.Project == project && strings.HasPrefix(name, prefix) {
+				all = append(all, b.clone())
+			}
 		}
 	}
-	items, next, err := page(r, all, func(b Bucket) string { return b.Name })
+	items, next, err := page(r, all, key)
 	if err != nil {
 		return nil, err
 	}
@@ -504,7 +688,9 @@ func (s *Server) LookupBucket(name string) (Bucket, bool) {
 	return b.clone(), true
 }
 
-// PutBucket creates b in its Project from the fields buckets.insert takes, and returns it as stored.
+// PutBucket creates b in its Project from the fields buckets.insert takes, and returns it as stored. A
+// RetentionPolicy may be locked already. With no SoftDeletePolicy, the bucket keeps deletions for 7 days, as
+// Cloud Storage's default is.
 func (s *Server) PutBucket(b Bucket) (Bucket, error) {
 	if b.Project == "" {
 		return Bucket{}, errors.New("squall: a bucket needs a project")
@@ -512,6 +698,8 @@ func (s *Server) PutBucket(b Bucket) (Bucket, error) {
 	in := Bucket{
 		Name: b.Name, Location: b.Location, StorageClass: b.StorageClass, Labels: b.Labels, Versioning: b.Versioning,
 		CORS: b.CORS, CustomPlacementConfig: b.CustomPlacementConfig, Encryption: b.Encryption, RPO: b.RPO, Project: b.Project,
+		RetentionPolicy: b.RetentionPolicy, DefaultEventBasedHold: b.DefaultEventBasedHold, ObjectRetention: b.ObjectRetention,
+		SoftDeletePolicy: b.SoftDeletePolicy, Billing: b.Billing,
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -540,4 +728,10 @@ func (s *Server) PutForeignBucket(name string) error {
 func (s *Server) timestamp() (time.Time, string) {
 	t := s.now().UTC()
 	return t, t.Format(timeFormat)
+}
+
+// nextGeneration returns a generation number above every earlier one, from t where it can. The caller holds s.mu.
+func (s *Server) nextGeneration(t time.Time) int64 {
+	s.lastGeneration = max(s.lastGeneration+1, t.UnixMicro())
+	return s.lastGeneration
 }

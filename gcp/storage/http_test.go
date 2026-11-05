@@ -3,6 +3,7 @@ package storage_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -121,6 +122,41 @@ func TestPatchClearsNullFields(t *testing.T) {
 	}
 }
 
+func TestRetentionAndRestoreRoutes(t *testing.T) {
+	s := storage.New()
+	if code, body := do(t, s, http.MethodPost, "/storage/v1/b?project=p", "application/json", `{"name":"routes","retentionPolicy":{"retentionPeriod":"60"}}`); code != http.StatusOK ||
+		!strings.Contains(body, `"retentionPolicy":{"retentionPeriod":"60","effectiveTime":"`) || !strings.Contains(body, `"softDeletePolicy":{"retentionDurationSeconds":"604800"`) {
+		t.Fatalf("insert = %d %s", code, body)
+	}
+	code, body := do(t, s, http.MethodPost, "/storage/v1/b/routes/lockRetentionPolicy", "", "")
+	if code != http.StatusBadRequest || !strings.Contains(body, `"message":"Required parameter: ifMetagenerationMatch"`) {
+		t.Fatalf("lock without a metageneration = %d %s", code, body)
+	}
+	if code, body := do(t, s, http.MethodPost, "/storage/v1/b/routes/lockRetentionPolicy?ifMetagenerationMatch=1", "", ""); code != http.StatusOK || !strings.Contains(body, `"isLocked":true`) {
+		t.Fatalf("lock = %d %s", code, body)
+	}
+	if _, err := s.PutObject("routes", "a/restore", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	gen := s.Objects("routes")[0].Generation
+	if _, err := s.SetRetentionPolicy("routes", nil); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := do(t, s, http.MethodDelete, "/storage/v1/b/routes/o/a%2Frestore", "", ""); code != http.StatusNoContent {
+		t.Fatalf("delete = %d %s", code, body)
+	}
+	target := fmt.Sprintf("/storage/v1/b/routes/o/a%%2Frestore/restore?generation=%d", gen)
+	if code, body := do(t, s, http.MethodPost, target, "", ""); code != http.StatusOK || !strings.Contains(body, `"name":"a/restore"`) {
+		t.Fatalf("restore = %d %s", code, body)
+	}
+	if code, body := do(t, s, http.MethodPost, "/storage/v1/b/routes/o/a%2Frestore/compose", "application/json", "{}"); code != http.StatusNotFound {
+		t.Fatalf("compose = %d %s", code, body)
+	}
+	if code, body := do(t, s, http.MethodPost, "/storage/v1/b/routes/o/a/restore", "", ""); code != http.StatusBadRequest || !strings.Contains(body, `"reason":"required"`) {
+		t.Fatalf("restore without a generation = %d %s", code, body)
+	}
+}
+
 func FuzzServeHTTP(f *testing.F) {
 	multipartBody := "--x\r\nContent-Type: application/json\r\n\r\n{\"name\":\"o\"}\r\n--x\r\nContent-Type: text/plain\r\n\r\nhi\r\n--x--\r\n"
 	for _, seed := range []struct{ method, target, contentType, body string }{
@@ -130,6 +166,10 @@ func FuzzServeHTTP(f *testing.F) {
 		{http.MethodPost, "/upload/storage/v1/b/fuzz/o?uploadType=multipart", "multipart/related; boundary=x", multipartBody},
 		{http.MethodPost, "/upload/storage/v1/b/fuzz/o?uploadType=media&name=a%2F..%2Fb&ifGenerationMatch=0", "text/plain", "x"},
 		{http.MethodDelete, "/storage/v1/b/fuzz/o/k?generation=1", "", ""},
+		{http.MethodPatch, "/storage/v1/b/fuzz/o/k?overrideUnlockedRetention=true", "application/json", `{"temporaryHold":true,"retention":null,"metadata":{"a":null}}`},
+		{http.MethodPost, "/storage/v1/b/fuzz/o/k/restore?generation=1", "", ""},
+		{http.MethodPost, "/storage/v1/b/fuzz/lockRetentionPolicy?ifMetagenerationMatch=1", "", ""},
+		{http.MethodGet, "/storage/v1/b?project=p&softDeleted=true", "", ""},
 	} {
 		f.Add(seed.method, seed.target, seed.contentType, []byte(seed.body))
 	}

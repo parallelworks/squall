@@ -6,7 +6,9 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	gcs "cloud.google.com/go/storage"
 	"google.golang.org/api/googleapi"
 
 	"github.com/parallelworks/squall/access"
@@ -72,5 +74,26 @@ func TestPolicyRefusesAMethodItDoesNotGrant(t *testing.T) {
 	denials := policy.Denials()
 	if len(denials) != 1 || denials[0].Method != "storage.buckets.delete" || denials[0].Resource != "b/data" {
 		t.Errorf("Denials() = %+v", denials)
+	}
+}
+
+func TestPolicyNeedsRetentionAndRestorePermissions(t *testing.T) {
+	policy := access.Allow("storage.buckets.create", "storage.buckets.enableObjectRetention", "storage.objects.create", "storage.objects.update", "storage.objects.delete")
+	c := newClient(t, storage.New(storage.WithPolicy(policy)))
+	b := c.Bucket("data")
+	if err := b.SetObjectRetention(true).Create(t.Context(), project, nil); err != nil {
+		t.Fatal(err)
+	}
+	first := write(t, c, "data", "a.txt", "one")
+	write(t, c, "data", "a.txt", "two")
+
+	_, err := b.Object("a.txt").Update(t.Context(), gcs.ObjectAttrsToUpdate{Retention: &gcs.ObjectRetention{Mode: "Unlocked", RetainUntil: time.Now().Add(time.Hour)}})
+	wantErr(t, "set retention", err, http.StatusForbidden, "forbidden", "Permission 'storage.objects.setRetention' denied")
+	_, err = b.Object("a.txt").OverrideUnlockedRetention(true).Update(t.Context(), gcs.ObjectAttrsToUpdate{ContentType: "text/csv"})
+	wantErr(t, "override retention", err, http.StatusForbidden, "forbidden", "Permission 'storage.objects.overrideUnlockedRetention' denied")
+	_, err = b.Object("a.txt").Generation(first.Generation).Restore(t.Context(), &gcs.RestoreOptions{})
+	wantErr(t, "restore", err, http.StatusForbidden, "forbidden", "Permission 'storage.objects.restore' denied")
+	if _, err := b.Object("a.txt").Update(t.Context(), gcs.ObjectAttrsToUpdate{ContentType: "text/csv"}); err != nil {
+		t.Fatalf("update metadata: %v", err)
 	}
 }
