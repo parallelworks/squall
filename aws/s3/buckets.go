@@ -494,7 +494,7 @@ func (s *Server) getBucketRequestPayment(c *call) (*reply, *apiError) {
 
 func (s *Server) putBucketRequestPayment(c *call) (*reply, *apiError) {
 	var in requestPaymentXML
-	if err := decodeRootXML(c.body, "RequestPaymentConfiguration", &in); err != nil {
+	if err := decodeRoot(c, "RequestPaymentConfiguration", &in); err != nil {
 		return nil, err
 	}
 	if in.Payer != "Requester" && in.Payer != "BucketOwner" {

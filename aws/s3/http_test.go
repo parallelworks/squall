@@ -279,8 +279,13 @@ func TestMultipartAndLockShapes(t *testing.T) {
 			"<Status><Status>Enabled</Status></Status>", http.StatusBadRequest, "MalformedXML",
 		},
 		{
-			"a request payment configuration under another root", http.MethodPut, "/vault?requestPayment", nil,
+			"a request payment configuration under another root", http.MethodPut, "/vault?requestPayment",
+			map[string]string{"Content-MD5": "x"},
 			"<Payment><Payer>Requester</Payer></Payment>", http.StatusBadRequest, "MalformedXML",
+		},
+		{
+			"a request payment configuration without a checksum", http.MethodPut, "/vault?requestPayment", nil,
+			"<RequestPaymentConfiguration><Payer>Requester</Payer></RequestPaymentConfiguration>", http.StatusBadRequest, "InvalidRequest",
 		},
 		{"retention of a missing key", http.MethodGet, "/vault/missing?retention", nil, "", http.StatusNotFound, "NoSuchKey"},
 		{"a lock configuration without a checksum", http.MethodPut, "/vault?object-lock", nil, lockConfig, http.StatusBadRequest, "InvalidRequest"},

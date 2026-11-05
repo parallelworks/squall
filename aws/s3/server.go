@@ -124,7 +124,8 @@
 //   - Request payment is recorded. There is one account, which owns every
 //     bucket it can reach, and S3 does not ask a bucket owner for
 //     x-amz-request-payer, so a Requester Pays bucket answers as any other
-//     and responses carry no x-amz-request-charged.
+//     and responses carry no x-amz-request-charged. Like the Object Lock
+//     PUTs, PutBucketRequestPayment needs Content-MD5 or a checksum.
 //   - DeleteBucket fails with BucketNotEmpty while any object version or
 //     delete marker remains. ListObjectVersions orders versions by key and
 //     then newest first, and its markers are positions, so a page may follow

@@ -314,7 +314,8 @@ func (s *Server) listMultipartUploads(c *call) (*reply, *apiError) {
 	var lastEntry, lastID string
 	count := 0
 	for _, u := range uploads {
-		if !strings.HasPrefix(u.key, prefix) {
+		if !strings.HasPrefix(u.key, prefix) ||
+			keyMarker != "" && (u.key < keyMarker || u.key == keyMarker && (idMarker == "" || u.id <= idMarker)) {
 			continue
 		}
 		entry, rolled := u.key, false
@@ -323,10 +324,7 @@ func (s *Server) listMultipartUploads(c *call) (*reply, *apiError) {
 				entry, rolled = u.key[:len(prefix)+i+len(delimiter)], true
 			}
 		}
-		switch {
-		case rolled && (entry <= keyMarker || count > 0 && lastID == "" && entry == lastEntry):
-			continue
-		case !rolled && keyMarker != "" && (u.key < keyMarker || u.key == keyMarker && (idMarker == "" || u.id <= idMarker)):
+		if rolled && (entry == keyMarker || count > 0 && lastID == "" && entry == lastEntry) {
 			continue
 		}
 		if count == limit {

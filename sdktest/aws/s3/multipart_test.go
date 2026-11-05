@@ -203,6 +203,16 @@ func TestListMultipartUploadsPagesByKeyAndInitiation(t *testing.T) {
 		t.Fatalf("by delimiter = %v and %v", keys, prefixes)
 	}
 
+	inside, err := c.ListMultipartUploads(t.Context(), &awss3.ListMultipartUploadsInput{
+		Bucket: aws.String("data"), Delimiter: aws.String("/"), KeyMarker: aws.String("photos/1"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inside.CommonPrefixes) != 2 || aws.ToString(inside.CommonPrefixes[0].Prefix) != "photos/" || len(inside.Uploads) != 0 {
+		t.Fatalf("after a key inside photos/ = uploads %+v, prefixes %+v, want photos/ for photos/2 and videos/", inside.Uploads, inside.CommonPrefixes)
+	}
+
 	out, err := c.ListMultipartUploads(t.Context(), &awss3.ListMultipartUploadsInput{Bucket: aws.String("data"), Prefix: aws.String("photos/")})
 	if err != nil {
 		t.Fatal(err)
