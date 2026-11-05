@@ -851,8 +851,8 @@ func TestNetAppAccountChildShapes(t *testing.T) {
 	acct := groupPath + "/providers/Microsoft.NetApp/netAppAccounts/a"
 	rec, out := do(t, s, http.MethodGet, acct+"/backupVaults", "")
 	e, _ := out["error"].(map[string]any)
-	if rec.Code != http.StatusNotFound || e["code"] != "ParentResourceNotFound" ||
-		e["message"] != "Failed to perform 'read' on resource(s) of type 'netAppAccounts/backupVaults', because the parent resource '"+acct+"' could not be found." {
+	if rec.Code != http.StatusNotFound || e["code"] != "ResourceNotFound" ||
+		e["message"] != "The Resource 'Microsoft.NetApp/netAppAccounts/a' under resource group 'rg' was not found. For more details please go to https://aka.ms/ARMResourceNotFoundFix" {
 		t.Errorf("listing vaults of a missing account = %d %v", rec.Code, out)
 	}
 	if rec, out := do(t, s, http.MethodPut, acct, `{"location":"eastus"}`); rec.Code != http.StatusCreated {

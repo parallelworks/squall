@@ -85,6 +85,39 @@ func netappIDName(k *kind, id string) string {
 
 func netappResourceName(res *resource) string { return netappIDName(res.kind, res.id) }
 
+// netappParentMissing fails a read under the level l whose parent does not
+// exist with 404 ResourceNotFound naming the parent, as a read under a missing
+// virtual network does. The caller holds s.mu.
+func (s *Server) netappParentMissing(c *call, l *netappLevel) *apiError {
+	if l.parent == nil {
+		return nil
+	}
+	parent := l.parent(c)
+	if s.resources[key(parent)] != nil {
+		return nil
+	}
+	_, rest, _ := strings.Cut(parent, "/providers/")
+	parts := strings.Split(rest, "/")
+	types := []string{parts[0]}
+	for i := 1; i < len(parts); i += 2 {
+		types = append(types, parts[i])
+	}
+	return resourceNotFound(strings.Join(types, "/"), netappName(parent), c.val("rg"))
+}
+
+// backupVolumeFilter reads a backups list's $filter, which may name the
+// volume whose backups to list as volumeResourceId eq 'id'.
+func backupVolumeFilter(filter string) (string, *apiError) {
+	if strings.TrimSpace(filter) == "" {
+		return "", nil
+	}
+	volume, rest, err := filterClause(filter, "volumeResourceId")
+	if err != nil || strings.TrimSpace(rest) != "" || volume == "" {
+		return "", unsupported("the $filter '%s' is not supported; use volumeResourceId eq 'id'", filter)
+	}
+	return volume, nil
+}
+
 // prepareVolumeGroup accepts a volume group that lists no volumes; creating
 // volumes with their group is not modeled. The caller holds s.mu.
 func (s *Server) prepareVolumeGroup(res *resource, p *parsed) (func(), *apiError) {
@@ -277,15 +310,29 @@ func (s *Server) AddBackup(vault, name, volume string, at time.Time) (string, bo
 // does. It returns the group's ID and reports whether the account exists,
 // once any create of it in progress finishes, has not failed and is not being
 // deleted, and has no volume group of that name, and whether each volume
-// exists in the account and is in no other group.
+// exists in the account, is not being deleted, has not failed once any
+// change of it in progress finishes, and is in no other group.
 func (s *Server) AddVolumeGroup(id, name string, volumes ...string) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var members []*resource
+	acct := s.resources[key(id)]
+	if acct == nil || acct.kind != netappAccountKind || acct.state == stateDeleting ||
+		name == "" || strings.Contains(name, "/") || s.resources[key(acct.id+"/volumeGroups/"+name)] != nil {
+		return "", false
+	}
+	seen := map[string]bool{}
+	for _, v := range volumes {
+		vol := s.resources[key(v)]
+		if vol == nil || vol.kind != volumeKind || vol.state == stateDeleting || vol.volumeGroup != "" ||
+			!strings.HasPrefix(key(vol.id), key(acct.id)+"/") || seen[key(v)] {
+			return "", false
+		}
+		seen[key(v)] = true
+	}
+	members := make([]*resource, 0, len(volumes))
 	for _, v := range volumes {
 		vol := s.settled(v)
-		if vol == nil || vol.kind != volumeKind || vol.state == stateDeleting || vol.volumeGroup != "" ||
-			!strings.HasPrefix(key(vol.id), key(id)+"/") || slices.Contains(members, vol) {
+		if vol == nil || vol.state == stateFailed {
 			return "", false
 		}
 		members = append(members, vol)

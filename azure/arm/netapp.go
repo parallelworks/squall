@@ -2,6 +2,7 @@ package arm
 
 import (
 	"cmp"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -217,6 +218,9 @@ func (s *Server) getNetApp(l *netappLevel) handler {
 		if err := s.readableGroup(c); err != nil {
 			return nil, err
 		}
+		if err := s.netappParentMissing(c, l); err != nil {
+			return nil, err
+		}
 		id := l.id(c)
 		res := s.read(id)
 		if res == nil || res.kind != l.kind {
@@ -233,15 +237,22 @@ func (s *Server) listNetApp(l *netappLevel) handler {
 		if err := s.readableGroup(c); err != nil {
 			return nil, err
 		}
-		if l.parent != nil {
-			if parent := l.parent(c); s.resources[key(parent)] == nil {
-				return nil, parentNotFoundOn("read", l.kind, parent)
-			}
+		if err := s.netappParentMissing(c, l); err != nil {
+			return nil, err
 		}
 		items := s.listed(c, l.kind)
 		if l.parent != nil {
 			prefix := key(l.parent(c)) + "/"
 			items = slices.DeleteFunc(items, func(res *resource) bool { return !strings.HasPrefix(key(res.id), prefix) })
+		}
+		if l.kind == netappBackupKind {
+			volume, err := backupVolumeFilter(c.query("$filter"))
+			if err != nil {
+				return nil, err
+			}
+			if volume != "" {
+				items = slices.DeleteFunc(items, func(res *resource) bool { return key(str(res.props, "volumeResourceId")) != key(volume) })
+			}
 		}
 		return ok(listBody(items, func(res *resource) any { return s.renderNetAppListed(res) })), nil
 	}
@@ -305,7 +316,14 @@ func (s *Server) renderNetApp(res *resource) map[string]any {
 	m["systemData"] = systemData(res)
 	switch res.kind {
 	case volumeGroupKind:
-		props["volumes"] = s.renderGroupVolumes(res)
+		vols := s.renderGroupVolumes(res)
+		meta, _ := props["groupMetaData"].(map[string]any)
+		meta = maps.Clone(meta)
+		if meta == nil {
+			meta = map[string]any{}
+		}
+		meta["volumesCount"] = len(vols)
+		props["volumes"], props["groupMetaData"] = vols, meta
 	case backupPolicyKind:
 		props["volumesAssigned"] = len(s.volumesNaming(res.id, "backup", "backupPolicyId"))
 	}

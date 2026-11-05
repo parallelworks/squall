@@ -253,8 +253,13 @@ func TestNetAppAccountChildren(t *testing.T) {
 		t.Run(k.name, func(t *testing.T) {
 			c := setup(t, arm.WithSettleAfter(1), arm.WithClock(func() time.Time { return created }))
 			c.createGroup(t, group, nil)
-			if _, err := k.list(c, "acct"); code(err) != "ParentResourceNotFound" || status(err) != http.StatusNotFound {
+			if _, err := k.list(c, "acct"); code(err) != "ResourceNotFound" || status(err) != http.StatusNotFound ||
+				!strings.Contains(err.Error(), "Microsoft.NetApp/netAppAccounts/acct'") {
 				t.Fatalf("listing under a missing account = %v", err)
+			}
+			if _, err := k.get(c, "acct", "child"); code(err) != "ResourceNotFound" || status(err) != http.StatusNotFound ||
+				!strings.Contains(err.Error(), "Microsoft.NetApp/netAppAccounts/acct'") {
+				t.Fatalf("a get under a missing account = %v", err)
 			}
 			if _, _, _, err := k.create(c, "acct", "child", nil); code(err) != "ParentResourceNotFound" || status(err) != http.StatusNotFound {
 				t.Fatalf("creating under a missing account = %v", err)
@@ -331,7 +336,7 @@ func TestNetAppBackupVaultHoldsBackups(t *testing.T) {
 		t.Fatal("AddBackupVault failed")
 	}
 	backups := c.anf.NewBackupsClient()
-	if _, err := backups.NewListByVaultPager(group, "acct", "other", nil).NextPage(t.Context()); code(err) != "ParentResourceNotFound" {
+	if _, err := backups.NewListByVaultPager(group, "acct", "other", nil).NextPage(t.Context()); code(err) != "ResourceNotFound" {
 		t.Fatalf("listing backups of a missing vault = %v", err)
 	}
 	if page, err := backups.NewListByVaultPager(group, "acct", "vault", nil).NextPage(t.Context()); err != nil || len(page.Value) != 0 {
@@ -358,8 +363,32 @@ func TestNetAppBackupVaultHoldsBackups(t *testing.T) {
 		t.Fatalf("backup = %+v %+v", got.Backup, props)
 	}
 	checkNetAppSystemData(t, "backup", got.SystemData, at, at)
-	if page, err := backups.NewListByVaultPager(group, "acct", "vault", nil).NextPage(t.Context()); err != nil || len(page.Value) != 1 {
-		t.Fatalf("backups of the vault = %+v, %v", page.Value, err)
+	other := strings.Replace(*vol.ID, "/volumes/vol", "/volumes/other", 1)
+	if _, ok := c.server.AddBackup(vault, "b2", other, at); !ok {
+		t.Fatal("AddBackup of another volume failed")
+	}
+	listed := func(filter *string) ([]string, error) {
+		page, err := backups.NewListByVaultPager(group, "acct", "vault", &armnetapp.BackupsClientListByVaultOptions{Filter: filter}).NextPage(t.Context())
+		var names []string
+		for _, b := range page.Value {
+			names = append(names, *b.Name)
+		}
+		return names, err
+	}
+	if names, err := listed(nil); err != nil || !slices.Equal(names, []string{"acct/vault/b1", "acct/vault/b2"}) {
+		t.Fatalf("backups of the vault = %v, %v", names, err)
+	}
+	if names, err := listed(new("volumeResourceId eq '" + strings.ToUpper(other) + "'")); err != nil || !slices.Equal(names, []string{"acct/vault/b2"}) {
+		t.Fatalf("backups of one volume = %v, %v", names, err)
+	}
+	for _, f := range []string{"backupType eq 'Manual'", "volumeResourceId eq '" + other + "' and label eq 'x'", "volumeResourceId ne 'x'"} {
+		if _, err := listed(new(f)); code(err) != "BadRequest" || status(err) != http.StatusBadRequest {
+			t.Fatalf("backups listed with $filter %s = %v", f, err)
+		}
+	}
+	b2p, err := backups.BeginDelete(t.Context(), group, "acct", "vault", "b2", nil)
+	if _, err = wait(t, b2p, err); err != nil {
+		t.Fatal(err)
 	}
 
 	vp, err := c.anf.NewBackupVaultsClient().BeginDelete(t.Context(), group, "acct", "vault", nil)
@@ -388,7 +417,7 @@ func TestNetAppBackupVaultHoldsBackups(t *testing.T) {
 	}
 }
 
-// protectVolume points the volume acct/pool/vol at a snapshot policy, backup policy and backup vault.
+// protectVolume sets the dataProtection of the volume acct/pool/vol.
 func (c *clients) protectVolume(t *testing.T, vol armnetapp.Volume, dp *armnetapp.VolumePropertiesDataProtection) error {
 	t.Helper()
 	props := *vol.Properties
@@ -485,7 +514,7 @@ func TestNetAppVolumeGroups(t *testing.T) {
 		t.Fatal("AddVolumeGroup took a volume another group holds")
 	}
 	got, err := groups.Get(t.Context(), group, "acct", "vg", nil)
-	if err != nil || len(got.Properties.Volumes) != 1 || *got.Properties.Volumes[0].ID != *vol.ID ||
+	if err != nil || len(got.Properties.Volumes) != 1 || *got.Properties.Volumes[0].ID != *vol.ID || *got.Properties.GroupMetaData.VolumesCount != 1 ||
 		*got.Properties.Volumes[0].Name != "acct/pool/vol" || *got.Properties.Volumes[0].Properties.CreationToken != "vol" {
 		t.Fatalf("volume group = %+v, %v", got.VolumeGroupDetails, err)
 	}
@@ -531,7 +560,7 @@ func TestNetAppCaches(t *testing.T) {
 	c := setup(t, arm.WithSettleAfter(1), arm.WithClock(func() time.Time { return created }))
 	c.createGroup(t, group, nil)
 	caches := c.anf.NewCachesClient()
-	if _, err := caches.NewListPager(group, "acct", "pool", nil).NextPage(t.Context()); code(err) != "ParentResourceNotFound" || status(err) != http.StatusNotFound {
+	if _, err := caches.NewListPager(group, "acct", "pool", nil).NextPage(t.Context()); code(err) != "ResourceNotFound" || status(err) != http.StatusNotFound {
 		t.Fatalf("listing caches of a missing pool = %v", err)
 	}
 	vol, err := c.createVolume(t, "acct", "pool", "vol")
@@ -627,5 +656,24 @@ func TestNetAppGroupDeletionTakesAccountChildren(t *testing.T) {
 	}
 	if got := c.server.Resources(); len(got) != 0 {
 		t.Fatalf("resources after the group's deletion = %+v", got)
+	}
+}
+
+func TestNetAppAddVolumeGroupLeavesVolumesAlone(t *testing.T) {
+	c := setup(t, arm.WithSettleAfter(100))
+	c.createGroup(t, group, nil)
+	vol, err := c.createVolume(t, "acct", "pool", "vol")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.volumes.BeginDelete(t.Context(), group, "acct", "pool", "vol", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c.server.AddVolumeGroup(accountOf(*vol.ID), "vg", *vol.ID); ok {
+		t.Fatal("AddVolumeGroup took a volume being deleted")
+	}
+	got, err := c.volumes.Get(t.Context(), group, "acct", "pool", "vol", nil)
+	if err != nil || *got.Properties.ProvisioningState != "Deleting" {
+		t.Fatalf("a volume being deleted after AddVolumeGroup = %+v, %v", got.Properties, err)
 	}
 }

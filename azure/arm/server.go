@@ -686,19 +686,22 @@
 //     writes, except a snapshot policy's, which answers 201, or 200 for an
 //     update, at once, as the client expects. A volume group answers 201 for
 //     an update too, as the client accepts only 201, which is inferred.
-//     Listing any NetApp child under a parent that does not exist fails with
-//     404 ParentResourceNotFound, which is inferred, and under one with none
-//     lists none. Deleting an account that holds any of them, or a pool that
+//     A get or list of any NetApp resource under a parent that does not
+//     exist fails with 404 ResourceNotFound naming the parent, as one under a
+//     missing virtual network does, which is inferred; a list under one with
+//     none lists none. Deleting an account that holds any of them, or a pool that
 //     holds a cache, fails with 409 CannotDeleteResource, as an account with
 //     pools does; that Azure refuses it is inferred. Deleting a backup vault
 //     that holds backups fails the same way, as Microsoft documents a vault
 //     must be emptied first; the status and code are inferred. Deleting a
-//     backup vault, backup policy or snapshot policy that a volume's
-//     dataProtection names, or a volume group that holds volumes, fails the
-//     same way, as Microsoft documents each must be unassigned or emptied
-//     first; the status, code and message are inferred. A backup policy
-//     shows a backupPolicyId and volumesAssigned, the volumes that name it;
-//     volumeBackups is not shown. A volume group that lists volumes fails
+//     backup vault or snapshot policy that a volume's dataProtection names,
+//     or a volume group that holds volumes, fails the same way, as Microsoft
+//     documents each must be unassigned or emptied first; deleting a backup
+//     policy a volume names fails too, which is inferred. The status, code
+//     and message of all three are inferred. A backup policy shows a
+//     backupPolicyId and volumesAssigned, the volumes that name it;
+//     volumeBackups is not shown. A volume group's groupMetaData shows
+//     volumesCount, the volumes it holds. A volume group that lists volumes fails
 //     with 400, as creating volumes with their group is not modeled, and one
 //     that sends tags does too, as the API gives it none.
 //     [Server.AddVolumeGroup] puts existing volumes in a group, which then
@@ -710,8 +713,10 @@
 //     calls beyond create, get, list and delete are not modeled. Backups are
 //     not created through the API; [Server.AddBackup] adds one to a vault,
 //     showing backupId, creationDate, completionDate and volumeResourceId,
-//     and it outlives its volume, as Microsoft documents. Which backup may be
-//     deleted is not checked. [Server.AddBackupVault],
+//     and it outlives its volume, as Microsoft documents. A backups list takes
+//     the $filter volumeResourceId eq 'id', which lists that volume's
+//     backups, and rejects any other with 400. Which backup may be deleted is
+//     not checked. [Server.AddBackupVault],
 //     [Server.AddBackupPolicy], [Server.AddSnapshotPolicy] and
 //     [Server.AddCache] add the others directly.
 //   - A Managed Lustre change in progress answers with an

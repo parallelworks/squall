@@ -47,12 +47,9 @@ func resourceNotFound(typ, name, group string) *apiError {
 }
 
 // parentNotFound fails a write of a nested resource of kind k whose parent does not exist.
-func parentNotFound(k *kind, parent string) *apiError { return parentNotFoundOn("write", k, parent) }
-
-// parentNotFoundOn fails the action, such as read or write, on nested resources of kind k whose parent does not exist.
-func parentNotFoundOn(action string, k *kind, parent string) *apiError {
+func parentNotFound(k *kind, parent string) *apiError {
 	return newError(http.StatusNotFound, "ParentResourceNotFound",
-		"Failed to perform '%s' on resource(s) of type '%s', because the parent resource '%s' could not be found.", action, k.resourceType(), parent)
+		"Failed to perform 'write' on resource(s) of type '%s', because the parent resource '%s' could not be found.", k.resourceType(), parent)
 }
 
 // unregisteredLocation fails a resource of kind k in a location its type is not offered in.
