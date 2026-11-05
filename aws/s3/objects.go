@@ -115,8 +115,7 @@ type deleted struct {
 	DeleteMarkerVersionID string `xml:"DeleteMarkerVersionId,omitempty"`
 }
 
-// remove deletes version id of key, or with no id deletes key as the bucket's versioning says. A locked
-// version stays unless bypass lifts its governance retention. The caller holds s.mu.
+// remove deletes version id of key, or with no id deletes key as the bucket's versioning says. The caller holds s.mu.
 func (s *Server) remove(b *bucket, key, id string, bypass bool, method string) (deleted, *apiError) {
 	if id != "" {
 		out := deleted{Key: key, VersionID: id}
@@ -176,10 +175,7 @@ func (s *Server) putObject(c *call) (*reply, *apiError) {
 		return nil, err
 	}
 	if (lock.mode != "" || b.DefaultRetention != nil) && !hasChecksum(c.r.Header) {
-		return nil, &apiError{
-			Status: http.StatusBadRequest, Code: "InvalidRequest",
-			Message: "Content-MD5 OR x-amz-checksum- HTTP header is required for Put Object requests with Object Lock parameters",
-		}
+		return nil, lockChecksumMissing()
 	}
 	v := s.storeObject(b, c.key, c.body)
 	s.applyLock(b, v, lock)

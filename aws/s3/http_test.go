@@ -2,6 +2,7 @@ package s3_test
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/xml"
 	"errors"
 	"io"
@@ -239,32 +240,57 @@ func TestMultipartAndLockShapes(t *testing.T) {
 		!strings.Contains(body, `<StorageClass>STANDARD</StorageClass><Initiated>`) {
 		t.Fatalf("list uploads = %d %s", code, body)
 	}
+	lockConfig := "<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled></ObjectLockConfiguration>"
 	for _, tc := range []struct {
 		name, method, target string
 		header               map[string]string
+		body                 string
 		status               int
 		code                 string
 	}{
 		{"a retention without a checksum", http.MethodPut, "/vault/k", map[string]string{
 			"x-amz-object-lock-mode": "GOVERNANCE", "x-amz-object-lock-retain-until-date": "2099-01-01T00:00:00Z",
-		}, http.StatusBadRequest, "InvalidRequest"},
-		{"a mode without a date", http.MethodPut, "/vault/k", map[string]string{"x-amz-object-lock-mode": "GOVERNANCE"}, http.StatusBadRequest, "InvalidArgument"},
+		}, "", http.StatusBadRequest, "InvalidRequest"},
+		{"a mode without a date", http.MethodPut, "/vault/k", map[string]string{"x-amz-object-lock-mode": "GOVERNANCE"}, "", http.StatusBadRequest, "InvalidArgument"},
 		{"an unknown mode", http.MethodPut, "/vault/k", map[string]string{
 			"x-amz-object-lock-mode": "STRICT", "x-amz-object-lock-retain-until-date": "2099-01-01T00:00:00Z",
-		}, http.StatusBadRequest, "InvalidArgument"},
+		}, "", http.StatusBadRequest, "InvalidArgument"},
 		{"a date in the past", http.MethodPut, "/vault/k", map[string]string{
 			"x-amz-object-lock-mode": "GOVERNANCE", "x-amz-object-lock-retain-until-date": "2000-01-01T00:00:00Z", "Content-MD5": "x",
-		}, http.StatusBadRequest, "InvalidArgument"},
-		{"a bad legal hold", http.MethodPut, "/vault/k", map[string]string{"x-amz-object-lock-legal-hold": "on"}, http.StatusBadRequest, "InvalidArgument"},
-		{"an event hold", http.MethodPut, "/vault/k", map[string]string{"x-amz-object-lock-event-hold": "ON"}, http.StatusBadRequest, "InvalidArgument"},
-		{"a part without an upload", http.MethodPut, "/vault/k?partNumber=1", nil, http.StatusBadRequest, "InvalidArgument"},
-		{"a part of an unknown upload", http.MethodPut, "/vault/k?partNumber=1&uploadId=nope", nil, http.StatusNotFound, "NoSuchUpload"},
-		{"part zero", http.MethodPut, "/vault/k?partNumber=0&uploadId=nope", nil, http.StatusBadRequest, "InvalidArgument"},
-		{"a negative max-uploads", http.MethodGet, "/vault?uploads&max-uploads=-1", nil, http.StatusBadRequest, "InvalidArgument"},
-		{"retention of a missing key", http.MethodGet, "/vault/missing?retention", nil, http.StatusNotFound, "NoSuchKey"},
+		}, "", http.StatusBadRequest, "InvalidArgument"},
+		{"a bad legal hold", http.MethodPut, "/vault/k", map[string]string{"x-amz-object-lock-legal-hold": "on"}, "", http.StatusBadRequest, "InvalidArgument"},
+		{"an event hold", http.MethodPut, "/vault/k", map[string]string{"x-amz-object-lock-event-hold": "ON"}, "", http.StatusBadRequest, "InvalidArgument"},
+		{"a part without an upload", http.MethodPut, "/vault/k?partNumber=1", nil, "", http.StatusBadRequest, "InvalidArgument"},
+		{"a part of an unknown upload", http.MethodPut, "/vault/k?partNumber=1&uploadId=nope", nil, "", http.StatusNotFound, "NoSuchUpload"},
+		{"part zero", http.MethodPut, "/vault/k?partNumber=0&uploadId=nope", nil, "", http.StatusBadRequest, "InvalidArgument"},
+		{"a negative max-uploads", http.MethodGet, "/vault?uploads&max-uploads=-1", nil, "", http.StatusBadRequest, "InvalidArgument"},
+		{"max-uploads 0", http.MethodGet, "/vault?uploads&max-uploads=0", nil, "", http.StatusBadRequest, "InvalidArgument"},
+		{"max-parts over 1000", http.MethodGet, "/vault/k?uploadId=x&max-parts=1001", nil, "", http.StatusBadRequest, "InvalidArgument"},
+		{"retention of a missing key", http.MethodGet, "/vault/missing?retention", nil, "", http.StatusNotFound, "NoSuchKey"},
+		{"a lock configuration without a checksum", http.MethodPut, "/vault?object-lock", nil, lockConfig, http.StatusBadRequest, "InvalidRequest"},
+		{
+			"a lock configuration under another root", http.MethodPut, "/vault?object-lock",
+			map[string]string{"Content-MD5": "x"},
+			"<Nope><ObjectLockEnabled>Enabled</ObjectLockEnabled></Nope>", http.StatusBadRequest, "MalformedXML",
+		},
+		{
+			"a retention without a checksum", http.MethodPut, "/vault/missing?retention", nil,
+			"<Retention><Mode>GOVERNANCE</Mode><RetainUntilDate>2099-01-01T00:00:00Z</RetainUntilDate></Retention>", http.StatusBadRequest, "InvalidRequest",
+		},
+		{
+			"a retention under another root", http.MethodPut, "/vault/missing?retention",
+			map[string]string{"Content-MD5": "x"},
+			"<LegalHold><Status>ON</Status></LegalHold>", http.StatusBadRequest, "MalformedXML",
+		},
+		{"a legal hold without a checksum", http.MethodPut, "/vault/missing?legal-hold", nil, "<LegalHold><Status>ON</Status></LegalHold>", http.StatusBadRequest, "InvalidRequest"},
+		{
+			"a legal hold under another root", http.MethodPut, "/vault/missing?legal-hold",
+			map[string]string{"Content-MD5": "x"},
+			"<Retention><Status>ON</Status></Retention>", http.StatusBadRequest, "MalformedXML",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequestWithContext(t.Context(), tc.method, tc.target, strings.NewReader("x"))
+			req := httptest.NewRequestWithContext(t.Context(), tc.method, tc.target, strings.NewReader(cmp.Or(tc.body, "x")))
 			req.Header.Set("Authorization", authorization)
 			for k, v := range tc.header {
 				req.Header.Set(k, v)
@@ -276,10 +302,14 @@ func TestMultipartAndLockShapes(t *testing.T) {
 			}
 		})
 	}
-	code, _, body = do(t, s, http.MethodPut, "/vault?object-lock", authorization,
-		"<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled><Rule><DefaultRetention><Mode>GOVERNANCE</Mode><Years>1</Years></DefaultRetention></Rule></ObjectLockConfiguration>")
-	if code != http.StatusOK {
-		t.Fatalf("put lock configuration = %d %s", code, body)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPut, "/vault?object-lock", strings.NewReader(
+		"<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled><Rule><DefaultRetention><Mode>GOVERNANCE</Mode><Years>1</Years></DefaultRetention></Rule></ObjectLockConfiguration>"))
+	req.Header.Set("Authorization", authorization)
+	req.Header.Set("Content-MD5", "x")
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("put lock configuration = %d %s", rec.Code, rec.Body)
 	}
 	code, _, body = do(t, s, http.MethodGet, "/vault?object-lock", authorization, "")
 	if code != http.StatusOK || !strings.Contains(body,

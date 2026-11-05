@@ -70,7 +70,8 @@
 //     Uploads of one key list in the order they began, and upload IDs are
 //     32 hex digits; ListMultipartUploads takes S3's prefix, delimiter,
 //     markers and max-uploads, and counts common prefixes toward a page as
-//     ListObjectsV2 does, which is inferred. A part's checksums are not kept, and ListParts and
+//     ListObjectsV2 does, which is inferred. A max-uploads or max-parts
+//     outside 1 to 1000 fails with 400 InvalidArgument, also inferred. A part's checksums are not kept, and ListParts and
 //     ListMultipartUploads report no checksum algorithm; UploadPartCopy and
 //     the If-Match and If-None-Match headers are not supported. Parts are
 //     stored data, which S3 bills until the upload is completed or
@@ -90,8 +91,13 @@
 //     CreateMultipartUpload take a mode and retain-until date together and
 //     a legal hold, on a bucket with Object Lock only (400 InvalidRequest,
 //     inferred). PutObject that sets a retention, explicitly or by default,
-//     needs Content-MD5 or a checksum, as S3 documents; its error message is
-//     inferred. Retention runs by the server's clock ([WithClock]).
+//     needs Content-MD5 or a checksum, as S3 documents, and so does each
+//     UploadPart of an upload that will; the error message is inferred.
+//     PutObjectLockConfiguration, PutObjectRetention and PutObjectLegalHold
+//     need one too, as the SDKs always send, and a body under another root
+//     element fails with MalformedXML. Retention runs by the server's clock
+//     ([WithClock]), and retain-until dates are kept to the millisecond, the
+//     precision S3's timestamps carry.
 //     Deleting a version under an unexpired retention or a legal hold fails
 //     with 403 AccessDenied, key by key in DeleteObjects; its message is
 //     inferred from S3's answers. A COMPLIANCE retention never yields, and a
@@ -101,7 +107,10 @@
 //     fails while any version remains. PutObjectRetention may extend a
 //     retention in the same mode; shortening it, changing its mode or
 //     removing it needs the same bypass, which a COMPLIANCE retention
-//     refuses. A version with no retention or no legal hold answers
+//     refuses. S3 documents the bypass for shortening and removal; that
+//     changing GOVERNANCE to COMPLIANCE needs it too is inferred from
+//     governance mode letting no one alter lock settings without special
+//     permissions. A version with no retention or no legal hold answers
 //     GetObjectRetention or GetObjectLegalHold with 404
 //     NoSuchObjectLockConfiguration, and a call naming a delete marker's
 //     version fails with 405 MethodNotAllowed; both are inferred, as are the

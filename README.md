@@ -367,7 +367,11 @@ For Amazon S3:
   never yields; `GOVERNANCE` yields to `x-amz-bypass-governance-retention`
   from a caller granted `s3:BypassGovernanceRetention`. A delete without a
   version ID adds a delete marker, and `DeleteBucket` fails while any version
-  remains. `SetRetention` and `SetLegalHold` lock a version directly. Event
+  remains. Changing a `GOVERNANCE` retention to `COMPLIANCE` also needs the
+  bypass, which is inferred: S3 documents it only for shortening and removal,
+  but lets no one alter governance lock settings without special permissions.
+  Object Lock writes need Content-MD5 or a checksum, multipart parts
+  included. `SetRetention` and `SetLegalHold` lock a version directly. Event
   holds are not supported.
 - A fault rule's `Resource` is the bucket name, or `bucket/key` for an object
   call. A lost `HeadBucket` breaks off inside its status line, since a sent

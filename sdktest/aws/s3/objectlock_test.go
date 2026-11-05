@@ -354,3 +354,48 @@ func TestRequestPayment(t *testing.T) {
 	}
 	put(t, c, "data", "k", strings.NewReader("k"))
 }
+
+func TestRetentionReadBackIsNotAShortening(t *testing.T) {
+	s := s3.New(s3.WithClock(func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 123456789, time.UTC) }))
+	if _, err := s.PutBucket(s3.Bucket{
+		Name: "vault", Region: "us-east-1", Versioning: "Enabled", ObjectLock: true,
+		DefaultRetention: &s3.DefaultRetention{Mode: "COMPLIANCE", Days: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	c := newClient(t, s, "us-east-1")
+	put(t, c, "vault", "k", strings.NewReader("k"))
+	got, err := c.GetObjectRetention(t.Context(), &awss3.GetObjectRetentionInput{Bucket: aws.String("vault"), Key: aws.String("k")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.PutObjectRetention(t.Context(), &awss3.PutObjectRetentionInput{
+		Bucket: aws.String("vault"), Key: aws.String("k"), Retention: got.Retention,
+	}); err != nil {
+		t.Fatalf("putting back the retention read = %v", err)
+	}
+	if v := s.ObjectVersions("vault"); !v[0].RetainUntil.Equal(time.Date(2026, 1, 2, 0, 0, 0, 123000000, time.UTC)) {
+		t.Fatalf("RetainUntil = %v, want it to the millisecond", v[0].RetainUntil)
+	}
+}
+
+func TestLockedUploadPartsNeedAChecksum(t *testing.T) {
+	s := s3.New()
+	url := serve(t, s)
+	c := clientAt(url, "us-east-1")
+	createLocked(t, c, "vault")
+	out, err := c.CreateMultipartUpload(t.Context(), &awss3.CreateMultipartUploadInput{
+		Bucket: aws.String("vault"), Key: aws.String("k"), ObjectLockLegalHoldStatus: types.ObjectLockLegalHoldStatusOn,
+		ObjectLockMode: types.ObjectLockModeGovernance, ObjectLockRetainUntilDate: aws.Time(time.Now().Add(time.Hour)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bare := clientAt(url, "us-east-1", func(o *awss3.Options) { o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired })
+	if _, err := bare.UploadPart(t.Context(), &awss3.UploadPartInput{
+		Bucket: aws.String("vault"), Key: aws.String("k"), UploadId: out.UploadId, PartNumber: aws.Int32(1), Body: strings.NewReader("x"),
+	}); sdkerr.AWSCode(err) != "InvalidRequest" {
+		t.Fatalf("a part without a checksum = %v, want InvalidRequest", err)
+	}
+	uploadPart(t, c, "vault", "k", aws.ToString(out.UploadId), 1, []byte("x"))
+}

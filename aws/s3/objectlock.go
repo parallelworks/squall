@@ -71,12 +71,40 @@ func noSuchObjectLock() *apiError {
 	return &apiError{Status: http.StatusNotFound, Code: "NoSuchObjectLockConfiguration", Message: "The specified object does not have a ObjectLock configuration"}
 }
 
+// retainUntil keeps a retain-until date to the millisecond, the precision S3's timestamps carry.
+func retainUntil(t time.Time) time.Time { return t.UTC().Truncate(time.Millisecond) }
+
+func lockChecksumMissing() *apiError {
+	return &apiError{
+		Status: http.StatusBadRequest, Code: "InvalidRequest",
+		Message: "Content-MD5 OR x-amz-checksum- HTTP header is required for Put Object requests with Object Lock parameters",
+	}
+}
+
+func checksumMissing() *apiError {
+	return &apiError{Status: http.StatusBadRequest, Code: "InvalidRequest", Message: "Missing required header for this request: Content-MD5"}
+}
+
+// decodeRoot reads an XML request body into v, which must be the root element named root.
+func decodeRoot(c *call, root string, v any) *apiError {
+	if !hasChecksum(c.r.Header) {
+		return checksumMissing()
+	}
+	var head struct{ XMLName xml.Name }
+	if err := decodeXML(c.body, &head); err != nil {
+		return err
+	}
+	if head.XMLName.Local != root {
+		return malformedXML()
+	}
+	return decodeXML(c.body, v)
+}
+
 func retainInPast() *apiError {
 	return invalidArgument("The retain until date must be in the future!")
 }
 
-// protects returns why v may not be deleted now, or nil. With bypass, a
-// governance retention yields to a caller the policy grants s3:BypassGovernanceRetention. The caller holds s.mu.
+// protects returns why v may not be deleted now, or nil. The caller holds s.mu.
 func (s *Server) protects(v *version, bypass bool, method, resource string) *apiError {
 	if !v.deleteMarker && v.lock.hold == legalHoldOn {
 		return objectLocked()
@@ -132,7 +160,7 @@ func (s *Server) lockHeaders(h http.Header) (lockRequest, *apiError) {
 		if !t.After(s.now()) {
 			return lockRequest{}, retainInPast()
 		}
-		l.mode, l.until = mode, t.UTC()
+		l.mode, l.until = mode, retainUntil(t)
 	}
 	switch hold := h.Get("X-Amz-Object-Lock-Legal-Hold"); hold {
 	case "", legalHoldOn, legalHoldOff:
@@ -158,7 +186,7 @@ func (s *Server) applyLock(b *bucket, v *version, l lockRequest) {
 		v.lock.mode, v.lock.until = l.mode, l.until
 	case b.DefaultRetention != nil:
 		d := b.DefaultRetention
-		v.lock.mode, v.lock.until = d.Mode, v.modified.AddDate(d.Years, 0, d.Days)
+		v.lock.mode, v.lock.until = d.Mode, retainUntil(v.modified.AddDate(d.Years, 0, d.Days))
 	}
 	v.lock.hold = l.hold
 }
@@ -226,7 +254,7 @@ func (s *Server) getObjectLockConfiguration(c *call) (*reply, *apiError) {
 
 func (s *Server) putObjectLockConfiguration(c *call) (*reply, *apiError) {
 	var in objectLockConfigurationXML
-	if err := decodeXML(c.body, &in); err != nil {
+	if err := decodeRoot(c, "ObjectLockConfiguration", &in); err != nil {
 		return nil, err
 	}
 	if in.ObjectLockEnabled != "Enabled" {
@@ -332,7 +360,7 @@ func (s *Server) getObjectRetention(c *call) (*reply, *apiError) {
 
 func (s *Server) putObjectRetention(c *call) (*reply, *apiError) {
 	var in retentionXML
-	if err := decodeXML(c.body, &in); err != nil {
+	if err := decodeRoot(c, "Retention", &in); err != nil {
 		return nil, err
 	}
 	if in.EventHold != nil || in.EventHoldDuration != nil {
@@ -350,7 +378,7 @@ func (s *Server) putObjectRetention(c *call) (*reply, *apiError) {
 		if !t.After(s.now()) {
 			return nil, retainInPast()
 		}
-		until = t.UTC()
+		until = retainUntil(t)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -387,7 +415,7 @@ func (s *Server) getObjectLegalHold(c *call) (*reply, *apiError) {
 
 func (s *Server) putObjectLegalHold(c *call) (*reply, *apiError) {
 	var in legalHoldXML
-	if err := decodeXML(c.body, &in); err != nil {
+	if err := decodeRoot(c, "LegalHold", &in); err != nil {
 		return nil, err
 	}
 	if in.Status != legalHoldOn && in.Status != legalHoldOff {
@@ -434,7 +462,7 @@ func (s *Server) SetRetention(bucketName, key, versionID, mode string, until tim
 	}
 	v.lock.mode, v.lock.until = mode, time.Time{}
 	if mode != "" {
-		v.lock.until = until.UTC()
+		v.lock.until = retainUntil(until)
 	}
 	return nil
 }

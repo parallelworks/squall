@@ -148,9 +148,12 @@ func (s *Server) uploadPart(c *call) (*reply, *apiError) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, u, err := s.findUpload(c)
+	b, u, err := s.findUpload(c)
 	if err != nil {
 		return nil, err
+	}
+	if (u.lock.mode != "" || b.DefaultRetention != nil) && !hasChecksum(c.r.Header) {
+		return nil, lockChecksumMissing()
 	}
 	p := Part{Number: n, Size: int64(len(c.body)), ETag: etagOf(c.body), LastModified: s.now().UTC()}
 	u.parts[n] = p
@@ -244,16 +247,16 @@ func (s *Server) abortMultipartUpload(c *call) (*reply, *apiError) {
 	return &reply{status: http.StatusNoContent}, nil
 }
 
-// listLimit reads a listing's page size parameter, which defaults to and is capped at 1000.
+// listLimit reads a listing's page size parameter, from 1 to 1000 and 1000 by default.
 func listLimit(c *call, name string) (int, *apiError) {
 	if !c.query.Has(name) {
 		return maxListed, nil
 	}
 	n, err := strconv.Atoi(c.query.Get(name))
-	if err != nil || n < 0 {
-		return 0, invalidArgument("Provided %s not an integer or within integer range", name)
+	if err != nil || n < 1 || n > maxListed {
+		return 0, invalidArgument("Argument %s must be an integer between 1 and 1000", name)
 	}
-	return min(n, maxListed), nil
+	return n, nil
 }
 
 var listUploadsParams = []string{"prefix", "delimiter", "key-marker", "upload-id-marker", "max-uploads", "encoding-type"}
@@ -328,9 +331,7 @@ func (s *Server) listMultipartUploads(c *call) (*reply, *apiError) {
 		}
 		if count == limit {
 			out.IsTruncated = true
-			if count > 0 {
-				out.NextKeyMarker, out.NextUploadIDMarker = encode(lastEntry), lastID
-			}
+			out.NextKeyMarker, out.NextUploadIDMarker = encode(lastEntry), lastID
 			break
 		}
 		if rolled {
@@ -399,9 +400,7 @@ func (s *Server) listParts(c *call) (*reply, *apiError) {
 		}
 		if len(out.Parts) == limit {
 			out.IsTruncated = true
-			if limit > 0 {
-				out.NextPartNumberMarker = out.Parts[limit-1].PartNumber
-			}
+			out.NextPartNumberMarker = out.Parts[limit-1].PartNumber
 			break
 		}
 		p := u.parts[n]
