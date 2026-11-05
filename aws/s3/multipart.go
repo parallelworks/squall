@@ -266,8 +266,8 @@ type listUploadsXML struct {
 	Bucket             string            `xml:"Bucket"`
 	KeyMarker          string            `xml:"KeyMarker"`
 	UploadIDMarker     string            `xml:"UploadIdMarker"`
-	NextKeyMarker      string            `xml:"NextKeyMarker,omitempty"`
-	NextUploadIDMarker string            `xml:"NextUploadIdMarker,omitempty"`
+	NextKeyMarker      string            `xml:"NextKeyMarker"`
+	NextUploadIDMarker string            `xml:"NextUploadIdMarker"`
 	Prefix             string            `xml:"Prefix"`
 	Delimiter          string            `xml:"Delimiter,omitempty"`
 	MaxUploads         int               `xml:"MaxUploads"`
@@ -324,12 +324,14 @@ func (s *Server) listMultipartUploads(c *call) (*reply, *apiError) {
 				entry, rolled = u.key[:len(prefix)+i+len(delimiter)], true
 			}
 		}
-		if rolled && (entry == keyMarker || count > 0 && lastID == "" && entry == lastEntry) {
+		if rolled && (entry <= keyMarker || count > 0 && lastID == "" && entry == lastEntry) {
 			continue
 		}
 		if count == limit {
 			out.IsTruncated = true
-			out.NextKeyMarker, out.NextUploadIDMarker = encode(lastEntry), lastID
+			if lastID == "" {
+				out.NextKeyMarker, out.NextUploadIDMarker = encode(lastEntry), ""
+			}
 			break
 		}
 		if rolled {
@@ -341,6 +343,7 @@ func (s *Server) listMultipartUploads(c *call) (*reply, *apiError) {
 				StorageClass: "STANDARD", Initiated: u.initiated.Format(timeFormat),
 			})
 			lastEntry, lastID = u.key, u.id
+			out.NextKeyMarker, out.NextUploadIDMarker = encode(u.key), u.id
 		}
 		count++
 	}

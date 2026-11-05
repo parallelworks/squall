@@ -70,7 +70,12 @@
 //     they began, and upload IDs are 32 hex digits. ListMultipartUploads
 //     takes S3's prefix, delimiter, markers and max-uploads, and counts
 //     common prefixes toward a page as ListObjectsV2 does, which is
-//     inferred. Like max-keys, max-uploads and max-parts above 1000 return
+//     inferred. As S3 documents, it leaves out a common prefix not after
+//     key-marker, even one holding later keys, where ListObjectsV2's
+//     start-after keeps it. NextKeyMarker and NextUploadIdMarker name the
+//     last upload listed, as in S3's examples; a truncated page that ends
+//     on a common prefix names that prefix instead, which is inferred.
+//     Like max-keys, max-uploads and max-parts above 1000 return
 //     1000; one below 1 fails with 400 InvalidArgument, which is inferred.
 //     A part's checksums are not kept, and ListParts and
 //     ListMultipartUploads report no checksum algorithm; UploadPartCopy and

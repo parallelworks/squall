@@ -209,8 +209,8 @@ func TestListMultipartUploadsPagesByKeyAndInitiation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(inside.CommonPrefixes) != 2 || aws.ToString(inside.CommonPrefixes[0].Prefix) != "photos/" || len(inside.Uploads) != 0 {
-		t.Fatalf("after a key inside photos/ = uploads %+v, prefixes %+v, want photos/ for photos/2 and videos/", inside.Uploads, inside.CommonPrefixes)
+	if len(inside.CommonPrefixes) != 1 || aws.ToString(inside.CommonPrefixes[0].Prefix) != "videos/" || len(inside.Uploads) != 0 {
+		t.Fatalf("after a key inside photos/ = uploads %+v, prefixes %+v, want only videos/", inside.Uploads, inside.CommonPrefixes)
 	}
 
 	out, err := c.ListMultipartUploads(t.Context(), &awss3.ListMultipartUploadsInput{Bucket: aws.String("data"), Prefix: aws.String("photos/")})

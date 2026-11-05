@@ -352,7 +352,9 @@ func TestRequestPayment(t *testing.T) {
 	}); sdkerr.AWSCode(err) != "MalformedXML" {
 		t.Fatalf("payer Nobody = %v, want MalformedXML", err)
 	}
-	put(t, c, "data", "k", strings.NewReader("k"))
+	if _, err := c.PutObject(t.Context(), &awss3.PutObjectInput{Bucket: aws.String("data"), Key: aws.String("k"), Body: strings.NewReader("k")}); err != nil {
+		t.Fatalf("the owner writing to a Requester Pays bucket = %v", err)
+	}
 }
 
 func TestRetentionReadBackIsNotAShortening(t *testing.T) {

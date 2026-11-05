@@ -239,7 +239,7 @@ func TestMultipartAndLockShapes(t *testing.T) {
 		t.Fatalf("max-uploads 5000 = %d %s, want a page of 1000", code, body)
 	}
 	code, _, body = do(t, s, http.MethodGet, "/vault?uploads&encoding-type=url", authorization, "")
-	if code != http.StatusOK || !strings.Contains(body, `<KeyMarker></KeyMarker><UploadIdMarker></UploadIdMarker><Prefix></Prefix><MaxUploads>1000</MaxUploads>`+
+	if code != http.StatusOK || !strings.Contains(body, `<KeyMarker></KeyMarker><UploadIdMarker></UploadIdMarker><NextKeyMarker>a+b</NextKeyMarker><NextUploadIdMarker>`) || !strings.Contains(body, `</NextUploadIdMarker><Prefix></Prefix><MaxUploads>1000</MaxUploads>`+
 		`<EncodingType>url</EncodingType><IsTruncated>false</IsTruncated><Upload><Key>a+b</Key>`) ||
 		!strings.Contains(body, `<StorageClass>STANDARD</StorageClass><Initiated>`) {
 		t.Fatalf("list uploads = %d %s", code, body)
@@ -339,6 +339,37 @@ func TestMultipartAndLockShapes(t *testing.T) {
 	}
 	if code, _, body = do(t, s, http.MethodPut, "/vault/k", authorization, "x"); code != http.StatusBadRequest || !strings.Contains(body, "<Code>InvalidRequest</Code>") {
 		t.Fatalf("a put under default retention without a checksum = %d %s", code, body)
+	}
+}
+
+func TestListMultipartUploadsNextMarkers(t *testing.T) {
+	s := s3.New()
+	if _, err := s.PutBucket(s3.Bucket{Name: "markers", Region: "us-east-1"}); err != nil {
+		t.Fatal(err)
+	}
+	var sample string
+	for _, key := range []string{"a/1", "sample.jpg", "videos/1"} {
+		up, err := s.CreateMultipartUpload("markers", key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if key == "sample.jpg" {
+			sample = up.UploadID
+		}
+	}
+	code, _, body := do(t, s, http.MethodGet, "/markers?uploads&delimiter=/", authorization, "")
+	if want := "<NextKeyMarker>sample.jpg</NextKeyMarker><NextUploadIdMarker>" + sample + "</NextUploadIdMarker>"; code != http.StatusOK ||
+		!strings.Contains(body, want) || !strings.Contains(body, "<IsTruncated>false</IsTruncated>") {
+		t.Fatalf("an untruncated page = %d %s, want %s", code, body, want)
+	}
+	code, _, body = do(t, s, http.MethodGet, "/markers?uploads&delimiter=/&max-uploads=1", authorization, "")
+	if want := "<NextKeyMarker>a/</NextKeyMarker><NextUploadIdMarker></NextUploadIdMarker>"; code != http.StatusOK ||
+		!strings.Contains(body, want) || !strings.Contains(body, "<IsTruncated>true</IsTruncated>") {
+		t.Fatalf("a page ending on a prefix = %d %s, want %s", code, body, want)
+	}
+	code, _, body = do(t, s, http.MethodGet, "/markers?uploads&delimiter=/&key-marker=a/1", authorization, "")
+	if code != http.StatusOK || strings.Contains(body, "<Prefix>a/</Prefix>") || !strings.Contains(body, "<Prefix>videos/</Prefix>") {
+		t.Fatalf("after a key inside a/ = %d %s, want videos/ and not a/", code, body)
 	}
 }
 
