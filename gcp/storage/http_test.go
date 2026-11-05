@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/parallelworks/squall/gcp/storage"
 )
@@ -160,6 +162,61 @@ func TestRetentionAndRestoreRoutes(t *testing.T) {
 	}
 	if code, body := do(t, s, http.MethodPost, "/storage/v1/b/routes/o/a/restore", "", ""); code != http.StatusBadRequest || !strings.Contains(body, `"reason":"required"`) {
 		t.Fatalf("restore without a generation = %d %s", code, body)
+	}
+}
+
+func TestBucketBodiesWithServerSetFields(t *testing.T) {
+	s := storage.New()
+	code, body := do(t, s, http.MethodPost, "/storage/v1/b?project=p", "application/json",
+		`{"name":"py-off","softDeletePolicy":{"retentionDurationSeconds":0,"effectiveTime":null},"retentionPolicy":{"retentionPeriod":"60","effectiveTime":null,"isLocked":null}}`)
+	if code != http.StatusOK || !strings.Contains(body, `"softDeletePolicy":{"retentionDurationSeconds":"0"}`) {
+		t.Fatalf("insert = %d %s", code, body)
+	}
+	code, body = do(t, s, http.MethodPatch, "/storage/v1/b/py-off", "application/json",
+		`{"retentionPolicy":{"retentionPeriod":"120","effectiveTime":"2020-01-01T00:00:00.000Z","isLocked":false},"softDeletePolicy":{"retentionDurationSeconds":"0","effectiveTime":null}}`)
+	if code != http.StatusOK || !strings.Contains(body, `"retentionPeriod":"120"`) {
+		t.Fatalf("patch = %d %s", code, body)
+	}
+	_, got := do(t, s, http.MethodGet, "/storage/v1/b/py-off", "", "")
+	var fields map[string]any
+	if err := json.Unmarshal([]byte(got), &fields); err != nil {
+		t.Fatal(err)
+	}
+	fields["labels"] = map[string]string{"team": "data"}
+	sent, _ := json.Marshal(fields)
+	if code, body := do(t, s, http.MethodPatch, "/storage/v1/b/py-off", "application/json", string(sent)); code != http.StatusOK || !strings.Contains(body, `"team":"data"`) {
+		t.Fatalf("patch with a get's body = %d %s", code, body)
+	}
+}
+
+func TestSoftDeleteEffectiveTimeOnAMovingClock(t *testing.T) {
+	var mu sync.Mutex
+	now := time.Date(2026, 3, 1, 12, 0, 0, 999_000, time.UTC)
+	s := storage.New(storage.WithClock(func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		now = now.Add(700 * time.Microsecond)
+		return now
+	}))
+	effective := func(body string) string {
+		t.Helper()
+		var b struct {
+			SoftDeletePolicy struct {
+				EffectiveTime string `json:"effectiveTime"`
+			} `json:"softDeletePolicy"`
+		}
+		if err := json.Unmarshal([]byte(body), &b); err != nil {
+			t.Fatal(err)
+		}
+		return b.SoftDeletePolicy.EffectiveTime
+	}
+	_, body := do(t, s, http.MethodPost, "/storage/v1/b?project=p", "application/json", `{"name":"moving"}`)
+	created := effective(body)
+	for _, seconds := range []string{"2592000", "604800", "1209600", "604800"} {
+		_, body = do(t, s, http.MethodPatch, "/storage/v1/b/moving", "application/json", `{"softDeletePolicy":{"retentionDurationSeconds":"`+seconds+`"}}`)
+	}
+	if got := effective(body); got != created {
+		t.Fatalf("effectiveTime = %s, want %s", got, created)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 
 	gcs "cloud.google.com/go/storage"
 	"google.golang.org/api/googleapi"
+	rawstorage "google.golang.org/api/storage/v1"
 
 	"github.com/parallelworks/squall/access"
 	"github.com/parallelworks/squall/gcp/storage"
@@ -115,4 +116,23 @@ func TestPolicyNeedsOverrideToLockUnlockedRetention(t *testing.T) {
 	wantErr(t, "lock with override", err, http.StatusForbidden, "forbidden", "Permission 'storage.objects.overrideUnlockedRetention' denied")
 	_, err = b.Object("a.txt").Update(t.Context(), lock)
 	wantErr(t, "lock without override", err, http.StatusForbidden, "forbidden", "without overriding unlocked retention intent")
+}
+
+func TestPolicyNeedsSetRetentionToRemoveRetention(t *testing.T) {
+	policy := access.Allow("storage.buckets.create", "storage.buckets.enableObjectRetention", "storage.objects.create",
+		"storage.objects.update", "storage.objects.overrideUnlockedRetention")
+	s := storage.New(storage.WithPolicy(policy))
+	url := serve(t, s)
+	c, svc := clientAt(t, url), rawService(t, url)
+	if err := c.Bucket("data").SetObjectRetention(true).Create(t.Context(), project, nil); err != nil {
+		t.Fatal(err)
+	}
+	write(t, c, "data", "a.txt", "one")
+	if _, err := s.SetObjectRetention("data", "a.txt", &storage.Retention{Mode: "Unlocked", RetainUntilTime: time.Now().Add(time.Hour).Format(time.RFC3339)}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := c.Bucket("data").Object("a.txt").OverrideUnlockedRetention(true).Update(t.Context(), gcs.ObjectAttrsToUpdate{Retention: &gcs.ObjectRetention{}})
+	wantErr(t, "remove retention with null", err, http.StatusForbidden, "forbidden", "Permission 'storage.objects.setRetention' denied")
+	_, err = svc.Objects.Update("data", "a.txt", &rawstorage.Object{}).OverrideUnlockedRetention(true).Context(t.Context()).Do()
+	wantErr(t, "remove retention by leaving it out", err, http.StatusForbidden, "forbidden", "Permission 'storage.objects.setRetention' denied")
 }

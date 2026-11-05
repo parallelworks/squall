@@ -59,8 +59,11 @@ func (s *Server) needs(method, resource string, r *http.Request) []string {
 	case "storage.objects.insert":
 		add(s.exists(resource), "storage.objects.delete")
 		add(uploadSetsRetention(r), "storage.objects.setRetention")
-	case "storage.objects.patch", "storage.objects.update":
+	case "storage.objects.patch":
 		add(bodySetsRetention(peekBody(r, maxBody)), "storage.objects.setRetention")
+		add(q.Get("overrideUnlockedRetention") == "true", "storage.objects.overrideUnlockedRetention")
+	case "storage.objects.update":
+		add(bodySetsRetention(peekBody(r, maxBody)) || s.retained(resource), "storage.objects.setRetention")
 		add(q.Get("overrideUnlockedRetention") == "true", "storage.objects.overrideUnlockedRetention")
 	case "storage.objects.restore":
 		add(s.exists(resource), "storage.objects.delete")
@@ -72,14 +75,30 @@ func (s *Server) needs(method, resource string, r *http.Request) []string {
 	return perms
 }
 
-// bodySetsRetention reports whether an object's metadata, as JSON, includes a retention.
+// bodySetsRetention reports whether an object's metadata, as JSON, includes retention, null included.
 func bodySetsRetention(meta []byte) bool {
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(meta, &fields) != nil {
 		return false
 	}
-	retention, ok := fields["retention"]
-	return ok && string(retention) != "null"
+	_, ok := fields["retention"]
+	return ok
+}
+
+// retained reports whether resource, as "b/<bucket>/o/<object>", names a live object with retention.
+func (s *Server) retained(resource string) bool {
+	bucketName, name, ok := strings.Cut(strings.TrimPrefix(resource, "b/"), "/o/")
+	if !ok {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b := s.buckets[bucketName]
+	if b == nil {
+		return false
+	}
+	o := b.liveObject(name)
+	return o != nil && o.Retention != nil
 }
 
 func uploadSetsRetention(r *http.Request) bool {

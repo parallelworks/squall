@@ -793,3 +793,25 @@ func TestUploadIfGenerationNotMatchNeedsALiveObject(t *testing.T) {
 	_, _ = w.Write([]byte("x"))
 	wantErr(t, "an upload with ifGenerationNotMatch and no live object", w.Close(), http.StatusPreconditionFailed, "conditionNotMet", "")
 }
+
+func TestBucketReadModifyWrite(t *testing.T) {
+	s := storage.New()
+	url := serve(t, s)
+	c, svc := clientAt(t, url), rawService(t, url)
+	if err := c.Bucket("rmw-bucket").Create(t.Context(), project, &gcs.BucketAttrs{
+		Location: "us-east1", RetentionPolicy: &gcs.RetentionPolicy{RetentionPeriod: time.Hour},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := svc.Buckets.Get("rmw-bucket").Context(t.Context()).Do()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Labels = map[string]string{"team": "data"}
+	b.SoftDeletePolicy.RetentionDurationSeconds = 0
+	b.SoftDeletePolicy.ForceSendFields = []string{"RetentionDurationSeconds"}
+	got, err := svc.Buckets.Patch("rmw-bucket", b).Context(t.Context()).Do()
+	if err != nil || got.Labels["team"] != "data" || got.SoftDeletePolicy.RetentionDurationSeconds != 0 || got.RetentionPolicy.RetentionPeriod != 3600 {
+		t.Fatalf("patch with a get's body = %+v, %v", got, err)
+	}
+}

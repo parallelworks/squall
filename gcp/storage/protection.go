@@ -63,8 +63,8 @@ func (s *Server) nextRetentionPolicy(b *bucket, in *retentionPolicyInput, remove
 	return &RetentionPolicy{RetentionPeriod: period, EffectiveTime: now, IsLocked: locked}, nil
 }
 
-// nextSoftDeletePolicy is b's soft delete policy after a patch sets it to in. The caller holds s.mu.
-func (s *Server) nextSoftDeletePolicy(b *bucket, in *softDeletePolicyInput) (*SoftDeletePolicy, *apiError) {
+// nextSoftDeletePolicy is b's soft delete policy after a patch at now sets it to in. The caller holds s.mu.
+func nextSoftDeletePolicy(b *bucket, in *softDeletePolicyInput, now time.Time) (*SoftDeletePolicy, *apiError) {
 	if in == nil {
 		return b.SoftDeletePolicy, nil
 	}
@@ -77,7 +77,7 @@ func (s *Server) nextSoftDeletePolicy(b *bucket, in *softDeletePolicyInput) (*So
 	}
 	p := &SoftDeletePolicy{RetentionDurationSeconds: seconds}
 	if seconds > 0 {
-		p.EffectiveTime = effectiveSince(b.softDeleteHistory, seconds, s.now()).UTC().Format(timeFormat)
+		p.EffectiveTime = effectiveSince(b.softDeleteHistory, seconds, now).UTC().Format(timeFormat)
 	}
 	return p, nil
 }
@@ -97,12 +97,14 @@ func effectiveSince(history []policyStep, seconds int64, now time.Time) time.Tim
 	return since
 }
 
-// recordSoftDelete adds b's soft delete duration to its history if it changed. The caller holds s.mu.
-func (s *Server) recordSoftDelete(b *bucket) {
-	seconds := b.SoftDeletePolicy.RetentionDurationSeconds
-	if n := len(b.softDeleteHistory); n == 0 || b.softDeleteHistory[n-1].seconds != seconds {
-		b.softDeleteHistory = append(b.softDeleteHistory, policyStep{seconds: seconds, since: s.now()})
+// recordSoftDelete pushes b's soft delete duration, set at now, onto its history, which strictly increases.
+func recordSoftDelete(b *bucket, now time.Time) {
+	step := policyStep{seconds: b.SoftDeletePolicy.RetentionDurationSeconds, since: now}
+	for n := len(b.softDeleteHistory); n > 0 && b.softDeleteHistory[n-1].seconds >= step.seconds; n-- {
+		step.since = b.softDeleteHistory[n-1].since
+		b.softDeleteHistory = b.softDeleteHistory[:n-1]
 	}
+	b.softDeleteHistory = append(b.softDeleteHistory, step)
 }
 
 func (s *Server) lockRetentionPolicy(r *http.Request) (any, *apiError) {

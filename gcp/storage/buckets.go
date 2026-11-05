@@ -299,11 +299,34 @@ func (v *int64Value) UnmarshalJSON(data []byte) error {
 }
 
 type retentionPolicyInput struct {
-	RetentionPeriod *int64Value `json:"retentionPeriod"`
+	RetentionPeriod *int64Value     `json:"retentionPeriod"`
+	EffectiveTime   json.RawMessage `json:"effectiveTime"`
+	IsLocked        json.RawMessage `json:"isLocked"`
 }
 
 type softDeletePolicyInput struct {
-	RetentionDurationSeconds *int64Value `json:"retentionDurationSeconds"`
+	RetentionDurationSeconds *int64Value     `json:"retentionDurationSeconds"`
+	EffectiveTime            json.RawMessage `json:"effectiveTime"`
+}
+
+// bucketOutputOnly holds the Bucket fields the server sets, which a read-modify-write sends back and which are ignored.
+type bucketOutputOnly struct {
+	Kind            json.RawMessage `json:"kind"`
+	ID              json.RawMessage `json:"id"`
+	SelfLink        json.RawMessage `json:"selfLink"`
+	ProjectNumber   json.RawMessage `json:"projectNumber"`
+	TimeCreated     json.RawMessage `json:"timeCreated"`
+	Updated         json.RawMessage `json:"updated"`
+	Metageneration  json.RawMessage `json:"metageneration"`
+	Etag            json.RawMessage `json:"etag"`
+	LocationType    json.RawMessage `json:"locationType"`
+	Generation      json.RawMessage `json:"generation"`
+	SoftDeleteTime  json.RawMessage `json:"softDeleteTime"`
+	HardDeleteTime  json.RawMessage `json:"hardDeleteTime"`
+	Owner           json.RawMessage `json:"owner"`
+	ObjectRetention json.RawMessage `json:"objectRetention"`
+	SatisfiesPZS    json.RawMessage `json:"satisfiesPZS"`
+	SatisfiesPZI    json.RawMessage `json:"satisfiesPZI"`
 }
 
 // bucketInput is what buckets.insert and buckets.patch take.
@@ -321,6 +344,7 @@ type bucketInput struct {
 	DefaultEventBasedHold *bool                  `json:"defaultEventBasedHold"`
 	SoftDeletePolicy      *softDeletePolicyInput `json:"softDeletePolicy"`
 	Billing               *Billing               `json:"billing"`
+	bucketOutputOnly
 	// Lifecycle is accepted without rules, since the client sends it empty.
 	Lifecycle *struct {
 		Rule []json.RawMessage `json:"rule"`
@@ -472,7 +496,7 @@ func (s *Server) store(b Bucket) (*bucket, *apiError) {
 	}
 	stored := &bucket{Bucket: b, objects: map[string][]*Object{}}
 	stored.Bucket = stored.clone()
-	s.recordSoftDelete(stored)
+	recordSoftDelete(stored, t)
 	s.buckets[b.Name] = stored
 	return stored, nil
 }
@@ -519,10 +543,6 @@ func (s *Server) patchBucket(r *http.Request) (any, *apiError) {
 	if err := in.check(); err != nil {
 		return nil, err
 	}
-	if in.Name != "" || in.Location != "" || in.CustomPlacementConfig != nil || in.RPO != "" {
-		return nil, invalid("squall: a patch may change only labels, versioning, cors, storageClass, encryption, " +
-			"retentionPolicy, defaultEventBasedHold, softDeletePolicy and billing")
-	}
 	cors, err := normalCORS(in.CORS)
 	if err != nil {
 		return nil, err
@@ -543,6 +563,11 @@ func (s *Server) patchBucket(r *http.Request) (any, *apiError) {
 	}
 	if err := checkMatch(r, "ifMetagenerationMatch", "ifMetagenerationNotMatch", b.Metageneration); err != nil {
 		return nil, err
+	}
+	if in.Name != "" && in.Name != b.Name || in.Location != "" && !strings.EqualFold(in.Location, b.Location) || in.RPO != "" && in.RPO != b.RPO ||
+		in.CustomPlacementConfig != nil && (b.CustomPlacementConfig == nil || !slices.Equal(in.CustomPlacementConfig.DataLocations, b.CustomPlacementConfig.DataLocations)) {
+		return nil, invalid("squall: a patch may change only labels, versioning, cors, storageClass, encryption, " +
+			"retentionPolicy, defaultEventBasedHold, softDeletePolicy and billing")
 	}
 	labels := maps.Clone(b.Labels)
 	if labels == nil || cleared("labels") {
@@ -569,7 +594,8 @@ func (s *Server) patchBucket(r *http.Request) (any, *apiError) {
 	if err != nil {
 		return nil, err
 	}
-	softDelete, err := s.nextSoftDeletePolicy(b, in.SoftDeletePolicy)
+	changed := s.now()
+	softDelete, err := nextSoftDeletePolicy(b, in.SoftDeletePolicy, changed)
 	if err != nil {
 		return nil, err
 	}
@@ -577,7 +603,7 @@ func (s *Server) patchBucket(r *http.Request) (any, *apiError) {
 		labels = nil
 	}
 	b.Labels, b.StorageClass, b.RetentionPolicy, b.SoftDeletePolicy = labels, class, retention, softDelete
-	s.recordSoftDelete(b)
+	recordSoftDelete(b, changed)
 	if in.DefaultEventBasedHold != nil {
 		b.DefaultEventBasedHold = *in.DefaultEventBasedHold
 	} else if cleared("defaultEventBasedHold") {

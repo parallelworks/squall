@@ -37,11 +37,15 @@
 //     are rejected with 400, as are ACLs other than private and
 //     projectPrivate. cors, encryption and rpo are recorded, not enforced.
 //     There are no IAM policies on buckets or objects, and no lifecycle,
-//     autoclass, hardDeletePause or hierarchical namespace. buckets.patch has
-//     patch semantics: it merges labels, deleting one set to null, and clears
-//     labels, versioning, cors, encryption, retentionPolicy,
+//     autoclass, hardDeletePause or hierarchical namespace. buckets.patch
+//     has patch semantics: it merges labels, deleting one set to null, and
+//     clears labels, versioning, cors, encryption, retentionPolicy,
 //     defaultEventBasedHold or billing set to null; a null softDeletePolicy
-//     is rejected with 400. Every bucket reports a generation (inferred).
+//     is rejected with 400. Insert and patch ignore the fields the server
+//     sets, effectiveTime and isLocked in the policies included, and a patch
+//     takes name, location, customPlacementConfig and rpo unchanged, so the
+//     body a get returns can be sent back. Every bucket reports a generation
+//     (inferred).
 //   - Objects record their size, MD5 and CRC32C, not their data; a crc32c or
 //     md5Hash in the upload's metadata must match the data. Resumable
 //     uploads, media reads (objects.get with alt=media answers 404), copies,
@@ -76,18 +80,21 @@
 //     message. While an event-based hold is on, an object reports no
 //     retentionExpirationTime, and releasing it starts the object's time in
 //     the bucket again. objects.update replaces every writable field, so
-//     leaving a hold out releases it.
+//     leaving a hold out releases it and leaving retention out removes it,
+//     which fails with 403 for Locked retention and for Unlocked retention
+//     without overrideUnlockedRetention=true.
 //   - enableObjectRetention on buckets.insert reports objectRetention.mode
 //     Enabled, and objects in such a bucket take retention with mode
 //     Unlocked or Locked and a future retainUntilTime, with Cloud Storage's
 //     400s for a missing or invalid one. Unlocked retention can be
 //     shortened, removed or changed to Locked only with
 //     overrideUnlockedRetention=true, and locked retention only extended,
-//     each refused with 403 forbidden; the message for a change to Locked is
-//     inferred. Retention in a bucket without objectRetention fails with 403
-//     forbidden naming storage.objects.setRetention, and retention beside an
-//     event-based hold with 400 invalid (both inferred). The 100-year cap on
-//     retainUntilTime is not checked.
+//     each refused with 403 forbidden; a change to Locked gets the message
+//     for shortening, as no message for it is known (inferred). Retention in
+//     a bucket without objectRetention fails with 403 forbidden naming
+//     storage.objects.setRetention, and retention beside an event-based hold
+//     with 400 invalid (both inferred). The 100-year cap on retainUntilTime
+//     is not checked.
 //   - softDeletePolicy.retentionDurationSeconds is 0, which turns soft
 //     delete off, or 7 to 90 days, and a new bucket keeps deletions for 7
 //     days. Its effectiveTime is when the latest unbroken run of durations
@@ -161,13 +168,14 @@
 // its method's permission, and those its parameters add, as each method's
 // reference lists them: a predefined ACL on a patch needs
 // storage.buckets.setIamPolicy, and an upload that replaces a live object
-// storage.objects.delete, as does a restore that replaces one; retention in
-// an upload or patch needs storage.objects.setRetention, and
+// storage.objects.delete, as does a restore that replaces one; a body that
+// includes retention, even null, needs storage.objects.setRetention, as does
+// an objects.update that removes it by leaving it out (inferred), and
 // overrideUnlockedRetention=true storage.objects.overrideUnlockedRetention.
-// projection=full needs nothing more: Cloud Storage
-// leaves out the ACLs a caller may not read rather than refusing the call,
-// and the official clients ask for it on every get and list. Permissions are
-// not checked against the bucket they act on: a grant covers every bucket.
+// projection=full needs nothing more: Cloud Storage leaves out the ACLs a
+// caller may not read rather than refusing the call, and the official
+// clients ask for it on every get and list. Permissions are not checked
+// against the bucket they act on: a grant covers every bucket.
 //
 // A lost response aborts the handler with [http.ErrAbortHandler] after
 // sending the response header, so the [http.Server] serving it closes the
