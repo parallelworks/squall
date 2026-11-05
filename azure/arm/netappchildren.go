@@ -86,8 +86,8 @@ func netappIDName(k *kind, id string) string {
 func netappResourceName(res *resource) string { return netappIDName(res.kind, res.id) }
 
 // netappParentMissing fails a read under the level l whose parent does not
-// exist with 404 ResourceNotFound naming the parent, as a read under a missing
-// virtual network does. The caller holds s.mu.
+// exist with 404 ResourceNotFound naming the topmost missing ancestor, as a
+// read under a missing virtual network names it. The caller holds s.mu.
 func (s *Server) netappParentMissing(c *call, l *netappLevel) *apiError {
 	if l.parent == nil {
 		return nil
@@ -96,24 +96,33 @@ func (s *Server) netappParentMissing(c *call, l *netappLevel) *apiError {
 	if s.resources[key(parent)] != nil {
 		return nil
 	}
-	_, rest, _ := strings.Cut(parent, "/providers/")
+	prefix, rest, _ := strings.Cut(parent, "/providers/")
 	parts := strings.Split(rest, "/")
-	types := []string{parts[0]}
-	for i := 1; i < len(parts); i += 2 {
+	id, types := prefix+"/providers/"+parts[0], []string{parts[0]}
+	for i := 1; i+1 < len(parts); i += 2 {
+		id += "/" + parts[i] + "/" + parts[i+1]
 		types = append(types, parts[i])
+		if s.resources[key(id)] == nil {
+			break
+		}
 	}
-	return resourceNotFound(strings.Join(types, "/"), netappName(parent), c.val("rg"))
+	return resourceNotFound(strings.Join(types, "/"), netappName(id), c.val("rg"))
 }
 
-// backupVolumeFilter reads a backups list's $filter, which may name the
-// volume whose backups to list as volumeResourceId eq 'id'.
-func backupVolumeFilter(filter string) (string, *apiError) {
-	if strings.TrimSpace(filter) == "" {
+// backupVolumeFilter reads which volume a backups list names, if any: its
+// $filter, or its volumeResourceId parameter, is the volume's resource ID.
+func backupVolumeFilter(c *call) (string, *apiError) {
+	filter, param := strings.TrimSpace(c.query("$filter")), strings.TrimSpace(c.query("volumeResourceId"))
+	if filter != "" && param != "" && key(filter) != key(param) {
+		return "", unsupported("$filter '%s' and volumeResourceId '%s' name different volumes", filter, param)
+	}
+	volume := cmp.Or(filter, param)
+	if volume == "" {
 		return "", nil
 	}
-	volume, rest, err := filterClause(filter, "volumeResourceId")
-	if err != nil || strings.TrimSpace(rest) != "" || volume == "" {
-		return "", unsupported("the $filter '%s' is not supported; use volumeResourceId eq 'id'", filter)
+	if !strings.HasPrefix(key(volume), "/subscriptions/") || !strings.Contains(key(volume), "/providers/microsoft.netapp/netappaccounts/") ||
+		!strings.Contains(key(volume), "/volumes/") || strings.ContainsAny(volume, " '\"") {
+		return "", unsupported("the backups filter '%s' is not supported; give the volume's resource ID", volume)
 	}
 	return volume, nil
 }
@@ -307,42 +316,37 @@ func (s *Server) AddBackup(vault, name, volume string, at time.Time) (string, bo
 
 // AddVolumeGroup adds the volume group name, holding the NetApp volumes with
 // IDs volumes, to the NetApp account with ID id, as a finished create of it
-// does. It returns the group's ID and reports whether the account exists,
-// once any create of it in progress finishes, has not failed and is not being
-// deleted, and has no volume group of that name, and whether each volume
-// exists in the account, is not being deleted, has not failed once any
-// change of it in progress finishes, and is in no other group.
+// does. It returns the group's ID and reports whether the account exists, has
+// not failed, is not being deleted and has no volume group of that name, and
+// whether each volume exists in the account, has not failed, is not being
+// deleted and is in no other group. It checks all of that before finishing
+// any change of the account or volumes in progress, so a refusal leaves them
+// as they were.
 func (s *Server) AddVolumeGroup(id, name string, volumes ...string) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	acct := s.resources[key(id)]
-	if acct == nil || acct.kind != netappAccountKind || acct.state == stateDeleting ||
+	if acct == nil || acct.kind != netappAccountKind || acct.state == stateDeleting || acct.state == stateFailed ||
 		name == "" || strings.Contains(name, "/") || s.resources[key(acct.id+"/volumeGroups/"+name)] != nil {
 		return "", false
 	}
 	seen := map[string]bool{}
 	for _, v := range volumes {
 		vol := s.resources[key(v)]
-		if vol == nil || vol.kind != volumeKind || vol.state == stateDeleting || vol.volumeGroup != "" ||
+		if vol == nil || vol.kind != volumeKind || vol.state == stateDeleting || vol.state == stateFailed || vol.volumeGroup != "" ||
 			!strings.HasPrefix(key(vol.id), key(acct.id)+"/") || seen[key(v)] {
 			return "", false
 		}
 		seen[key(v)] = true
 	}
-	members := make([]*resource, 0, len(volumes))
-	for _, v := range volumes {
-		vol := s.settled(v)
-		if vol == nil || vol.state == stateFailed {
-			return "", false
-		}
-		members = append(members, vol)
-	}
 	res := s.addNetAppChild(id, netappAccountKind, volumeGroupKind, name, s.now())
 	if res == nil {
 		return "", false
 	}
-	for _, vol := range members {
-		vol.volumeGroup = res.id
+	for _, v := range volumes {
+		if vol := s.settled(v); vol != nil {
+			vol.volumeGroup = res.id
+		}
 	}
 	return res.id, true
 }

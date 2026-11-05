@@ -378,10 +378,13 @@ func TestNetAppBackupVaultHoldsBackups(t *testing.T) {
 	if names, err := listed(nil); err != nil || !slices.Equal(names, []string{"acct/vault/b1", "acct/vault/b2"}) {
 		t.Fatalf("backups of the vault = %v, %v", names, err)
 	}
-	if names, err := listed(new("volumeResourceId eq '" + strings.ToUpper(other) + "'")); err != nil || !slices.Equal(names, []string{"acct/vault/b2"}) {
+	if names, err := listed(vol.ID); err != nil || !slices.Equal(names, []string{"acct/vault/b1"}) {
 		t.Fatalf("backups of one volume = %v, %v", names, err)
 	}
-	for _, f := range []string{"backupType eq 'Manual'", "volumeResourceId eq '" + other + "' and label eq 'x'", "volumeResourceId ne 'x'"} {
+	if names, err := listed(new(strings.ToUpper(other))); err != nil || !slices.Equal(names, []string{"acct/vault/b2"}) {
+		t.Fatalf("backups of a volume named in upper case = %v, %v", names, err)
+	}
+	for _, f := range []string{"backupType eq 'Manual'", "volumeResourceId eq '" + other + "'", "vol"} {
 		if _, err := listed(new(f)); code(err) != "BadRequest" || status(err) != http.StatusBadRequest {
 			t.Fatalf("backups listed with $filter %s = %v", f, err)
 		}
@@ -660,7 +663,7 @@ func TestNetAppGroupDeletionTakesAccountChildren(t *testing.T) {
 }
 
 func TestNetAppAddVolumeGroupLeavesVolumesAlone(t *testing.T) {
-	c := setup(t, arm.WithSettleAfter(100))
+	c := setup(t, arm.WithSettleAfter(2))
 	c.createGroup(t, group, nil)
 	vol, err := c.createVolume(t, "acct", "pool", "vol")
 	if err != nil {
@@ -675,5 +678,33 @@ func TestNetAppAddVolumeGroupLeavesVolumesAlone(t *testing.T) {
 	got, err := c.volumes.Get(t.Context(), group, "acct", "pool", "vol", nil)
 	if err != nil || *got.Properties.ProvisioningState != "Deleting" {
 		t.Fatalf("a volume being deleted after AddVolumeGroup = %+v, %v", got.Properties, err)
+	}
+}
+
+func TestNetAppReadsUnderMissingParents(t *testing.T) {
+	c := setup(t)
+	c.createGroup(t, group, nil)
+	missing := func(what, parent string, err error) {
+		t.Helper()
+		if code(err) != "ResourceNotFound" || status(err) != http.StatusNotFound || !strings.Contains(err.Error(), "'"+parent+"'") {
+			t.Fatalf("%s = %v, want ResourceNotFound naming %s", what, err, parent)
+		}
+	}
+	_, err := c.pools.NewListPager(group, "acct", nil).NextPage(t.Context())
+	missing("pools of a missing account", "Microsoft.NetApp/netAppAccounts/acct", err)
+	_, err = c.volSnaps.NewListPager(group, "acct", "pool", "vol", nil).NextPage(t.Context())
+	missing("snapshots under a missing account", "Microsoft.NetApp/netAppAccounts/acct", err)
+	c.createNetAppAccount(t, "acct")
+	_, err = c.volumes.NewListPager(group, "acct", "pool", nil).NextPage(t.Context())
+	missing("volumes of a missing pool", "Microsoft.NetApp/netAppAccounts/capacityPools/acct/pool", err)
+	_, err = c.volumes.Get(t.Context(), group, "acct", "pool", "vol", nil)
+	missing("a volume of a missing pool", "Microsoft.NetApp/netAppAccounts/capacityPools/acct/pool", err)
+	if _, err := c.createVolume(t, "acct", "pool", "vol"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.volSnaps.NewListPager(group, "acct", "pool", "other", nil).NextPage(t.Context())
+	missing("snapshots of a missing volume", "Microsoft.NetApp/netAppAccounts/capacityPools/volumes/acct/pool/other", err)
+	if page, err := c.pools.NewListPager(group, "acct", nil).NextPage(t.Context()); err != nil || len(page.Value) != 1 {
+		t.Fatalf("pools of the account = %+v, %v", page.Value, err)
 	}
 }

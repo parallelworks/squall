@@ -678,45 +678,47 @@
 //     their group's resources, which is inferred. Snapshot updates and
 //     restores are not served. [Server.SnapshotVolume] adds a snapshot
 //     directly.
-//   - A NetApp account's backup vaults, backup policies, snapshot policies
-//     and volume groups, and a pool's caches, report systemData as volumes
-//     do. NetApp names a volume group by its own name, and the others after
-//     the resources that hold them, such as account/vault, as the API's
-//     examples show. Their creates are long-running like other NetApp
-//     writes, except a snapshot policy's, which answers 201, or 200 for an
-//     update, at once, as the client expects. A volume group answers 201 for
-//     an update too, as the client accepts only 201, which is inferred.
-//     A get or list of any NetApp resource under a parent that does not
-//     exist fails with 404 ResourceNotFound naming the parent, as one under a
-//     missing virtual network does, which is inferred; a list under one with
-//     none lists none. Deleting an account that holds any of them, or a pool that
+//   - A NetApp account's backup vaults, backup policies, snapshot policies and
+//     volume groups, and a pool's caches, report systemData as volumes do.
+//     NetApp names a volume group by its own name, and the others after the
+//     resources that hold them, such as account/vault, as the API's examples
+//     show. Their creates are long-running like other NetApp writes, except a
+//     snapshot policy's, which answers 201, or 200 for an update, at once, as
+//     the client expects. A volume group answers 201 for an update too, as the
+//     client accepts only 201, which is inferred. A get or list of any NetApp
+//     resource under a parent that does not exist fails with 404
+//     ResourceNotFound naming the topmost missing one, as one under a missing
+//     virtual network does, which is inferred; a list under one with none
+//     lists none. Deleting an account that holds any of them, or a pool that
 //     holds a cache, fails with 409 CannotDeleteResource, as an account with
 //     pools does; that Azure refuses it is inferred. Deleting a backup vault
 //     that holds backups fails the same way, as Microsoft documents a vault
 //     must be emptied first; the status and code are inferred. Deleting a
-//     backup vault or snapshot policy that a volume's dataProtection names,
-//     or a volume group that holds volumes, fails the same way, as Microsoft
+//     backup vault or snapshot policy that a volume's dataProtection names, or
+//     a volume group that holds volumes, fails the same way, as Microsoft
 //     documents each must be unassigned or emptied first; deleting a backup
-//     policy a volume names fails too, which is inferred. The status, code
-//     and message of all three are inferred. A backup policy shows a
+//     policy a volume names fails too, which is inferred. The status, code and
+//     message of all three are inferred. A backup policy shows a
 //     backupPolicyId and volumesAssigned, the volumes that name it;
 //     volumeBackups is not shown. A volume group's groupMetaData shows
-//     volumesCount, the volumes it holds. A volume group that lists volumes fails
-//     with 400, as creating volumes with their group is not modeled, and one
-//     that sends tags does too, as the API gives it none.
+//     volumesCount, the volumes it holds. A volume group that lists volumes
+//     fails with 400, as creating volumes with their group is not modeled, and
+//     one that sends tags does too, as the API gives it none.
 //     [Server.AddVolumeGroup] puts existing volumes in a group, which then
 //     lists them and each shows its volumeGroupName. A cache needs
 //     cacheSubnetResourceId, encryptionKeySource, filePath,
 //     originClusterInformation, peeringSubnetResourceId and size, as the API
 //     requires, and a new one shows a mount target with an address in its
-//     cache subnet; its cacheState, cluster peering, write-back and the
-//     calls beyond create, get, list and delete are not modeled. Backups are
-//     not created through the API; [Server.AddBackup] adds one to a vault,
-//     showing backupId, creationDate, completionDate and volumeResourceId,
-//     and it outlives its volume, as Microsoft documents. A backups list takes
-//     the $filter volumeResourceId eq 'id', which lists that volume's
-//     backups, and rejects any other with 400. Which backup may be deleted is
-//     not checked. [Server.AddBackupVault],
+//     cache subnet; its cacheState, cluster peering, write-back and the calls
+//     beyond create, get, list and delete are not modeled. Backups are not
+//     created through the API; [Server.AddBackup] adds one to a vault, showing
+//     backupId, creationDate, completionDate and volumeResourceId, and it
+//     outlives its volume, as Microsoft documents. A backups list's $filter is
+//     a volume's resource ID, compared without regard to case, and lists that
+//     volume's backups, as Microsoft's PowerShell cmdlet and its recorded
+//     tests send it; a volumeResourceId parameter, which Microsoft's .NET
+//     client sends instead, does the same. Any other filter fails with 400.
+//     Which backup may be deleted is not checked. [Server.AddBackupVault],
 //     [Server.AddBackupPolicy], [Server.AddSnapshotPolicy] and
 //     [Server.AddCache] add the others directly.
 //   - A Managed Lustre change in progress answers with an

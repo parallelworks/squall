@@ -246,7 +246,7 @@ func (s *Server) listNetApp(l *netappLevel) handler {
 			items = slices.DeleteFunc(items, func(res *resource) bool { return !strings.HasPrefix(key(res.id), prefix) })
 		}
 		if l.kind == netappBackupKind {
-			volume, err := backupVolumeFilter(c.query("$filter"))
+			volume, err := backupVolumeFilter(c)
 			if err != nil {
 				return nil, err
 			}

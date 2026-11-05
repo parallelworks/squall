@@ -722,24 +722,26 @@ For Azure Resource Manager:
   `SnapshotVolume` adds a snapshot directly, at a time the test chooses.
 - An Azure NetApp Files account's backup vaults, backup policies, snapshot
   policies and volume groups, and a capacity pool's caches, are created
-  (long-running, except a snapshot policy's, as the API has it), read,
-  listed and deleted, with `systemData` and, where the API has them, tags.
-  A get or list of any NetApp resource under a parent that does not exist
-  fails with 404 `ResourceNotFound` naming the parent, as one under a
-  missing virtual network does (inferred). Deleting an account that holds
-  any of them or a pool that holds a cache (inferred), a backup vault that
-  holds backups (Microsoft documents it must be emptied first), a snapshot
-  policy or vault a volume's `dataProtection` names or a volume group that
-  holds volumes (documented), or a backup policy a volume names (inferred)
-  fails with 409 `CannotDeleteResource` (status and code inferred). Volume groups that
-  create volumes are rejected with 400 as not modeled; `AddVolumeGroup`
-  puts existing volumes in a group instead. A cache takes an address in its
-  cache subnet; its peering, `cacheState` and write-back are not modeled.
-  Backups are not created through the API: `AddBackup` adds one to a vault,
-  and it outlives its volume, as Microsoft documents. A backups list takes
-  `$filter=volumeResourceId eq '<id>'` and rejects any other filter with 400. `AddBackupVault`,
-  `AddBackupPolicy`, `AddSnapshotPolicy` and `AddCache` add the rest
-  directly.
+  (long-running, except a snapshot policy's, as the API has it), read, listed
+  and deleted, with `systemData` and, where the API has them, tags. A get or
+  list of any NetApp resource under a parent that does not exist fails with
+  404 `ResourceNotFound` naming the topmost missing one, as one under a
+  missing virtual network does (inferred). Deleting an account that holds any
+  of them or a pool that holds a cache (inferred), a backup vault that holds
+  backups (Microsoft documents it must be emptied first), a snapshot policy or
+  vault a volume's `dataProtection` names or a volume group that holds volumes
+  (documented), or a backup policy a volume names (inferred) fails with 409
+  `CannotDeleteResource` (status and code inferred). Volume groups that create
+  volumes are rejected with 400 as not modeled; `AddVolumeGroup` puts existing
+  volumes in a group instead. A cache takes an address in its cache subnet;
+  its peering, `cacheState` and write-back are not modeled. Backups are not
+  created through the API: `AddBackup` adds one to a vault, and it outlives
+  its volume, as Microsoft documents. A backups list's `$filter` is a volume's
+  resource ID (case-insensitive), as Microsoft's PowerShell cmdlet and its
+  recorded tests send it, and the `volumeResourceId` parameter Microsoft's
+  .NET client sends works the same; any other filter is rejected with 400.
+  `AddBackupVault`, `AddBackupPolicy`, `AddSnapshotPolicy` and `AddCache` add
+  the rest directly.
 - Fault method names are the Azure RBAC action, such as
   `Microsoft.Compute/virtualMachines/write`, and a rule's `Resource` is the
   resource ID in the call's path. Blob service faults name the operation,

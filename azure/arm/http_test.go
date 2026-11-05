@@ -874,4 +874,28 @@ func TestNetAppAccountChildShapes(t *testing.T) {
 	if rec, out := do(t, s, http.MethodPut, acct+"/backupVaults/v/backups/b", `{"properties":{}}`); rec.Code != http.StatusNotFound {
 		t.Errorf("a backup put = %d %v", rec.Code, out)
 	}
+	if rec, out := do(t, s, http.MethodPut, acct+"/backupVaults/v", `{"location":"eastus"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("a backup vault = %d %v", rec.Code, out)
+	}
+	vol := acct + "/capacityPools/p/volumes/v"
+	for i, v := range []string{vol, vol + "x"} {
+		if _, ok := s.AddBackup(acct+"/backupVaults/v", fmt.Sprint("b", i), v, time.Now()); !ok {
+			t.Fatalf("AddBackup of %s failed", v)
+		}
+	}
+	for _, tc := range []struct {
+		query string
+		want  int
+	}{
+		{"volumeResourceId=" + url.QueryEscape(vol), 1},
+		{"volumeResourceId=" + url.QueryEscape(vol) + "&$filter=" + url.QueryEscape(strings.ToUpper(vol)), 1},
+		{"volumeResourceId=" + url.QueryEscape(vol) + "&$filter=" + url.QueryEscape(vol+"x"), -1},
+		{"volumeResourceId=v", -1},
+	} {
+		rec, out := do(t, s, http.MethodGet, acct+"/backupVaults/v/backups?api-version=2024-01-01&"+tc.query, "")
+		value, _ := out["value"].([]any)
+		if tc.want < 0 && rec.Code != http.StatusBadRequest || tc.want >= 0 && (rec.Code != http.StatusOK || len(value) != tc.want) {
+			t.Errorf("backups listed with %s = %d %v", tc.query, rec.Code, out)
+		}
+	}
 }
