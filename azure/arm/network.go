@@ -530,6 +530,8 @@ func (s *Server) checkUnused(res *resource) *apiError {
 		return s.lbInUse(res)
 	case netappAccountKind, poolKind, galleryKind, galleryImageKind:
 		return s.nestedInUse(res)
+	case backupVaultKind, backupPolicyKind, snapshotPolicyKind, volumeGroupKind:
+		return s.netappChildInUse(res)
 	case diskKind:
 		if res.disk.vm != "" {
 			return diskAttached(res.name, res.disk.vm)

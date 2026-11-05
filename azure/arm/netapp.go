@@ -2,6 +2,7 @@ package arm
 
 import (
 	"cmp"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -88,7 +89,7 @@ func netappOps(c *call, location string) opPaths {
 	return opPaths{status: path, result: path, resultStatus: http.StatusOK}
 }
 
-// netappLevel is a NetApp resource type: accounts, capacity pools, volumes or snapshots.
+// netappLevel is a NetApp resource type, such as accounts, capacity pools or volumes.
 type netappLevel struct {
 	kind    *kind
 	path    string
@@ -99,6 +100,10 @@ type netappLevel struct {
 	updatedStatus int
 	// syncUpdate finishes a put to an existing one before answering.
 	syncUpdate bool
+	// sync finishes a put before answering.
+	sync bool
+	// readOnly types are not created through the API.
+	readOnly bool
 }
 
 var netappLevels = []*netappLevel{
@@ -109,6 +114,15 @@ var netappLevels = []*netappLevel{
 		kind: netappSnapshotKind, path: netappSnapshot, id: netappSnapshotID, parent: volumeID,
 		prepare: (*Server).prepareNetAppSnapshot, updatedStatus: http.StatusCreated, syncUpdate: true,
 	},
+	{kind: backupVaultKind, path: backupVaultPath, id: backupVaultID, parent: netappAccountID},
+	{kind: netappBackupKind, path: netappBackupPath, id: netappBackupID, parent: backupVaultID, readOnly: true},
+	{kind: backupPolicyKind, path: backupPolicyPath, id: backupPolicyID, parent: netappAccountID},
+	{kind: snapshotPolicyKind, path: snapshotPolicyPath, id: snapshotPolicyID, parent: netappAccountID, sync: true},
+	{
+		kind: volumeGroupKind, path: volumeGroupPath, id: volumeGroupID, parent: netappAccountID,
+		prepare: (*Server).prepareVolumeGroup, updatedStatus: http.StatusCreated,
+	},
+	{kind: cacheKind, path: cachePath, id: cacheID, parent: poolID, prepare: (*Server).prepareCache},
 }
 
 func (s *Server) registerNetAppRoutes() {
@@ -116,7 +130,9 @@ func (s *Server) registerNetAppRoutes() {
 		s.onePathOperation(resultLocation, s.netappOperation))
 	for _, l := range netappLevels {
 		s.add("GET", l.path[:strings.LastIndex(l.path, "/")], l.kind.action("read"), false, s.listNetApp(l))
-		s.add("PUT", l.path, l.kind.action("write"), true, s.putNetApp(l))
+		if !l.readOnly {
+			s.add("PUT", l.path, l.kind.action("write"), true, s.putNetApp(l))
+		}
 		s.add("GET", l.path, l.kind.action("read"), false, s.getNetApp(l))
 		s.add("DELETE", l.path, l.kind.action("delete"), true, s.deleteNetApp(l))
 	}
@@ -124,11 +140,11 @@ func (s *Server) registerNetAppRoutes() {
 
 func (s *Server) putNetApp(l *netappLevel) handler {
 	spec := putSpec{
-		kind: l.kind, id: l.id, parent: l.parent, paths: netappOps, render: renderNetApp,
-		updatedStatus: l.updatedStatus, syncUpdate: l.syncUpdate,
+		kind: l.kind, id: l.id, parent: l.parent, paths: netappOps, render: s.renderNetApp,
+		updatedStatus: l.updatedStatus, syncUpdate: l.syncUpdate, sync: l.sync,
 	}
 	spec.prepare = func(res *resource, p *parsed) (func(), *apiError) {
-		res.name = netappName(res.id)
+		res.name = netappResourceName(res)
 		if l.prepare == nil {
 			return func() { s.update(res, p) }, nil
 		}
@@ -202,12 +218,15 @@ func (s *Server) getNetApp(l *netappLevel) handler {
 		if err := s.readableGroup(c); err != nil {
 			return nil, err
 		}
+		if err := s.netappParentMissing(c, l); err != nil {
+			return nil, err
+		}
 		id := l.id(c)
 		res := s.read(id)
 		if res == nil || res.kind != l.kind {
-			return nil, resourceNotFound(l.kind.typ, netappName(id), c.val("rg"))
+			return nil, resourceNotFound(l.kind.typ, netappIDName(l.kind, id), c.val("rg"))
 		}
-		return ok200(renderNetApp(res)), nil
+		return ok200(s.renderNetApp(res)), nil
 	}
 }
 
@@ -218,12 +237,24 @@ func (s *Server) listNetApp(l *netappLevel) handler {
 		if err := s.readableGroup(c); err != nil {
 			return nil, err
 		}
+		if err := s.netappParentMissing(c, l); err != nil {
+			return nil, err
+		}
 		items := s.listed(c, l.kind)
 		if l.parent != nil {
 			prefix := key(l.parent(c)) + "/"
 			items = slices.DeleteFunc(items, func(res *resource) bool { return !strings.HasPrefix(key(res.id), prefix) })
 		}
-		return ok(listBody(items, func(res *resource) any { return renderNetApp(res) })), nil
+		if l.kind == netappBackupKind {
+			volume, err := backupVolumeFilter(c)
+			if err != nil {
+				return nil, err
+			}
+			if volume != "" {
+				items = slices.DeleteFunc(items, func(res *resource) bool { return key(str(res.props, "volumeResourceId")) != key(volume) })
+			}
+		}
+		return ok(listBody(items, func(res *resource) any { return s.renderNetAppListed(res) })), nil
 	}
 }
 
@@ -279,10 +310,23 @@ func (s *Server) nestedInUse(res *resource) *apiError {
 	return nil
 }
 
-func renderNetApp(res *resource) map[string]any {
+func (s *Server) renderNetApp(res *resource) map[string]any {
 	m, props := envelope(res)
-	m["name"] = netappName(res.id)
+	m["name"] = netappResourceName(res)
 	m["systemData"] = systemData(res)
+	switch res.kind {
+	case volumeGroupKind:
+		vols := s.renderGroupVolumes(res)
+		meta, _ := props["groupMetaData"].(map[string]any)
+		meta = maps.Clone(meta)
+		if meta == nil {
+			meta = map[string]any{}
+		}
+		meta["volumesCount"] = len(vols)
+		props["volumes"], props["groupMetaData"] = vols, meta
+	case backupPolicyKind:
+		props["volumesAssigned"] = len(s.volumesNaming(res.id, "backup", "backupPolicyId"))
+	}
 	if res.state == stateCreating {
 		return m
 	}
@@ -297,6 +341,17 @@ func renderNetApp(res *resource) map[string]any {
 			props["mountTargets"] = []any{map[string]any{
 				"mountTargetId": res.guid, "fileSystemId": res.guid, "ipAddress": res.held.address.String(),
 			}}
+		}
+		if g := s.resources[key(res.volumeGroup)]; g != nil && g.kind == volumeGroupKind {
+			props["volumeGroupName"] = g.name
+		}
+	case backupPolicyKind:
+		props["backupPolicyId"] = res.guid
+	case netappBackupKind:
+		props["backupId"], props["creationDate"], props["completionDate"] = res.guid, timestamp(res.created), timestamp(res.created)
+	case cacheKind:
+		if res.held != nil {
+			props["mountTargets"] = []any{map[string]any{"mountTargetId": res.guid, "ipAddress": res.held.address.String()}}
 		}
 	}
 	return m

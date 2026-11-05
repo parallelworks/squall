@@ -22,7 +22,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/costmanagement/armcostmanagement/v3"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/keyvault/armkeyvault"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/machinelearning/armmachinelearning/v4"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/netapp/armnetapp/v6"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/netapp/armnetapp/v10"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v9"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/operationalinsights/armoperationalinsights/v3"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/privatedns/armprivatedns"
@@ -87,6 +87,7 @@ type clients struct {
 	pools       *armnetapp.PoolsClient
 	volumes     *armnetapp.VolumesClient
 	volSnaps    *armnetapp.SnapshotsClient
+	anf         *armnetapp.ClientFactory
 	lustre      *armstoragecache.AmlFilesystemsClient
 	cache       *armstoragecache.ManagementClient
 	cognitive   *armcognitiveservices.AccountsClient
@@ -214,7 +215,7 @@ func setupWith(t *testing.T, retry policy.RetryOptions, opts ...arm.Option) *cli
 		files: store.NewFileServicesClient(), shares: store.NewFileSharesClient(), endpoints: network.NewPrivateEndpointsClient(),
 		queues: store.NewQueueClient(), tables: store.NewTableClient(), queueSvc: store.NewQueueServicesClient(),
 		netapps: netapp.NewAccountsClient(), pools: netapp.NewPoolsClient(), volumes: netapp.NewVolumesClient(),
-		volSnaps: netapp.NewSnapshotsClient(), lustre: cache.NewAmlFilesystemsClient(), cache: cache.NewManagementClient(),
+		volSnaps: netapp.NewSnapshotsClient(), anf: netapp, lustre: cache.NewAmlFilesystemsClient(), cache: cache.NewManagementClient(),
 		cognitive: cog.NewAccountsClient(), deployments: cog.NewDeploymentsClient(), deleted: cog.NewDeletedAccountsClient(),
 		capacities: cog.NewModelCapacitiesClient(), search: search.NewServicesClient(), searchKeys: search.NewAdminKeysClient(),
 		vaults: keyvault.NewVaultsClient(), components: insights.NewComponentsClient(), workspaces: ml.NewWorkspacesClient(),

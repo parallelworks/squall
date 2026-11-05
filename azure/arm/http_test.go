@@ -844,3 +844,61 @@ func TestNetAppSnapshotShapes(t *testing.T) {
 		}
 	}
 }
+
+func TestNetAppAccountChildShapes(t *testing.T) {
+	s := arm.New()
+	newGroup(t, s)
+	acct := groupPath + "/providers/Microsoft.NetApp/netAppAccounts/a"
+	rec, out := do(t, s, http.MethodGet, acct+"/backupVaults", "")
+	e, _ := out["error"].(map[string]any)
+	if rec.Code != http.StatusNotFound || e["code"] != "ResourceNotFound" ||
+		e["message"] != "The Resource 'Microsoft.NetApp/netAppAccounts/a' under resource group 'rg' was not found. For more details please go to https://aka.ms/ARMResourceNotFoundFix" {
+		t.Errorf("listing vaults of a missing account = %d %v", rec.Code, out)
+	}
+	if rec, out := do(t, s, http.MethodPut, acct, `{"location":"eastus"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("PUT %s = %d %v", acct, rec.Code, out)
+	}
+	if rec, out := do(t, s, http.MethodPut, acct+"/volumeGroups/g", `{"location":"eastus","tags":{"k":"v"}}`); rec.Code != http.StatusBadRequest {
+		t.Errorf("a volume group with tags = %d %v", rec.Code, out)
+	}
+	if rec, out := do(t, s, http.MethodPut, acct+"/volumeGroups/g", `{"location":"eastus","properties":{"volumes":{}}}`); rec.Code != http.StatusBadRequest {
+		t.Errorf("a volume group whose volumes is not a list = %d %v", rec.Code, out)
+	}
+	rec, out = do(t, s, http.MethodPut, acct+"/snapshotPolicies/p", `{"location":"eastus","properties":{"enabled":true}}`)
+	if rec.Code != http.StatusCreated || out["name"] != "a/p" || rec.Header().Get("Azure-AsyncOperation") != "" {
+		t.Errorf("a new snapshot policy = %d %v", rec.Code, out)
+	}
+	if rec, out := do(t, s, http.MethodPut, acct+"/snapshotPolicies/p", `{"location":"eastus","properties":{"enabled":false}}`); rec.Code != http.StatusOK {
+		t.Errorf("an updated snapshot policy = %d %v", rec.Code, out)
+	}
+	if rec, out := do(t, s, http.MethodPut, acct+"/backupVaults/v/backups/b", `{"properties":{}}`); rec.Code != http.StatusNotFound {
+		t.Errorf("a backup put = %d %v", rec.Code, out)
+	}
+	if rec, out := do(t, s, http.MethodPut, acct+"/backupVaults/v", `{"location":"eastus"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("a backup vault = %d %v", rec.Code, out)
+	}
+	vol := acct + "/capacityPools/p/volumes/v"
+	for i, v := range []string{vol, vol + "x"} {
+		if _, ok := s.AddBackup(acct+"/backupVaults/v", fmt.Sprint("b", i), v, time.Now()); !ok {
+			t.Fatalf("AddBackup of %s failed", v)
+		}
+	}
+	for _, tc := range []struct {
+		query string
+		want  int
+	}{
+		{"volumeResourceId=" + url.QueryEscape(vol), 1},
+		{"volumeResourceId=" + url.QueryEscape(vol) + "&$filter=" + url.QueryEscape(strings.ToUpper(vol)), 1},
+		{"volumeResourceId=" + url.QueryEscape(vol) + "&$filter=" + url.QueryEscape(vol+"x"), -1},
+		{"volumeResourceId=v", -1},
+		{"volumeResourceId=" + url.QueryEscape(vol) + "&volumeResourceId=" + url.QueryEscape(vol), -1},
+		{"$filter=" + url.QueryEscape(vol) + "&$filter=" + url.QueryEscape(vol), -1},
+		{"volumeResourceId=" + url.QueryEscape(vol) + "&$filter=" + url.QueryEscape("volumeResourceId eq 'x'"), -1},
+	} {
+		rec, out := do(t, s, http.MethodGet, acct+"/backupVaults/v/backups?api-version=2024-01-01&"+tc.query, "")
+		value, _ := out["value"].([]any)
+		if tc.want < 0 && rec.Code != http.StatusBadRequest || tc.want >= 0 && (rec.Code != http.StatusOK || len(value) != tc.want) {
+			t.Errorf("backups listed with %s = %d %v", tc.query, rec.Code, out)
+		}
+	}
+}
