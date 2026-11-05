@@ -223,6 +223,74 @@ func TestHostileBodies(t *testing.T) {
 	}
 }
 
+func TestMultipartAndLockShapes(t *testing.T) {
+	s := s3.New()
+	if _, err := s.PutBucket(s3.Bucket{Name: "vault", Region: "us-east-1", Versioning: "Enabled", ObjectLock: true}); err != nil {
+		t.Fatal(err)
+	}
+	code, _, body := do(t, s, http.MethodPost, "/vault/a%20b?uploads", authorization, "")
+	if code != http.StatusOK || !strings.Contains(body,
+		`<InitiateMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Bucket>vault</Bucket><Key>a b</Key><UploadId>`) {
+		t.Fatalf("create upload = %d %s", code, body)
+	}
+	code, _, body = do(t, s, http.MethodGet, "/vault?uploads&encoding-type=url", authorization, "")
+	if code != http.StatusOK || !strings.Contains(body, `<KeyMarker></KeyMarker><UploadIdMarker></UploadIdMarker><Prefix></Prefix><MaxUploads>1000</MaxUploads>`+
+		`<EncodingType>url</EncodingType><IsTruncated>false</IsTruncated><Upload><Key>a+b</Key>`) ||
+		!strings.Contains(body, `<StorageClass>STANDARD</StorageClass><Initiated>`) {
+		t.Fatalf("list uploads = %d %s", code, body)
+	}
+	for _, tc := range []struct {
+		name, method, target string
+		header               map[string]string
+		status               int
+		code                 string
+	}{
+		{"a retention without a checksum", http.MethodPut, "/vault/k", map[string]string{
+			"x-amz-object-lock-mode": "GOVERNANCE", "x-amz-object-lock-retain-until-date": "2099-01-01T00:00:00Z",
+		}, http.StatusBadRequest, "InvalidRequest"},
+		{"a mode without a date", http.MethodPut, "/vault/k", map[string]string{"x-amz-object-lock-mode": "GOVERNANCE"}, http.StatusBadRequest, "InvalidArgument"},
+		{"an unknown mode", http.MethodPut, "/vault/k", map[string]string{
+			"x-amz-object-lock-mode": "STRICT", "x-amz-object-lock-retain-until-date": "2099-01-01T00:00:00Z",
+		}, http.StatusBadRequest, "InvalidArgument"},
+		{"a date in the past", http.MethodPut, "/vault/k", map[string]string{
+			"x-amz-object-lock-mode": "GOVERNANCE", "x-amz-object-lock-retain-until-date": "2000-01-01T00:00:00Z", "Content-MD5": "x",
+		}, http.StatusBadRequest, "InvalidArgument"},
+		{"a bad legal hold", http.MethodPut, "/vault/k", map[string]string{"x-amz-object-lock-legal-hold": "on"}, http.StatusBadRequest, "InvalidArgument"},
+		{"an event hold", http.MethodPut, "/vault/k", map[string]string{"x-amz-object-lock-event-hold": "ON"}, http.StatusBadRequest, "InvalidArgument"},
+		{"a part without an upload", http.MethodPut, "/vault/k?partNumber=1", nil, http.StatusBadRequest, "InvalidArgument"},
+		{"a part of an unknown upload", http.MethodPut, "/vault/k?partNumber=1&uploadId=nope", nil, http.StatusNotFound, "NoSuchUpload"},
+		{"part zero", http.MethodPut, "/vault/k?partNumber=0&uploadId=nope", nil, http.StatusBadRequest, "InvalidArgument"},
+		{"a negative max-uploads", http.MethodGet, "/vault?uploads&max-uploads=-1", nil, http.StatusBadRequest, "InvalidArgument"},
+		{"retention of a missing key", http.MethodGet, "/vault/missing?retention", nil, http.StatusNotFound, "NoSuchKey"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequestWithContext(t.Context(), tc.method, tc.target, strings.NewReader("x"))
+			req.Header.Set("Authorization", authorization)
+			for k, v := range tc.header {
+				req.Header.Set(k, v)
+			}
+			rec := httptest.NewRecorder()
+			s.ServeHTTP(rec, req)
+			if rec.Code != tc.status || !strings.Contains(rec.Body.String(), "<Code>"+tc.code+"</Code>") {
+				t.Fatalf("= %d %s, want %d %s", rec.Code, rec.Body, tc.status, tc.code)
+			}
+		})
+	}
+	code, _, body = do(t, s, http.MethodPut, "/vault?object-lock", authorization,
+		"<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled><Rule><DefaultRetention><Mode>GOVERNANCE</Mode><Years>1</Years></DefaultRetention></Rule></ObjectLockConfiguration>")
+	if code != http.StatusOK {
+		t.Fatalf("put lock configuration = %d %s", code, body)
+	}
+	code, _, body = do(t, s, http.MethodGet, "/vault?object-lock", authorization, "")
+	if code != http.StatusOK || !strings.Contains(body,
+		`<ObjectLockConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><ObjectLockEnabled>Enabled</ObjectLockEnabled><Rule><DefaultRetention><Mode>GOVERNANCE</Mode><Years>1</Years></DefaultRetention></Rule></ObjectLockConfiguration>`) {
+		t.Fatalf("get lock configuration = %d %s", code, body)
+	}
+	if code, _, body = do(t, s, http.MethodPut, "/vault/k", authorization, "x"); code != http.StatusBadRequest || !strings.Contains(body, "<Code>InvalidRequest</Code>") {
+		t.Fatalf("a put under default retention without a checksum = %d %s", code, body)
+	}
+}
+
 func FuzzServeHTTP(f *testing.F) {
 	for _, seed := range []struct{ method, target, header, body string }{
 		{http.MethodPut, "/fuzz/k", "Content-Encoding: aws-chunked", "5;chunk-signature=0\r\nhello\r\n0\r\n\r\n"},
@@ -232,6 +300,10 @@ func FuzzServeHTTP(f *testing.F) {
 		{http.MethodPut, "/fuzz?tagging", "X-Amz-Content-Sha256: STREAMING-UNSIGNED-PAYLOAD-TRAILER", "0\r\n\r\n"},
 		{http.MethodGet, "/?max-buckets=1&continuation-token=YQ&bucket-region=us-east-1", "", ""},
 		{http.MethodPut, "/other", "", "<CreateBucketConfiguration><LocationConstraint>eu-west-1</LocationConstraint></CreateBucketConfiguration>"},
+		{http.MethodGet, "/fuzz?uploads&delimiter=/&key-marker=a/&upload-id-marker=0&max-uploads=1&encoding-type=url", "", ""},
+		{http.MethodPost, "/fuzz/k?uploadId=0", "", "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>x</ETag></Part></CompleteMultipartUpload>"},
+		{http.MethodPut, "/fuzz/k?retention", "", "<Retention><Mode>COMPLIANCE</Mode><RetainUntilDate>2099-01-01T00:00:00Z</RetainUntilDate></Retention>"},
+		{http.MethodPut, "/fuzz?object-lock", "", "<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled></ObjectLockConfiguration>"},
 	} {
 		f.Add(seed.method, seed.target, seed.header, []byte(seed.body))
 	}
