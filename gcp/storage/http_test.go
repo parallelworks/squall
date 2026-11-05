@@ -149,6 +149,9 @@ func TestRetentionAndRestoreRoutes(t *testing.T) {
 	if code, body := do(t, s, http.MethodPost, target, "", ""); code != http.StatusOK || !strings.Contains(body, `"name":"a/restore"`) {
 		t.Fatalf("restore = %d %s", code, body)
 	}
+	if code, body := do(t, s, http.MethodGet, "/storage/v1/b/routes/o/a%2Frestore?alt=media", "", ""); code != http.StatusNotFound || !strings.Contains(body, `"reason":"notFound"`) {
+		t.Fatalf("a media read = %d %s", code, body)
+	}
 	if code, body := do(t, s, http.MethodPost, "/storage/v1/b/routes/o/a%2Frestore/compose", "application/json", "{}"); code != http.StatusNotFound {
 		t.Fatalf("compose = %d %s", code, body)
 	}

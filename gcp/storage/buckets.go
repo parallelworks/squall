@@ -476,7 +476,7 @@ func (s *Server) store(b Bucket) (*bucket, *apiError) {
 }
 
 func (s *Server) getBucket(r *http.Request) (any, *apiError) {
-	soft, gen, err := softDeletedGeneration(r)
+	soft, gen, hasGen, err := softDeletedGeneration(r)
 	if err != nil {
 		return nil, err
 	}
@@ -492,6 +492,9 @@ func (s *Server) getBucket(r *http.Request) (any, *apiError) {
 	b, err := s.lookup(r.PathValue("bucket"), "storage.buckets.get")
 	if err != nil {
 		return nil, err
+	}
+	if hasGen && gen != b.Generation {
+		return nil, notFoundBucket()
 	}
 	if err := checkMatch(r, "ifMetagenerationMatch", "ifMetagenerationNotMatch", b.Metageneration); err != nil {
 		return nil, err
@@ -688,9 +691,7 @@ func (s *Server) LookupBucket(name string) (Bucket, bool) {
 	return b.clone(), true
 }
 
-// PutBucket creates b in its Project from the fields buckets.insert takes, and returns it as stored. A
-// RetentionPolicy may be locked already. With no SoftDeletePolicy, the bucket keeps deletions for 7 days, as
-// Cloud Storage's default is.
+// PutBucket creates b in its Project from the fields buckets.insert takes (a locked RetentionPolicy too) and returns it.
 func (s *Server) PutBucket(b Bucket) (Bucket, error) {
 	if b.Project == "" {
 		return Bucket{}, errors.New("squall: a bucket needs a project")

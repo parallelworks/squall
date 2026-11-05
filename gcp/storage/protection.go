@@ -123,8 +123,7 @@ func (b *bucket) retainedUntil(o *Object) time.Time {
 	return until
 }
 
-// guard returns the error deleting or replacing o fails with, or with archive, making it noncurrent, which
-// only a hold prevents. The caller holds s.mu.
+// guard returns why o cannot be deleted or replaced, or with archive, made noncurrent.
 func (s *Server) guard(b *bucket, o *Object, archive bool) *apiError {
 	kind := ""
 	switch {
@@ -156,8 +155,7 @@ func retentionConflict() *apiError {
 	return invalid("An object cannot have both an event-based hold and a retention configuration.")
 }
 
-// checkRetention reports whether an object in b whose retention is old may take next, nil removing it.
-// The caller holds s.mu.
+// checkRetention returns next as stored if an object with retention old may take it; nil removes it.
 func (s *Server) checkRetention(b *bucket, old, next *Retention, override, eventHold bool) (*Retention, *apiError) {
 	var until time.Time
 	if next != nil {
@@ -207,8 +205,7 @@ func (s *Server) checkRetention(b *bucket, old, next *Retention, override, event
 	return next, nil
 }
 
-// SetRetentionPolicy sets the named bucket's retention policy, locked or not, or with nil removes it, without the
-// checks a patch makes. An empty EffectiveTime is now.
+// SetRetentionPolicy sets or, with nil, removes a bucket's retention policy, locked or not, without a patch's checks.
 func (s *Server) SetRetentionPolicy(bucketName string, p *RetentionPolicy) (Bucket, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -228,8 +225,7 @@ func (s *Server) SetRetentionPolicy(bucketName string, p *RetentionPolicy) (Buck
 	return b.clone(), nil
 }
 
-// SetObjectHolds sets the holds on name's live generation in the named bucket. Releasing an event-based hold
-// starts the object's retention period again, as Cloud Storage does.
+// SetObjectHolds sets the holds on a live object; releasing an event-based hold restarts its retention period.
 func (s *Server) SetObjectHolds(bucketName, name string, temporary, eventBased bool) (Object, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -245,8 +241,7 @@ func (s *Server) SetObjectHolds(bucketName, name string, temporary, eventBased b
 	return s.view(b, o), nil
 }
 
-// SetObjectRetention sets the retention of name's live generation in the named bucket, or with nil removes it,
-// without the checks a patch makes, so a test can start from locked retention or one already expired.
+// SetObjectRetention sets or, with nil, removes a live object's retention without a patch's checks.
 func (s *Server) SetObjectRetention(bucketName, name string, r *Retention) (Object, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

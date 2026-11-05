@@ -10,23 +10,18 @@ import (
 	"time"
 )
 
-// softDeletedGeneration reads the softDeleted and generation parameters of a get, each of which needs the other.
-func softDeletedGeneration(r *http.Request) (bool, int64, *apiError) {
-	soft, err := boolParam(r, "softDeleted")
-	if err != nil {
-		return false, 0, err
+// softDeletedGeneration reads a get's softDeleted and generation parameters; softDeleted needs a generation.
+func softDeletedGeneration(r *http.Request) (soft bool, gen int64, hasGen bool, err *apiError) {
+	if soft, err = boolParam(r, "softDeleted"); err != nil {
+		return false, 0, false, err
 	}
-	gen, ok, err := int64Param(r, "generation")
-	if err != nil {
-		return false, 0, err
+	if gen, hasGen, err = int64Param(r, "generation"); err != nil {
+		return false, 0, false, err
 	}
-	switch {
-	case soft && !ok:
-		return false, 0, required("generation")
-	case ok && !soft && r.PathValue("object") == "":
-		return false, 0, required("softDeleted")
+	if soft && !hasGen {
+		return false, 0, false, required("generation")
 	}
-	return soft, gen, nil
+	return soft, gen, hasGen, nil
 }
 
 // trashed returns soft-deleted generation gen of name in b, or nil.
@@ -59,14 +54,19 @@ func (b *bucket) keepUntil(t time.Time) {
 	}
 }
 
-// softDeleteBucket keeps b, which was just deleted, if it keeps deletions. The caller holds s.mu.
+// softDeleteBucket keeps b, which was just deleted, for its policy's duration or while it holds soft-deleted objects.
 func (s *Server) softDeleteBucket(b *bucket) {
 	keep := b.softDeleteDuration()
-	if keep == 0 {
+	if keep == 0 && len(b.trash) == 0 {
 		return
 	}
 	t, now := s.timestamp()
 	b.SoftDeleteTime, b.hardDelete = now, t.Add(keep)
+	for _, o := range b.trash {
+		if o.hardDelete.After(b.hardDelete) {
+			b.hardDelete = o.hardDelete
+		}
+	}
 	b.HardDeleteTime = b.hardDelete.Format(timeFormat)
 	s.softBuckets[b.Name] = append(s.softBuckets[b.Name], b)
 }
@@ -186,14 +186,12 @@ func (s *Server) restoreObject(r *http.Request) (any, *apiError) {
 	o := s.newGeneration(b, name, "STANDARD")
 	o.ContentType, o.ContentEncoding, o.Metadata = src.ContentType, src.ContentEncoding, maps.Clone(src.Metadata)
 	o.Size, o.MD5Hash, o.CRC32C = src.Size, src.MD5Hash, src.CRC32C
-	if b.DefaultEventBasedHold {
-		o.EventBasedHold = new(true)
-	}
+	restored := src.clone()
+	o.TemporaryHold, o.EventBasedHold, o.Retention = restored.TemporaryHold, restored.EventBasedHold, restored.Retention
 	return s.view(b, o), nil
 }
 
-// SoftDeletedObjects returns the soft-deleted generations in the named bucket whose retention has not ended,
-// ordered by name and generation.
+// SoftDeletedObjects returns a bucket's unexpired soft-deleted generations, ordered by name and generation.
 func (s *Server) SoftDeletedObjects(bucketName string) []Object {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -218,8 +216,7 @@ func (s *Server) SoftDeletedBuckets() []Bucket {
 	return s.softDeletedBuckets()
 }
 
-// PutSoftDeletedObject writes data to name in the named bucket as a soft-deleted generation, as if a live one had
-// just been deleted, and returns it. The bucket must keep deletions.
+// PutSoftDeletedObject adds data as a just soft-deleted generation of name, in a bucket that keeps deletions.
 func (s *Server) PutSoftDeletedObject(bucketName, name string, data []byte) (Object, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

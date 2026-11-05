@@ -23,8 +23,7 @@ import (
 	"unicode/utf8"
 )
 
-// Object is one generation of an object, in the API's JSON shape; a noncurrent one has TimeDeleted, and a
-// soft-deleted one SoftDeleteTime.
+// Object is one generation of an object in the API's JSON shape; noncurrent has TimeDeleted, soft-deleted SoftDeleteTime.
 type Object struct {
 	Kind                    string            `json:"kind"`
 	ID                      string            `json:"id"`
@@ -392,7 +391,7 @@ func (s *Server) target(r *http.Request, permission string) (*bucket, *Object, *
 }
 
 func (s *Server) getObject(r *http.Request) (any, *apiError) {
-	soft, gen, err := softDeletedGeneration(r)
+	soft, gen, _, err := softDeletedGeneration(r)
 	if err != nil {
 		return nil, err
 	}
@@ -458,9 +457,6 @@ func (s *Server) changeObject(r *http.Request, replace bool) (any, *apiError) {
 		return nil, invalid("Invalid JSON payload received: %v", err)
 	}
 	cleared := func(field string) bool { return string(fields[field]) == "null" }
-	if !replace && (cleared("temporaryHold") || cleared("eventBasedHold")) {
-		return nil, invalid("squall: a hold cannot be null; set it to false to release it")
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b, o, err := s.target(r, "storage.objects.update")
@@ -476,10 +472,10 @@ func (s *Server) changeObject(r *http.Request, replace bool) (any, *apiError) {
 		temporary, eventBased, metadata = in.TemporaryHold, in.EventBasedHold, nil
 		contentType, contentEncoding = "application/octet-stream", ""
 	}
-	if in.TemporaryHold != nil {
+	if in.TemporaryHold != nil || cleared("temporaryHold") {
 		temporary = in.TemporaryHold
 	}
-	if in.EventBasedHold != nil {
+	if in.EventBasedHold != nil || cleared("eventBasedHold") {
 		eventBased = in.EventBasedHold
 	}
 	if in.ContentType != nil {

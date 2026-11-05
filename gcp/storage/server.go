@@ -44,9 +44,8 @@
 //     is rejected with 400. Every bucket reports a generation (inferred).
 //   - Objects record their size, MD5 and CRC32C, not their data; a crc32c or
 //     md5Hash in the upload's metadata must match the data. Resumable
-//     uploads, media reads, copies, composes and object ACLs are not
-//     supported.
-//     Uploads take up to 16 MiB.
+//     uploads, media reads (objects.get with alt=media answers 404), copies,
+//     composes and object ACLs are not supported. Uploads take up to 16 MiB.
 //   - With versioning on, writing or deleting an object makes its live
 //     generation noncurrent, and objects.list with versions=true lists those
 //     too, ordered by name and then generation. Deleting a bucket fails with
@@ -63,14 +62,14 @@
 //     it, 412 conditionNotMet on a mismatch), fails with 400 invalid without
 //     an unlocked policy, and changes the bucket's metageneration
 //     (inferred). A locked policy cannot be removed (403
-//     retentionPolicyNotMet) or shortened (403 forbidden); the bucket lock
-//     page says these fail with 400, so the statuses, reasons and messages
-//     here are inferred. Only an emptied bucket can be deleted, so a locked
-//     one needs no further check.
+//     retentionPolicyNotMet) or shortened (403 forbidden), with Cloud
+//     Storage's messages: the bucket lock page says these fail with 400, but
+//     Cloud Storage answers 403. Only an emptied bucket can be deleted, so a
+//     locked one needs no further check.
 //   - temporaryHold and eventBasedHold are set by an upload's metadata,
-//     objects.patch and objects.update, and defaultEventBasedHold puts an
-//     event-based hold on each new object, a restored one included
-//     (inferred). A held generation, live or noncurrent, cannot be deleted,
+//     objects.patch and objects.update, where null releases one, and
+//     defaultEventBasedHold puts an event-based hold on each uploaded
+//     object. A held generation, live or noncurrent, cannot be deleted,
 //     replaced or made noncurrent: 403 forbidden, with Cloud Storage's
 //     message. While an event-based hold is on, an object reports no
 //     retentionExpirationTime, and releasing it starts the object's time in
@@ -94,34 +93,43 @@
 //     policy at the time. objects.list with softDeleted=true lists them (400
 //     invalid with soft delete off), objects.get with softDeleted=true and a
 //     generation reads one, and objects.restore makes a copy the live
-//     generation, in STANDARD, retiring the live one as an overwrite would;
-//     the soft-deleted generation stays until its hardDeleteTime (inferred).
+//     generation, in STANDARD with the metadata, holds and retention it had
+//     when deleted, retiring the live one as an overwrite would; the
+//     soft-deleted generation stays until its hardDeleteTime (inferred).
 //     A restore of a live or noncurrent generation fails with 412
 //     objectNotSoftDeleted, and in a bucket with soft delete off with 400
 //     SoftDeletePolicyRequired; both messages are inferred. A soft-deleted
 //     generation cannot be deleted by objects.delete, which answers 404
 //     (inferred). A bucket holding only soft-deleted generations can be
-//     deleted, and is then kept soft-deleted with its policy's duration:
-//     buckets.list and buckets.get with softDeleted=true (and a generation
-//     for get) read it, and buckets.restore brings it back with its
+//     deleted, and is then kept soft-deleted for its policy's duration or
+//     until the last of its soft-deleted generations goes, whichever is
+//     later, even with soft delete since turned off. buckets.list and
+//     buckets.get with softDeleted=true (and a generation for get) read it;
+//     a get of a live bucket with another generation answers 404.
+//     buckets.restore brings it back with its
 //     generation, metageneration and soft-deleted objects (inferred),
 //     failing with 409 conflict while a live bucket has its name (message
 //     inferred). Everything soft-deleted goes for good at its hardDeleteTime
-//     on the server's clock.
+//     on the server's clock, and is held in memory until then: with the
+//     7-day default, every deleted or replaced generation stays, so a
+//     long-running test that churns objects may set
+//     softDeletePolicy.retentionDurationSeconds to 0 to keep none.
 //   - billing.requesterPays is recorded and, under [WithPolicy], enforced: a
 //     call on a Requester Pays bucket with a userProject also needs
 //     serviceusage.services.use, and one without needs
 //     resourcemanager.projects.createBillingAssignment, lacking which it
 //     fails with 400 and Cloud Storage's message "Bucket is a requester pays
-//     bucket but no user project provided." (reason required, inferred).
+//     bucket but no user project provided." The page names the error
+//     UserProjectMissing, which is the XML API's code; the JSON API's reason
+//     here, required, is inferred.
 //     Without a policy, the caller may bill the bucket's project, so nothing
 //     is refused.
 //   - objects.list takes prefix, startOffset, endOffset, versions,
 //     softDeleted, pageToken and maxResults; a delimiter, matchGlob, filter,
 //     includeTrailingDelimiter or includeFoldersAsPrefixes is rejected with
 //     400. objects.patch and objects.update change contentType,
-//     contentEncoding, metadata, the holds and retention. Page tokens are positions, so a page may follow one whose items
-//     were deleted. Bucket preconditions are ifMetagenerationMatch and
+//     contentEncoding, metadata, the holds and retention. Page tokens are
+//     positions, so a page may follow one whose items were deleted. Bucket preconditions are ifMetagenerationMatch and
 //     ifMetagenerationNotMatch, and object ones ifGenerationMatch,
 //     ifGenerationNotMatch and, but for uploads and deletes, the
 //     metageneration pair. The fields parameter is accepted and ignored:
@@ -270,7 +278,14 @@ func (s *Server) registerRoutes() {
 	s.route("GET "+bucket+"/o", "storage.objects.list", s.listObjects, nil,
 		"projection", "prefix", "delimiter", "pageToken", "maxResults", "versions", "startOffset", "endOffset",
 		"includeTrailingDelimiter", "matchGlob", "includeFoldersAsPrefixes", "softDeleted", "filter")
-	s.route("GET "+object, "storage.objects.get", s.getObject, objectTarget, slices.Concat(objectConds, []string{"projection", "softDeleted"})...)
+	get := s.handle("storage.objects.get", s.getObject, objectTarget, slices.Concat(objectConds, []string{"projection", "softDeleted"})...)
+	s.mux.HandleFunc("GET "+object, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("alt") == "media" {
+			notImplemented(w, r)
+			return
+		}
+		get(w, r)
+	})
 	s.route("PATCH "+object, "storage.objects.patch", s.patchObject, objectTarget,
 		slices.Concat(objectConds, []string{"projection", "predefinedAcl", "overrideUnlockedRetention"})...)
 	s.route("PUT "+object, "storage.objects.update", s.updateObject, objectTarget,

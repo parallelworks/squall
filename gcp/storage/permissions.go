@@ -36,8 +36,7 @@ var basePermissions = map[string][]string{
 	"storage.objects.restore":             {"storage.objects.restore", "storage.objects.create"},
 }
 
-// The permissions a call on a Requester Pays bucket needs: one naming a user project to bill needs
-// serviceUsage, and one naming none createBillingAssignment on the bucket's project.
+// Requester Pays calls need serviceUsage with a userProject and createBillingAssignment without one.
 const (
 	serviceUsage            = "serviceusage.services.use"
 	createBillingAssignment = "resourcemanager.projects.createBillingAssignment"
