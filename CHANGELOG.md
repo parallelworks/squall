@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.33.0](https://github.com/parallelworks/squall/compare/v0.32.0...v0.33.0) (2026-11-05)
+
+
+### Features
+
+* **azure:** NetApp backup vaults, backups, policies, volume groups and caches, and NetApp reads under a missing parent answer 404 ([#96](https://github.com/parallelworks/squall/issues/96)) ([4aa980a](https://github.com/parallelworks/squall/commit/4aa980ae888a7b5e63ca86e0d1d74ddf8deacfea))
+
 ## [0.32.0](https://github.com/parallelworks/squall/compare/v0.31.0...v0.32.0) (2026-11-05)
 
 
