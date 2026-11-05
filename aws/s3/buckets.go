@@ -287,7 +287,7 @@ func (s *Server) listBuckets(c *call) (*reply, *apiError) {
 }
 
 type taggingXML struct {
-	XMLName xml.Name `xml:"Tagging"`
+	XMLName xml.Name
 	TagSet  []tagXML `xml:"TagSet>Tag"`
 }
 
@@ -324,7 +324,7 @@ func validTagText(s string) bool {
 
 func parseTags(body []byte) (map[string]string, *apiError) {
 	var in taggingXML
-	if err := decodeXML(body, &in); err != nil {
+	if err := decodeRootXML(body, "Tagging", &in); err != nil {
 		return nil, err
 	}
 	if len(in.TagSet) > maxTags {
@@ -378,9 +378,9 @@ func (s *Server) deleteBucketTagging(c *call) (*reply, *apiError) {
 }
 
 type versioningXML struct {
-	XMLName   xml.Name `xml:"VersioningConfiguration"`
-	Status    string   `xml:"Status,omitempty"`
-	MfaDelete string   `xml:"MfaDelete,omitempty"`
+	XMLName   xml.Name
+	Status    string `xml:"Status,omitempty"`
+	MfaDelete string `xml:"MfaDelete,omitempty"`
 }
 
 func (s *Server) getBucketVersioning(c *call) (*reply, *apiError) {
@@ -395,7 +395,7 @@ func (s *Server) getBucketVersioning(c *call) (*reply, *apiError) {
 
 func (s *Server) putBucketVersioning(c *call) (*reply, *apiError) {
 	var in versioningXML
-	if err := decodeXML(c.body, &in); err != nil {
+	if err := decodeRootXML(c.body, "VersioningConfiguration", &in); err != nil {
 		return nil, err
 	}
 	if in.MfaDelete != "" {
@@ -474,8 +474,8 @@ func (s *Server) putBucketCors(c *call) (*reply, *apiError) {
 }
 
 type requestPaymentXML struct {
-	XMLName xml.Name `xml:"RequestPaymentConfiguration"`
-	Payer   string   `xml:"Payer"`
+	XMLName xml.Name
+	Payer   string `xml:"Payer"`
 }
 
 func (s *Server) getBucketRequestPayment(c *call) (*reply, *apiError) {
@@ -494,7 +494,7 @@ func (s *Server) getBucketRequestPayment(c *call) (*reply, *apiError) {
 
 func (s *Server) putBucketRequestPayment(c *call) (*reply, *apiError) {
 	var in requestPaymentXML
-	if err := decodeXML(c.body, &in); err != nil {
+	if err := decodeRootXML(c.body, "RequestPaymentConfiguration", &in); err != nil {
 		return nil, err
 	}
 	if in.Payer != "Requester" && in.Payer != "BucketOwner" {

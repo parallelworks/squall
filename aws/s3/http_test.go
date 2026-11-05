@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/parallelworks/squall/aws/s3"
 )
@@ -234,6 +235,9 @@ func TestMultipartAndLockShapes(t *testing.T) {
 		`<InitiateMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Bucket>vault</Bucket><Key>a b</Key><UploadId>`) {
 		t.Fatalf("create upload = %d %s", code, body)
 	}
+	if code, _, body := do(t, s, http.MethodGet, "/vault?uploads&max-uploads=5000", authorization, ""); code != http.StatusOK || !strings.Contains(body, "<MaxUploads>1000</MaxUploads>") {
+		t.Fatalf("max-uploads 5000 = %d %s, want a page of 1000", code, body)
+	}
 	code, _, body = do(t, s, http.MethodGet, "/vault?uploads&encoding-type=url", authorization, "")
 	if code != http.StatusOK || !strings.Contains(body, `<KeyMarker></KeyMarker><UploadIdMarker></UploadIdMarker><Prefix></Prefix><MaxUploads>1000</MaxUploads>`+
 		`<EncodingType>url</EncodingType><IsTruncated>false</IsTruncated><Upload><Key>a+b</Key>`) ||
@@ -265,7 +269,19 @@ func TestMultipartAndLockShapes(t *testing.T) {
 		{"part zero", http.MethodPut, "/vault/k?partNumber=0&uploadId=nope", nil, "", http.StatusBadRequest, "InvalidArgument"},
 		{"a negative max-uploads", http.MethodGet, "/vault?uploads&max-uploads=-1", nil, "", http.StatusBadRequest, "InvalidArgument"},
 		{"max-uploads 0", http.MethodGet, "/vault?uploads&max-uploads=0", nil, "", http.StatusBadRequest, "InvalidArgument"},
-		{"max-parts over 1000", http.MethodGet, "/vault/k?uploadId=x&max-parts=1001", nil, "", http.StatusBadRequest, "InvalidArgument"},
+		{"max-parts 0", http.MethodGet, "/vault/k?uploadId=x&max-parts=0", nil, "", http.StatusBadRequest, "InvalidArgument"},
+		{"a retention with only a checksum type", http.MethodPut, "/vault/k", map[string]string{
+			"x-amz-object-lock-mode": "GOVERNANCE", "x-amz-object-lock-retain-until-date": "2099-01-01T00:00:00Z",
+			"x-amz-checksum-type": "FULL_OBJECT", "x-amz-checksum-algorithm": "CRC32", "x-amz-sdk-checksum-algorithm": "CRC32",
+		}, "", http.StatusBadRequest, "InvalidRequest"},
+		{
+			"a versioning configuration under another root", http.MethodPut, "/vault?versioning", nil,
+			"<Status><Status>Enabled</Status></Status>", http.StatusBadRequest, "MalformedXML",
+		},
+		{
+			"a request payment configuration under another root", http.MethodPut, "/vault?requestPayment", nil,
+			"<Payment><Payer>Requester</Payer></Payment>", http.StatusBadRequest, "MalformedXML",
+		},
 		{"retention of a missing key", http.MethodGet, "/vault/missing?retention", nil, "", http.StatusNotFound, "NoSuchKey"},
 		{"a lock configuration without a checksum", http.MethodPut, "/vault?object-lock", nil, lockConfig, http.StatusBadRequest, "InvalidRequest"},
 		{
@@ -318,6 +334,53 @@ func TestMultipartAndLockShapes(t *testing.T) {
 	}
 	if code, _, body = do(t, s, http.MethodPut, "/vault/k", authorization, "x"); code != http.StatusBadRequest || !strings.Contains(body, "<Code>InvalidRequest</Code>") {
 		t.Fatalf("a put under default retention without a checksum = %d %s", code, body)
+	}
+}
+
+func TestBucketConfigurationsUseTheS3Namespace(t *testing.T) {
+	s := s3.New()
+	if _, err := s.PutBucket(s3.Bucket{Name: "namespaced", Region: "us-east-1", Versioning: "Enabled", Tags: map[string]string{"k": "v"}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ query, root string }{
+		{"versioning", "VersioningConfiguration"},
+		{"requestPayment", "RequestPaymentConfiguration"},
+		{"tagging", "Tagging"},
+	} {
+		code, _, body := do(t, s, http.MethodGet, "/namespaced?"+tc.query, authorization, "")
+		if want := "<" + tc.root + ` xmlns="http://s3.amazonaws.com/doc/2006-03-01/">`; code != http.StatusOK || !strings.Contains(body, want) {
+			t.Errorf("%s = %d %s, want %s", tc.query, code, body, want)
+		}
+	}
+}
+
+func TestRetainUntilUnderAMillisecondAheadIsInThePast(t *testing.T) {
+	s := s3.New(s3.WithClock(func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 500_000, time.UTC) }))
+	if _, err := s.PutBucket(s3.Bucket{Name: "vault", Region: "us-east-1", Versioning: "Enabled", ObjectLock: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PutObject("vault", "k", []byte("k")); err != nil {
+		t.Fatal(err)
+	}
+	const soon = "2026-01-01T00:00:00.0009Z"
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPut, "/vault/k", strings.NewReader("k"))
+	req.Header.Set("Authorization", authorization)
+	req.Header.Set("Content-MD5", "x")
+	req.Header.Set("x-amz-object-lock-mode", "COMPLIANCE")
+	req.Header.Set("x-amz-object-lock-retain-until-date", soon)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "<Code>InvalidArgument</Code>") {
+		t.Fatalf("put = %d %s, want 400 InvalidArgument", rec.Code, rec.Body)
+	}
+	req = httptest.NewRequestWithContext(t.Context(), http.MethodPut, "/vault/k?retention", strings.NewReader(
+		"<Retention><Mode>COMPLIANCE</Mode><RetainUntilDate>"+soon+"</RetainUntilDate></Retention>"))
+	req.Header.Set("Authorization", authorization)
+	req.Header.Set("Content-MD5", "x")
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "<Code>InvalidArgument</Code>") {
+		t.Fatalf("put retention = %d %s, want 400 InvalidArgument", rec.Code, rec.Body)
 	}
 }
 

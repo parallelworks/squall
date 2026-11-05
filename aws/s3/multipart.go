@@ -153,7 +153,7 @@ func (s *Server) uploadPart(c *call) (*reply, *apiError) {
 		return nil, err
 	}
 	if (u.lock.mode != "" || b.DefaultRetention != nil) && !hasChecksum(c.r.Header) {
-		return nil, lockChecksumMissing()
+		return nil, lockChecksumMissing("Put Part")
 	}
 	p := Part{Number: n, Size: int64(len(c.body)), ETag: etagOf(c.body), LastModified: s.now().UTC()}
 	u.parts[n] = p
@@ -247,16 +247,16 @@ func (s *Server) abortMultipartUpload(c *call) (*reply, *apiError) {
 	return &reply{status: http.StatusNoContent}, nil
 }
 
-// listLimit reads a listing's page size parameter, from 1 to 1000 and 1000 by default.
+// listLimit reads a listing's page size parameter, at least 1, which defaults to and is capped at 1000.
 func listLimit(c *call, name string) (int, *apiError) {
 	if !c.query.Has(name) {
 		return maxListed, nil
 	}
 	n, err := strconv.Atoi(c.query.Get(name))
-	if err != nil || n < 1 || n > maxListed {
-		return 0, invalidArgument("Argument %s must be an integer between 1 and 1000", name)
+	if err != nil || n < 1 {
+		return 0, invalidArgument("Provided %s not an integer or within integer range", name)
 	}
-	return n, nil
+	return min(n, maxListed), nil
 }
 
 var listUploadsParams = []string{"prefix", "delimiter", "key-marker", "upload-id-marker", "max-uploads", "encoding-type"}

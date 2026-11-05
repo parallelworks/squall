@@ -394,8 +394,8 @@ func TestLockedUploadPartsNeedAChecksum(t *testing.T) {
 	bare := clientAt(url, "us-east-1", func(o *awss3.Options) { o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired })
 	if _, err := bare.UploadPart(t.Context(), &awss3.UploadPartInput{
 		Bucket: aws.String("vault"), Key: aws.String("k"), UploadId: out.UploadId, PartNumber: aws.Int32(1), Body: strings.NewReader("x"),
-	}); sdkerr.AWSCode(err) != "InvalidRequest" {
-		t.Fatalf("a part without a checksum = %v, want InvalidRequest", err)
+	}); sdkerr.AWSCode(err) != "InvalidRequest" || !strings.Contains(err.Error(), "Put Part requests") {
+		t.Fatalf("a part without a checksum = %v, want InvalidRequest for Put Part requests", err)
 	}
 	uploadPart(t, c, "vault", "k", aws.ToString(out.UploadId), 1, []byte("x"))
 }

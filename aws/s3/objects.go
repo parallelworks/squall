@@ -175,7 +175,7 @@ func (s *Server) putObject(c *call) (*reply, *apiError) {
 		return nil, err
 	}
 	if (lock.mode != "" || b.DefaultRetention != nil) && !hasChecksum(c.r.Header) {
-		return nil, lockChecksumMissing()
+		return nil, lockChecksumMissing("Put Object")
 	}
 	v := s.storeObject(b, c.key, c.body)
 	s.applyLock(b, v, lock)

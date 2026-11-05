@@ -65,13 +65,14 @@
 //     are in ascending order, were uploaded with the ETags given, and are at
 //     least 5 MiB but for the last, and makes a version whose ETag is the MD5
 //     of the parts' MD5s and their count, the form S3's take, which it does
-//     not document. Completing an upload
-//     ends it, so a retry after a lost response fails with NoSuchUpload.
-//     Uploads of one key list in the order they began, and upload IDs are
-//     32 hex digits; ListMultipartUploads takes S3's prefix, delimiter,
-//     markers and max-uploads, and counts common prefixes toward a page as
-//     ListObjectsV2 does, which is inferred. A max-uploads or max-parts
-//     outside 1 to 1000 fails with 400 InvalidArgument, also inferred. A part's checksums are not kept, and ListParts and
+//     not document. Completing an upload ends it, so a retry after a lost
+//     response fails with NoSuchUpload. Uploads of one key list in the order
+//     they began, and upload IDs are 32 hex digits. ListMultipartUploads
+//     takes S3's prefix, delimiter, markers and max-uploads, and counts
+//     common prefixes toward a page as ListObjectsV2 does, which is
+//     inferred. Like max-keys, max-uploads and max-parts above 1000 return
+//     1000; one below 1 fails with 400 InvalidArgument, which is inferred.
+//     A part's checksums are not kept, and ListParts and
 //     ListMultipartUploads report no checksum algorithm; UploadPartCopy and
 //     the If-Match and If-None-Match headers are not supported. Parts are
 //     stored data, which S3 bills until the upload is completed or
@@ -138,9 +139,9 @@
 //     Owners are the account's canonical ID, without a display name.
 //   - Tags follow S3's rules: up to 50, keys of 1 to 128 characters, values
 //     of up to 256, Unicode letters, numbers, separators and "+-=._:/@", no
-//     duplicates and no "aws:" prefix. PutBucketTagging with an empty tag set removes
-//     the tags, so GetBucketTagging fails with NoSuchTagSet, as it does for
-//     a bucket never tagged. Bucket policies must be JSON and are recorded,
+//     duplicates and no "aws:" prefix. PutBucketTagging with an empty tag
+//     set removes the tags, so GetBucketTagging fails with NoSuchTagSet, as
+//     it does for a bucket never tagged. Bucket policies must be JSON and are recorded,
 //     not enforced; CORS rules are checked for an allowed method and origin
 //     and recorded.
 //   - Query parameters the server does not support are rejected with 400
@@ -150,8 +151,8 @@
 // [WithPolicy] grants the caller a set of IAM actions and refuses a call that
 // needs one it lacks with 403 AccessDenied, before any fault. Each operation
 // needs the action the S3 user guide lists for it, such as s3:ListBucket for
-// HeadBucket and ListObjectsV2; deleting a version needs s3:DeleteObjectVersion instead of
-// s3:DeleteObject, an ACL header on PutObject s3:PutObjectAcl, an object
+// HeadBucket and ListObjectsV2; deleting a version needs
+// s3:DeleteObjectVersion instead of s3:DeleteObject, an ACL header on PutObject s3:PutObjectAcl, an object
 // ownership header on CreateBucket s3:PutBucketOwnershipControls, and
 // enabling Object Lock there s3:PutBucketObjectLockConfiguration and
 // s3:PutBucketVersioning. A retention header on PutObject or
@@ -526,6 +527,18 @@ func writeXML(w http.ResponseWriter, status int, body any) {
 // requestID returns a fresh request ID in the 16 hex digit form S3 uses.
 func (s *Server) requestID() string {
 	return fmt.Sprintf("%016X", s.requests.Add(1))
+}
+
+// decodeRootXML reads an XML request body into v, failing with MalformedXML unless its root element is root.
+func decodeRootXML(body []byte, root string, v any) *apiError {
+	var head struct{ XMLName xml.Name }
+	if err := decodeXML(body, &head); err != nil {
+		return err
+	}
+	if head.XMLName.Local != root {
+		return malformedXML()
+	}
+	return decodeXML(body, v)
 }
 
 // decodeXML reads an XML request body into v.

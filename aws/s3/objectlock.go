@@ -74,10 +74,11 @@ func noSuchObjectLock() *apiError {
 // retainUntil keeps a retain-until date to the millisecond, the precision S3's timestamps carry.
 func retainUntil(t time.Time) time.Time { return t.UTC().Truncate(time.Millisecond) }
 
-func lockChecksumMissing() *apiError {
+// lockChecksumMissing refuses a write with Object Lock parameters and no checksum; what is "Put Object" or "Put Part".
+func lockChecksumMissing(what string) *apiError {
 	return &apiError{
 		Status: http.StatusBadRequest, Code: "InvalidRequest",
-		Message: "Content-MD5 OR x-amz-checksum- HTTP header is required for Put Object requests with Object Lock parameters",
+		Message: "Content-MD5 OR x-amz-checksum- HTTP header is required for " + what + " requests with Object Lock parameters",
 	}
 }
 
@@ -90,14 +91,7 @@ func decodeRoot(c *call, root string, v any) *apiError {
 	if !hasChecksum(c.r.Header) {
 		return checksumMissing()
 	}
-	var head struct{ XMLName xml.Name }
-	if err := decodeXML(c.body, &head); err != nil {
-		return err
-	}
-	if head.XMLName.Local != root {
-		return malformedXML()
-	}
-	return decodeXML(c.body, v)
+	return decodeRootXML(c.body, root, v)
 }
 
 func retainInPast() *apiError {
@@ -157,10 +151,11 @@ func (s *Server) lockHeaders(h http.Header) (lockRequest, *apiError) {
 		if err != nil {
 			return lockRequest{}, invalidArgument("The retain until date is not a valid date.")
 		}
+		t = retainUntil(t)
 		if !t.After(s.now()) {
 			return lockRequest{}, retainInPast()
 		}
-		l.mode, l.until = mode, retainUntil(t)
+		l.mode, l.until = mode, t
 	}
 	switch hold := h.Get("X-Amz-Object-Lock-Legal-Hold"); hold {
 	case "", legalHoldOn, legalHoldOff:
@@ -193,16 +188,22 @@ func (s *Server) applyLock(b *bucket, v *version, l lockRequest) {
 
 // hasChecksum reports whether a request carries Content-MD5 or a checksum, in a header or a trailer.
 func hasChecksum(h http.Header) bool {
-	if h.Get("Content-MD5") != "" || h.Get("X-Amz-Sdk-Checksum-Algorithm") != "" ||
-		strings.Contains(strings.ToLower(h.Get("X-Amz-Trailer")), "x-amz-checksum-") {
+	if h.Get("Content-MD5") != "" {
 		return true
 	}
-	for name := range h {
-		if hasPrefixFold(name, "X-Amz-Checksum-") {
+	trailer := strings.ToLower(h.Get("X-Amz-Trailer"))
+	for _, name := range checksumHeaders {
+		if h.Get(name) != "" || strings.Contains(trailer, strings.ToLower(name)) {
 			return true
 		}
 	}
 	return false
+}
+
+// checksumHeaders are the headers that carry a checksum's value.
+var checksumHeaders = []string{
+	"X-Amz-Checksum-Crc32", "X-Amz-Checksum-Crc32c", "X-Amz-Checksum-Crc64nvme", "X-Amz-Checksum-Sha1", "X-Amz-Checksum-Sha256",
+	"X-Amz-Checksum-Sha512", "X-Amz-Checksum-Md5", "X-Amz-Checksum-Xxhash64", "X-Amz-Checksum-Xxhash3", "X-Amz-Checksum-Xxhash128",
 }
 
 func hasPrefixFold(s, prefix string) bool {
@@ -375,10 +376,10 @@ func (s *Server) putObjectRetention(c *call) (*reply, *apiError) {
 		if err != nil {
 			return nil, malformedXML()
 		}
-		if !t.After(s.now()) {
+		until = retainUntil(t)
+		if !until.After(s.now()) {
 			return nil, retainInPast()
 		}
-		until = retainUntil(t)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
