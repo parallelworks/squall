@@ -36,7 +36,7 @@ func TestManagedFolderShape(t *testing.T) {
 		}
 	}
 	code, body = do(t, s, http.MethodGet, "/storage/v1/b/mfb", "", "")
-	if code != http.StatusOK || !strings.Contains(body, `"iamConfiguration":{"bucketPolicyOnly":{"enabled":true,"lockedTime":"2026-04-02T03:04:05.000Z"},"uniformBucketLevelAccess":{"enabled":true,"lockedTime":"2026-04-02T03:04:05.000Z"}}`) {
+	if code != http.StatusOK || !strings.Contains(body, `"iamConfiguration":{"bucketPolicyOnly":{"enabled":true,"lockedTime":"2026-04-02T03:04:05.000Z"},"uniformBucketLevelAccess":{"enabled":true,"lockedTime":"2026-04-02T03:04:05.000Z"},"publicAccessPrevention":"inherited"}`) {
 		t.Errorf("get bucket = %d %s", code, body)
 	}
 }
@@ -69,7 +69,7 @@ func TestManagedFolderErrors(t *testing.T) {
 		{"a delete of a missing folder", http.MethodDelete, "/storage/v1/b/mfb/managedFolders/b%2F", "", http.StatusNotFound, "notFound"},
 		{"a metageneration mismatch", http.MethodGet, "/storage/v1/b/mfb/managedFolders/a%2F?ifMetagenerationMatch=2", "", http.StatusPreconditionFailed, "conditionNotMet"},
 		{"a delete on a metageneration match", http.MethodDelete, "/storage/v1/b/mfb/managedFolders/a%2F?ifMetagenerationNotMatch=1", "", http.StatusPreconditionFailed, "conditionNotMet"},
-		{"maxResults", http.MethodGet, "/storage/v1/b/mfb/managedFolders?maxResults=1", "", http.StatusBadRequest, "invalid"},
+		{"page sizes that disagree", http.MethodGet, "/storage/v1/b/mfb/managedFolders?pageSize=1&maxResults=2", "", http.StatusBadRequest, "invalid"},
 		{"a negative page size", http.MethodGet, "/storage/v1/b/mfb/managedFolders?pageSize=-1", "", http.StatusBadRequest, "invalid"},
 		{"a bad allowNonEmpty", http.MethodDelete, "/storage/v1/b/mfb/managedFolders/a%2F?allowNonEmpty=yes", "", http.StatusBadRequest, "invalid"},
 		{"an IAM policy", http.MethodGet, "/storage/v1/b/mfb/managedFolders/a%2F/iam", "", http.StatusNotFound, "notFound"},
@@ -99,7 +99,7 @@ func TestManagedFolderList(t *testing.T) {
 	var got []string
 	token := ""
 	for {
-		code, body := do(t, s, http.MethodGet, "/storage/v1/b/mfb/managedFolders?pageSize=3&pageToken="+token, "", "")
+		code, body := do(t, s, http.MethodGet, "/storage/v1/b/mfb/managedFolders?maxResults=3&pageToken="+token, "", "")
 		if code != http.StatusOK {
 			t.Fatalf("list = %d %s", code, body)
 		}
@@ -199,7 +199,7 @@ func TestUniformAccessLocksAfter90Days(t *testing.T) {
 	}
 	for _, in := range []string{
 		`{"iamConfiguration":{"bucketPolicyOnly":{"enabled":true},"uniformBucketLevelAccess":{"enabled":false}}}`,
-		`{"iamConfiguration":{"publicAccessPrevention":"enforced"}}`,
+		`{"iamConfiguration":{"publicAccessPrevention":"open"}}`,
 		`{"iamConfiguration":null}`,
 	} {
 		if code, body := do(t, s, http.MethodPatch, "/storage/v1/b/locks", "application/json", in); code != http.StatusBadRequest {
@@ -226,5 +226,50 @@ func TestPolicyNeedsSetIamPolicyToDeleteANonEmptyManagedFolder(t *testing.T) {
 	}
 	if code, body := do(t, s, http.MethodGet, "/storage/v1/b/mfb/managedFolders", "", ""); code != http.StatusForbidden || !strings.Contains(body, "storage.managedFolders.list") {
 		t.Errorf("list = %d %s", code, body)
+	}
+}
+
+func TestBucketsReportIamConfiguration(t *testing.T) {
+	s := storage.New()
+	code, body := do(t, s, http.MethodPost, "/storage/v1/b?project=p", "application/json", `{"name":"plain"}`)
+	if code != http.StatusOK || !strings.Contains(body, `"iamConfiguration":{"bucketPolicyOnly":{"enabled":false},"uniformBucketLevelAccess":{"enabled":false},"publicAccessPrevention":"inherited"}`) {
+		t.Fatalf("insert = %d %s", code, body)
+	}
+	code, body = do(t, s, http.MethodPatch, "/storage/v1/b/plain", "application/json", `{"iamConfiguration":{"publicAccessPrevention":"enforced"}}`)
+	if code != http.StatusOK || !strings.Contains(body, `"uniformBucketLevelAccess":{"enabled":false},"publicAccessPrevention":"enforced"`) {
+		t.Fatalf("patch = %d %s", code, body)
+	}
+	code, body = do(t, s, http.MethodPatch, "/storage/v1/b/plain", "application/json", `{"iamConfiguration":{"uniformBucketLevelAccess":{"enabled":true}}}`)
+	if code != http.StatusOK || !strings.Contains(body, `"publicAccessPrevention":"enforced"`) {
+		t.Errorf("patch keeping public access prevention = %d %s", code, body)
+	}
+}
+
+func TestUniformAccessRefusesACLs(t *testing.T) {
+	s := storage.New()
+	uniform(t, s, "uniform")
+	if code, body := do(t, s, http.MethodPost, "/storage/v1/b?project=p", "application/json", `{"name":"fine-grained"}`); code != http.StatusOK {
+		t.Fatalf("insert bucket = %d %s", code, body)
+	}
+	if _, err := s.PutObject("uniform", "k", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, method, target, body string }{
+		{"a bucket insert", http.MethodPost, "/storage/v1/b?project=p&predefinedAcl=private", strings.Replace(uniformBucket, "%s", "acl-bucket", 1)},
+		{"a bucket patch", http.MethodPatch, "/storage/v1/b/uniform?predefinedDefaultObjectAcl=projectPrivate", `{}`},
+		{"a patch turning it on", http.MethodPatch, "/storage/v1/b/fine-grained?predefinedAcl=private", `{"iamConfiguration":{"uniformBucketLevelAccess":{"enabled":true}}}`},
+		{"an upload", http.MethodPost, "/upload/storage/v1/b/uniform/o?uploadType=media&name=n&predefinedAcl=private", "x"},
+		{"an object patch", http.MethodPatch, "/storage/v1/b/uniform/o/k?predefinedAcl=projectPrivate", `{}`},
+		{"an object update", http.MethodPut, "/storage/v1/b/uniform/o/k?predefinedAcl=private", `{}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, body := do(t, s, tc.method, tc.target, "application/json", tc.body)
+			if code != http.StatusBadRequest || !strings.Contains(body, `"reason":"badRequest"`) {
+				t.Errorf("%s %s = %d %s, want 400 badRequest", tc.method, tc.target, code, body)
+			}
+		})
+	}
+	if code, body := do(t, s, http.MethodPatch, "/storage/v1/b/fine-grained?predefinedAcl=private", "application/json", `{}`); code != http.StatusOK {
+		t.Errorf("an ACL without uniform access = %d %s", code, body)
 	}
 }

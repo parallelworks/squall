@@ -432,8 +432,10 @@ For Cloud Storage:
   folders fails unless `allowNonEmpty=true`, which needs
   `storage.managedFolders.setIamPolicy` under `WithPolicy` and leaves what it
   held in place. A bucket with a managed folder left cannot be deleted, nor
-  can its uniform bucket-level access be turned off. `PutManagedFolder` makes
-  one directly. Managed folder IAM policies are not supported.
+  can its uniform bucket-level access be turned off. While uniform access is
+  on, predefined ACLs fail with 400. Public access prevention is recorded and
+  reported, not enforced. `PutManagedFolder` makes one directly. Managed
+  folder IAM policies are not supported.
 - A fault rule's `Resource` is the path below `/storage/v1/`, such as
   `b/my-bucket/o/my-object` or `b/my-bucket/managedFolders/logs/`, and for an
   insert the bucket, object or managed folder it makes.

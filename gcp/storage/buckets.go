@@ -95,10 +95,11 @@ type BucketObjectRetention struct {
 	Mode string `json:"mode"`
 }
 
-// IamConfiguration is a bucket's uniform bucket-level access setting, reported under both of its names.
+// IamConfiguration is a bucket's uniform bucket-level access setting, reported under both of its names, and public access prevention.
 type IamConfiguration struct {
 	BucketPolicyOnly         UniformBucketLevelAccess `json:"bucketPolicyOnly"`
 	UniformBucketLevelAccess UniformBucketLevelAccess `json:"uniformBucketLevelAccess"`
+	PublicAccessPrevention   string                   `json:"publicAccessPrevention"`
 }
 
 // UniformBucketLevelAccess says whether only IAM governs access to a bucket, and until when that can be turned off.
@@ -350,8 +351,8 @@ func (in *iamConfigurationInput) uniformAccess() (*bool, *apiError) {
 	if in == nil {
 		return nil, nil
 	}
-	if in.PublicAccessPrevention != "" && in.PublicAccessPrevention != "inherited" {
-		return nil, invalid("squall: publicAccessPrevention=%s is not supported", in.PublicAccessPrevention)
+	if p := in.PublicAccessPrevention; p != "" && p != "inherited" && p != "enforced" {
+		return nil, invalid("Invalid argument: publicAccessPrevention '%s' is not valid.", p)
 	}
 	var ubla, bpo *bool
 	if in.UniformBucketLevelAccess != nil {
@@ -369,12 +370,32 @@ func (in *iamConfigurationInput) uniformAccess() (*bool, *apiError) {
 // uniformAccessLock is how long after uniform bucket-level access is turned on it can still be turned off.
 const uniformAccessLock = 90 * 24 * time.Hour
 
-func iamConfiguration(enabled bool, t time.Time) *IamConfiguration {
+// iamConfiguration is the setting with uniform bucket-level access turned on or off at t, and public access prevention, inherited if empty.
+func iamConfiguration(enabled bool, publicAccess string, t time.Time) *IamConfiguration {
 	u := UniformBucketLevelAccess{Enabled: enabled}
 	if enabled {
 		u.LockedTime = t.Add(uniformAccessLock).UTC().Format(timeFormat)
 	}
-	return &IamConfiguration{BucketPolicyOnly: u, UniformBucketLevelAccess: u}
+	return &IamConfiguration{BucketPolicyOnly: u, UniformBucketLevelAccess: u, PublicAccessPrevention: cmp.Or(publicAccess, "inherited")}
+}
+
+func publicAccessPrevention(in *iamConfigurationInput) string {
+	if in == nil {
+		return ""
+	}
+	return in.PublicAccessPrevention
+}
+
+// aclRequested reports whether r sets a predefined ACL.
+func aclRequested(r *http.Request) bool {
+	return r.URL.Query().Get("predefinedAcl") != "" || r.URL.Query().Get("predefinedDefaultObjectAcl") != ""
+}
+
+func uniformAccessACL() *apiError {
+	return &apiError{
+		Status: http.StatusBadRequest, Reason: "badRequest",
+		Message: "Cannot use ACLs on a bucket or its objects while uniform bucket-level access is enabled.",
+	}
 }
 
 type softDeletePolicyInput struct {
@@ -483,8 +504,9 @@ func (s *Server) insertBucket(r *http.Request) (any, *apiError) {
 	if err != nil {
 		return nil, err
 	}
-	if uniform != nil {
-		b.IamConfiguration = &IamConfiguration{UniformBucketLevelAccess: UniformBucketLevelAccess{Enabled: *uniform}}
+	b.IamConfiguration = &IamConfiguration{UniformBucketLevelAccess: UniformBucketLevelAccess{Enabled: isSet(uniform)}, PublicAccessPrevention: publicAccessPrevention(in.IamConfiguration)}
+	if isSet(uniform) && aclRequested(r) {
+		return nil, uniformAccessACL()
 	}
 	if objectRetention {
 		b.ObjectRetention = &BucketObjectRetention{Mode: "Enabled"}
@@ -574,7 +596,9 @@ func (s *Server) store(b Bucket) (*bucket, *apiError) {
 		b.SoftDeletePolicy.EffectiveTime = now
 	}
 	if c := b.IamConfiguration; c != nil {
-		b.IamConfiguration = iamConfiguration(c.UniformBucketLevelAccess.Enabled || c.BucketPolicyOnly.Enabled, t)
+		b.IamConfiguration = iamConfiguration(c.UniformBucketLevelAccess.Enabled || c.BucketPolicyOnly.Enabled, c.PublicAccessPrevention, t)
+	} else {
+		b.IamConfiguration = iamConfiguration(false, "", t)
 	}
 	b.Location = strings.ToUpper(cmp.Or(b.Location, "US"))
 	b.LocationType = locationType(b.Location, b.CustomPlacementConfig)
@@ -695,9 +719,12 @@ func (s *Server) patchBucket(r *http.Request) (any, *apiError) {
 	if err != nil {
 		return nil, err
 	}
-	iam, err := nextIamConfiguration(b, uniform, changed)
+	iam, err := nextIamConfiguration(b, uniform, publicAccessPrevention(in.IamConfiguration), changed)
 	if err != nil {
 		return nil, err
+	}
+	if iam.UniformBucketLevelAccess.Enabled && aclRequested(r) {
+		return nil, uniformAccessACL()
 	}
 	if len(labels) == 0 {
 		labels = nil
@@ -734,10 +761,12 @@ func (s *Server) patchBucket(r *http.Request) (any, *apiError) {
 	return b.clone(), nil
 }
 
-// nextIamConfiguration is b's iamConfiguration once uniform, if not nil, turns uniform bucket-level access on or off at t.
-func nextIamConfiguration(b *bucket, uniform *bool, t time.Time) (*IamConfiguration, *apiError) {
+// nextIamConfiguration is b's iamConfiguration once uniform, if not nil, turns uniform bucket-level access on or off at t, and publicAccess, if set, replaces its public access prevention.
+func nextIamConfiguration(b *bucket, uniform *bool, publicAccess string, t time.Time) (*IamConfiguration, *apiError) {
+	next := new(*b.IamConfiguration)
+	next.PublicAccessPrevention = cmp.Or(publicAccess, next.PublicAccessPrevention)
 	if uniform == nil || *uniform == b.uniformAccess() {
-		return b.IamConfiguration, nil
+		return next, nil
 	}
 	if !*uniform {
 		if len(b.folders) > 0 {
@@ -750,7 +779,7 @@ func nextIamConfiguration(b *bucket, uniform *bool, t time.Time) (*IamConfigurat
 			return nil, invalid("Uniform bucket-level access cannot be disabled after it has been enabled for 90 days.")
 		}
 	}
-	return iamConfiguration(*uniform, t), nil
+	return iamConfiguration(*uniform, next.PublicAccessPrevention, t), nil
 }
 
 func (s *Server) deleteBucket(r *http.Request) (any, *apiError) {
@@ -810,7 +839,7 @@ func (s *Server) listBuckets(r *http.Request) (any, *apiError) {
 			}
 		}
 	}
-	items, next, err := page(r, "maxResults", all, key)
+	items, next, err := page(r, all, key, "maxResults")
 	if err != nil {
 		return nil, err
 	}

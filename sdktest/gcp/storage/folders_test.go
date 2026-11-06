@@ -140,3 +140,44 @@ func TestPolicyChecksManagedFolderPermissions(t *testing.T) {
 		t.Errorf("Unused() = %v, want none", got)
 	}
 }
+
+func TestPublicAccessPreventionIsRecorded(t *testing.T) {
+	c := newClient(t, storage.New())
+	if err := c.Bucket("plain").Create(t.Context(), project, nil); err != nil {
+		t.Fatal(err)
+	}
+	attrs, err := c.Bucket("plain").Attrs(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attrs.PublicAccessPrevention != gcs.PublicAccessPreventionInherited || attrs.UniformBucketLevelAccess.Enabled {
+		t.Errorf("default = %v, %+v", attrs.PublicAccessPrevention, attrs.UniformBucketLevelAccess)
+	}
+
+	secure := &gcs.BucketAttrs{UniformBucketLevelAccess: gcs.UniformBucketLevelAccess{Enabled: true}, PublicAccessPrevention: gcs.PublicAccessPreventionEnforced}
+	if err := c.Bucket("secure").Create(t.Context(), project, secure); err != nil {
+		t.Fatal(err)
+	}
+	attrs, err = c.Bucket("secure").Attrs(t.Context())
+	if err != nil || attrs.PublicAccessPrevention != gcs.PublicAccessPreventionEnforced || !attrs.UniformBucketLevelAccess.Enabled {
+		t.Fatalf("secure = %+v, %v", attrs, err)
+	}
+	attrs, err = c.Bucket("secure").Update(t.Context(), gcs.BucketAttrsToUpdate{PublicAccessPrevention: gcs.PublicAccessPreventionInherited})
+	if err != nil || attrs.PublicAccessPrevention != gcs.PublicAccessPreventionInherited || !attrs.UniformBucketLevelAccess.Enabled {
+		t.Errorf("update = %+v, %v", attrs, err)
+	}
+}
+
+func TestUniformAccessRefusesPredefinedACLs(t *testing.T) {
+	c := newClient(t, storage.New())
+	uniformBucket(t, c, "uniform")
+	w := c.Bucket("uniform").Object("a.txt").NewWriter(t.Context())
+	w.PredefinedACL = "private"
+	if _, err := w.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	wantCode(t, "upload with a predefined ACL", w.Close(), http.StatusBadRequest)
+	write(t, c, "uniform", "a.txt", "x")
+	_, err := c.Bucket("uniform").Update(t.Context(), gcs.BucketAttrsToUpdate{PredefinedDefaultObjectACL: "projectPrivate"})
+	wantCode(t, "bucket update with a predefined default object ACL", err, http.StatusBadRequest)
+}

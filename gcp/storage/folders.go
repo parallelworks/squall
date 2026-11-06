@@ -213,7 +213,7 @@ func (s *Server) listFolders(r *http.Request) (any, *apiError) {
 		return nil, err
 	}
 	all := b.managedFolders(prefix)
-	items, next, err := page(r, "pageSize", all, func(f ManagedFolder) string { return f.Name })
+	items, next, err := page(r, all, func(f ManagedFolder) string { return f.Name }, "pageSize", "maxResults")
 	if err != nil {
 		return nil, err
 	}
