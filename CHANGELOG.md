@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.0](https://github.com/parallelworks/squall/compare/v0.35.0...v0.36.0) (2026-11-06)
+
+
+### Features
+
+* **storage:** managed folders ([#102](https://github.com/parallelworks/squall/issues/102)) ([bbc8e86](https://github.com/parallelworks/squall/commit/bbc8e8698f164b59e3aeba0107210e636592cace))
+
 ## [0.35.0](https://github.com/parallelworks/squall/compare/v0.34.0...v0.35.0) (2026-11-05)
 
 
