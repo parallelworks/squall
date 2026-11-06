@@ -346,13 +346,13 @@ type iamConfigurationInput struct {
 	PublicAccessPrevention   string              `json:"publicAccessPrevention"`
 }
 
-// uniformAccess returns whether in turns uniform bucket-level access on or off, nil if it does neither.
+// uniformAccess returns whether in turns uniform bucket-level access on or off, nil if it does neither; uniformBucketLevelAccess wins over bucketPolicyOnly.
 func (in *iamConfigurationInput) uniformAccess() (*bool, *apiError) {
 	if in == nil {
 		return nil, nil
 	}
-	if p := in.PublicAccessPrevention; p != "" && p != "inherited" && p != "enforced" {
-		return nil, invalid("Invalid argument: publicAccessPrevention '%s' is not valid.", p)
+	if err := checkPublicAccessPrevention(in.PublicAccessPrevention); err != nil {
+		return nil, err
 	}
 	var ubla, bpo *bool
 	if in.UniformBucketLevelAccess != nil {
@@ -360,9 +360,6 @@ func (in *iamConfigurationInput) uniformAccess() (*bool, *apiError) {
 	}
 	if in.BucketPolicyOnly != nil {
 		bpo = in.BucketPolicyOnly.Enabled
-	}
-	if ubla != nil && bpo != nil && *ubla != *bpo {
-		return nil, invalid("Invalid argument: uniformBucketLevelAccess and bucketPolicyOnly must match.")
 	}
 	return cmp.Or(ubla, bpo), nil
 }
@@ -391,11 +388,22 @@ func aclRequested(r *http.Request) bool {
 	return r.URL.Query().Get("predefinedAcl") != "" || r.URL.Query().Get("predefinedDefaultObjectAcl") != ""
 }
 
-func uniformAccessACL() *apiError {
+func checkPublicAccessPrevention(p string) *apiError {
+	if p != "" && p != "inherited" && p != "enforced" {
+		return invalid("Invalid argument: publicAccessPrevention '%s' is not valid.", p)
+	}
+	return nil
+}
+
+func uniformAccessBucketACL() *apiError {
 	return &apiError{
 		Status: http.StatusBadRequest, Reason: "badRequest",
-		Message: "Cannot use ACLs on a bucket or its objects while uniform bucket-level access is enabled.",
+		Message: "Cannot use ACLs on a bucket while uniform bucket-level access is enabled.",
 	}
+}
+
+func uniformAccessObjectACL() *apiError {
+	return invalid("Cannot insert legacy ACL for an object when uniform bucket-level access is enabled. Read more at https://cloud.google.com/storage/docs/uniform-bucket-level-access")
 }
 
 type softDeletePolicyInput struct {
@@ -506,7 +514,7 @@ func (s *Server) insertBucket(r *http.Request) (any, *apiError) {
 	}
 	b.IamConfiguration = &IamConfiguration{UniformBucketLevelAccess: UniformBucketLevelAccess{Enabled: isSet(uniform)}, PublicAccessPrevention: publicAccessPrevention(in.IamConfiguration)}
 	if isSet(uniform) && aclRequested(r) {
-		return nil, uniformAccessACL()
+		return nil, uniformAccessBucketACL()
 	}
 	if objectRetention {
 		b.ObjectRetention = &BucketObjectRetention{Mode: "Enabled"}
@@ -596,6 +604,9 @@ func (s *Server) store(b Bucket) (*bucket, *apiError) {
 		b.SoftDeletePolicy.EffectiveTime = now
 	}
 	if c := b.IamConfiguration; c != nil {
+		if err := checkPublicAccessPrevention(c.PublicAccessPrevention); err != nil {
+			return nil, err
+		}
 		b.IamConfiguration = iamConfiguration(c.UniformBucketLevelAccess.Enabled || c.BucketPolicyOnly.Enabled, c.PublicAccessPrevention, t)
 	} else {
 		b.IamConfiguration = iamConfiguration(false, "", t)
@@ -724,7 +735,7 @@ func (s *Server) patchBucket(r *http.Request) (any, *apiError) {
 		return nil, err
 	}
 	if iam.UniformBucketLevelAccess.Enabled && aclRequested(r) {
-		return nil, uniformAccessACL()
+		return nil, uniformAccessBucketACL()
 	}
 	if len(labels) == 0 {
 		labels = nil

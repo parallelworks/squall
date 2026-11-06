@@ -62,19 +62,28 @@
 //     too, ordered by name and then generation. Deleting a bucket fails with
 //     409 conflict while any generation, live or noncurrent, remains.
 //   - iamConfiguration takes uniformBucketLevelAccess and its former name
-//     bucketPolicyOnly, which must agree (400 invalid otherwise, inferred),
-//     and publicAccessPrevention, inherited by default or enforced. Every
+//     bucketPolicyOnly; when a body has both, uniformBucketLevelAccess
+//     wins, as the discovery document and the Go client say, so the body a
+//     get returns can be sent back with only it changed. It also takes
+//     publicAccessPrevention, inherited by default or enforced. Every
 //     bucket reports all three, as Cloud Storage does. Turning uniform
 //     bucket-level access on sets a lockedTime 90 days later, after which
 //     turning it off fails with 400 invalid, and while managed folders
 //     remain with 409 conflict (statuses and messages inferred), as the
 //     docs say they must be deleted first. While it is on, a predefinedAcl
-//     or predefinedDefaultObjectAcl on buckets.insert, buckets.patch, an
-//     upload, objects.patch or objects.update fails with 400 badRequest, as
-//     the uniform bucket-level access docs and the status codes reference
-//     give it; the message is inferred. acl and defaultObjectAcl bodies are
-//     rejected with 400 on every bucket, and copies, rewrites and composes
-//     are not supported.
+//     on an upload, objects.patch or objects.update fails with 400 invalid
+//     and the message "Cannot insert legacy ACL for an object when uniform
+//     bucket-level access is enabled. Read more at
+//     https://cloud.google.com/storage/docs/uniform-bucket-level-access",
+//     which is what Cloud Storage answers, though the status codes
+//     reference lists the case under badRequest. objects.restore with
+//     copySourceAcl=true, which its reference applies only to buckets
+//     without uniform access, fails the same way (inferred). A
+//     predefinedAcl or predefinedDefaultObjectAcl on buckets.insert or
+//     buckets.patch fails with 400 badRequest, as the status codes
+//     reference gives it (message inferred). acl and defaultObjectAcl
+//     bodies are rejected with 400 on every bucket, and copies, rewrites
+//     and composes are not supported.
 //   - Managed folders can be used only in a bucket with uniform
 //     bucket-level access, as the docs require. Every managedFolders call
 //     on another bucket fails with 409 conflict: the Go client library's
@@ -225,7 +234,9 @@
 // an objects.update that removes it by leaving it out (inferred), and
 // overrideUnlockedRetention=true storage.objects.overrideUnlockedRetention;
 // a managedFolders.delete with allowNonEmpty=true needs
-// storage.managedFolders.setIamPolicy.
+// storage.managedFolders.setIamPolicy, and an objects.restore with
+// copySourceAcl=true in a bucket without uniform bucket-level access
+// storage.objects.setIamPolicy.
 // projection=full needs nothing more: Cloud Storage leaves out the ACLs a
 // caller may not read rather than refusing the call, and the official
 // clients ask for it on every get and list. Permissions are not checked
@@ -635,9 +646,7 @@ func checkMatch(r *http.Request, match, notMatch string, value int64) *apiError 
 	return nil
 }
 
-// page returns the key-ordered items after the page token, and the last key
-// of the page before, up to the page size that the first set of sizeParams
-// gives; sizeParams that are both set must agree.
+// page returns the key-ordered items after the page token, and the last key of the page before, up to the page size sizeParams give, which must agree.
 func page[T any](r *http.Request, items []T, key func(T) string, sizeParams ...string) ([]T, string, *apiError) {
 	limit := maxList
 	var size int64
@@ -652,6 +661,9 @@ func page[T any](r *http.Request, items []T, key func(T) string, sizeParams ...s
 		}
 		if n < 0 {
 			return nil, "", invalid("Invalid value for %s: %d", p, n)
+		}
+		if n == 0 {
+			continue
 		}
 		if sized != "" && n != size {
 			return nil, "", invalid("squall: %s and %s disagree", sized, p)

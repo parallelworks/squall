@@ -2,6 +2,7 @@ package storage_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -70,6 +71,7 @@ func TestManagedFolderErrors(t *testing.T) {
 		{"a metageneration mismatch", http.MethodGet, "/storage/v1/b/mfb/managedFolders/a%2F?ifMetagenerationMatch=2", "", http.StatusPreconditionFailed, "conditionNotMet"},
 		{"a delete on a metageneration match", http.MethodDelete, "/storage/v1/b/mfb/managedFolders/a%2F?ifMetagenerationNotMatch=1", "", http.StatusPreconditionFailed, "conditionNotMet"},
 		{"page sizes that disagree", http.MethodGet, "/storage/v1/b/mfb/managedFolders?pageSize=1&maxResults=2", "", http.StatusBadRequest, "invalid"},
+		{"a page size of 0 beside another", http.MethodGet, "/storage/v1/b/mfb/managedFolders?pageSize=0&maxResults=2", "", http.StatusOK, ""},
 		{"a negative page size", http.MethodGet, "/storage/v1/b/mfb/managedFolders?pageSize=-1", "", http.StatusBadRequest, "invalid"},
 		{"a bad allowNonEmpty", http.MethodDelete, "/storage/v1/b/mfb/managedFolders/a%2F?allowNonEmpty=yes", "", http.StatusBadRequest, "invalid"},
 		{"an IAM policy", http.MethodGet, "/storage/v1/b/mfb/managedFolders/a%2F/iam", "", http.StatusNotFound, "notFound"},
@@ -77,7 +79,7 @@ func TestManagedFolderErrors(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			code, body := do(t, s, tc.method, tc.target, "application/json", tc.body)
-			if code != tc.status || !strings.Contains(body, `"reason":"`+tc.reason+`"`) {
+			if code != tc.status || tc.reason != "" && !strings.Contains(body, `"reason":"`+tc.reason+`"`) {
 				t.Errorf("%s %s = %d %s, want %d %s", tc.method, tc.target, code, body, tc.status, tc.reason)
 			}
 		})
@@ -198,7 +200,6 @@ func TestUniformAccessLocksAfter90Days(t *testing.T) {
 		t.Errorf("turning it off after 90 days = %d %s, want 400", code, body)
 	}
 	for _, in := range []string{
-		`{"iamConfiguration":{"bucketPolicyOnly":{"enabled":true},"uniformBucketLevelAccess":{"enabled":false}}}`,
 		`{"iamConfiguration":{"publicAccessPrevention":"open"}}`,
 		`{"iamConfiguration":null}`,
 	} {
@@ -254,22 +255,66 @@ func TestUniformAccessRefusesACLs(t *testing.T) {
 	if _, err := s.PutObject("uniform", "k", []byte("x")); err != nil {
 		t.Fatal(err)
 	}
-	for _, tc := range []struct{ name, method, target, body string }{
-		{"a bucket insert", http.MethodPost, "/storage/v1/b?project=p&predefinedAcl=private", strings.Replace(uniformBucket, "%s", "acl-bucket", 1)},
-		{"a bucket patch", http.MethodPatch, "/storage/v1/b/uniform?predefinedDefaultObjectAcl=projectPrivate", `{}`},
-		{"a patch turning it on", http.MethodPatch, "/storage/v1/b/fine-grained?predefinedAcl=private", `{"iamConfiguration":{"uniformBucketLevelAccess":{"enabled":true}}}`},
-		{"an upload", http.MethodPost, "/upload/storage/v1/b/uniform/o?uploadType=media&name=n&predefinedAcl=private", "x"},
-		{"an object patch", http.MethodPatch, "/storage/v1/b/uniform/o/k?predefinedAcl=projectPrivate", `{}`},
-		{"an object update", http.MethodPut, "/storage/v1/b/uniform/o/k?predefinedAcl=private", `{}`},
+	if _, err := s.PutSoftDeletedObject("uniform", "gone", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	gone := s.SoftDeletedObjects("uniform")[0].Generation
+	const legacy = "Cannot insert legacy ACL for an object when uniform bucket-level access is enabled."
+	for _, tc := range []struct{ name, method, target, body, reason string }{
+		{"a bucket insert", http.MethodPost, "/storage/v1/b?project=p&predefinedAcl=private", strings.Replace(uniformBucket, "%s", "acl-bucket", 1), "badRequest"},
+		{"a bucket patch", http.MethodPatch, "/storage/v1/b/uniform?predefinedDefaultObjectAcl=projectPrivate", `{}`, "badRequest"},
+		{"a patch turning it on", http.MethodPatch, "/storage/v1/b/fine-grained?predefinedAcl=private", `{"iamConfiguration":{"uniformBucketLevelAccess":{"enabled":true}}}`, "badRequest"},
+		{"an upload", http.MethodPost, "/upload/storage/v1/b/uniform/o?uploadType=media&name=n&predefinedAcl=private", "x", "invalid"},
+		{"an object patch", http.MethodPatch, "/storage/v1/b/uniform/o/k?predefinedAcl=projectPrivate", `{}`, "invalid"},
+		{"an object update", http.MethodPut, "/storage/v1/b/uniform/o/k?predefinedAcl=private", `{}`, "invalid"},
+		{"a restore copying the ACL", http.MethodPost, fmt.Sprintf("/storage/v1/b/uniform/o/gone/restore?generation=%d&copySourceAcl=true", gone), "", "invalid"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			code, body := do(t, s, tc.method, tc.target, "application/json", tc.body)
-			if code != http.StatusBadRequest || !strings.Contains(body, `"reason":"badRequest"`) {
-				t.Errorf("%s %s = %d %s, want 400 badRequest", tc.method, tc.target, code, body)
+			if code != http.StatusBadRequest || !strings.Contains(body, `"reason":"`+tc.reason+`"`) || tc.reason == "invalid" && !strings.Contains(body, legacy) {
+				t.Errorf("%s %s = %d %s, want 400 %s", tc.method, tc.target, code, body, tc.reason)
 			}
 		})
 	}
+	if code, body := do(t, s, http.MethodPost, fmt.Sprintf("/storage/v1/b/uniform/o/gone/restore?generation=%d", gone), "", ""); code != http.StatusOK {
+		t.Errorf("restore without copySourceAcl = %d %s", code, body)
+	}
 	if code, body := do(t, s, http.MethodPatch, "/storage/v1/b/fine-grained?predefinedAcl=private", "application/json", `{}`); code != http.StatusOK {
 		t.Errorf("an ACL without uniform access = %d %s", code, body)
+	}
+}
+
+func TestUniformAccessNameWinsOverItsFormerName(t *testing.T) {
+	s := storage.New()
+	uniform(t, s, "names")
+	code, body := do(t, s, http.MethodPatch, "/storage/v1/b/names", "application/json", `{"iamConfiguration":{"bucketPolicyOnly":{"enabled":true},"uniformBucketLevelAccess":{"enabled":false}}}`)
+	if code != http.StatusOK || !strings.Contains(body, `"bucketPolicyOnly":{"enabled":false}`) {
+		t.Errorf("patch = %d %s", code, body)
+	}
+}
+
+func TestPutBucketChecksPublicAccessPrevention(t *testing.T) {
+	s := storage.New()
+	if _, err := s.PutBucket(storage.Bucket{Name: "pap", Project: "p", IamConfiguration: &storage.IamConfiguration{PublicAccessPrevention: "bogus"}}); err == nil {
+		t.Error("PutBucket with publicAccessPrevention bogus succeeded")
+	}
+	b, err := s.PutBucket(storage.Bucket{Name: "pap", Project: "p", IamConfiguration: &storage.IamConfiguration{PublicAccessPrevention: "enforced"}})
+	if err != nil || b.IamConfiguration.PublicAccessPrevention != "enforced" {
+		t.Errorf("PutBucket = %+v, %v", b.IamConfiguration, err)
+	}
+}
+
+func TestPolicyNeedsSetIamPolicyToCopyARestoredACL(t *testing.T) {
+	policy := access.Allow("storage.objects.restore", "storage.objects.create")
+	s := storage.New(storage.WithPolicy(policy))
+	if _, err := s.PutBucket(storage.Bucket{Name: "acls", Project: "p"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PutSoftDeletedObject("acls", "gone", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	target := fmt.Sprintf("/storage/v1/b/acls/o/gone/restore?generation=%d&copySourceAcl=true", s.SoftDeletedObjects("acls")[0].Generation)
+	if code, body := do(t, s, http.MethodPost, target, "", ""); code != http.StatusForbidden || !strings.Contains(body, "storage.objects.setIamPolicy") {
+		t.Errorf("restore = %d %s, want 403 naming storage.objects.setIamPolicy", code, body)
 	}
 }

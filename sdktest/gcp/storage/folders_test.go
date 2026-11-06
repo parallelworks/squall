@@ -176,8 +176,31 @@ func TestUniformAccessRefusesPredefinedACLs(t *testing.T) {
 	if _, err := w.Write([]byte("x")); err != nil {
 		t.Fatal(err)
 	}
-	wantCode(t, "upload with a predefined ACL", w.Close(), http.StatusBadRequest)
+	err := w.Close()
+	wantCode(t, "upload with a predefined ACL", err, http.StatusBadRequest)
+	if gerr, ok := errors.AsType[*googleapi.Error](err); !ok || len(gerr.Errors) != 1 || gerr.Errors[0].Reason != "invalid" {
+		t.Errorf("upload error = %v, want reason invalid", err)
+	}
 	write(t, c, "uniform", "a.txt", "x")
-	_, err := c.Bucket("uniform").Update(t.Context(), gcs.BucketAttrsToUpdate{PredefinedDefaultObjectACL: "projectPrivate"})
+	_, err = c.Bucket("uniform").Update(t.Context(), gcs.BucketAttrsToUpdate{PredefinedDefaultObjectACL: "projectPrivate"})
 	wantCode(t, "bucket update with a predefined default object ACL", err, http.StatusBadRequest)
+}
+
+func TestReadModifyWriteTurnsUniformAccessOff(t *testing.T) {
+	url := serve(t, storage.New())
+	svc := rawService(t, url)
+	uniformBucket(t, clientAt(t, url), "rmw")
+	b, err := svc.Buckets.Get("rmw").Context(t.Context()).Do()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.IamConfiguration.UniformBucketLevelAccess.Enabled = false
+	b.IamConfiguration.UniformBucketLevelAccess.ForceSendFields = []string{"Enabled"}
+	got, err := svc.Buckets.Patch("rmw", b).Context(t.Context()).Do()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.IamConfiguration.UniformBucketLevelAccess.Enabled || got.IamConfiguration.BucketPolicyOnly.Enabled {
+		t.Errorf("iamConfiguration = %+v", got.IamConfiguration)
+	}
 }
