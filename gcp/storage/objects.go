@@ -241,6 +241,9 @@ func (s *Server) insertObject(r *http.Request) (any, *apiError) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if b := s.buckets[bucketName]; b != nil && b.uniformAccess() && aclRequested(r) {
+		return nil, uniformAccessObjectACL()
+	}
 	o, err := s.writeObject(bucketName, in, data, func(live int64) *apiError {
 		if live == 0 && r.URL.Query().Has("ifGenerationNotMatch") {
 			return conditionNotMet()
@@ -493,6 +496,9 @@ func (s *Server) changeObject(r *http.Request, replace bool) (any, *apiError) {
 	if err != nil {
 		return nil, err
 	}
+	if b.uniformAccess() && aclRequested(r) {
+		return nil, uniformAccessObjectACL()
+	}
 	if in.Bucket != "" && in.Bucket != b.Name || in.Name != "" && in.Name != o.Name {
 		return nil, invalid("squall: an object's bucket and name cannot be changed")
 	}
@@ -614,7 +620,7 @@ func (s *Server) listObjects(r *http.Request) (any, *apiError) {
 			}
 		}
 	}
-	items, next, err := page(r, all, versionKey)
+	items, next, err := page(r, all, versionKey, "maxResults")
 	if err != nil {
 		return nil, err
 	}

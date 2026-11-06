@@ -54,6 +54,7 @@ type Bucket struct {
 	ObjectRetention       *BucketObjectRetention `json:"objectRetention,omitzero"`
 	SoftDeletePolicy      *SoftDeletePolicy      `json:"softDeletePolicy,omitzero"`
 	Billing               *Billing               `json:"billing,omitzero"`
+	IamConfiguration      *IamConfiguration      `json:"iamConfiguration,omitzero"`
 	SoftDeleteTime        string                 `json:"softDeleteTime,omitzero"`
 	HardDeleteTime        string                 `json:"hardDeleteTime,omitzero"`
 
@@ -94,6 +95,19 @@ type BucketObjectRetention struct {
 	Mode string `json:"mode"`
 }
 
+// IamConfiguration is a bucket's uniform bucket-level access setting, reported under both of its names, and public access prevention.
+type IamConfiguration struct {
+	BucketPolicyOnly         UniformBucketLevelAccess `json:"bucketPolicyOnly"`
+	UniformBucketLevelAccess UniformBucketLevelAccess `json:"uniformBucketLevelAccess"`
+	PublicAccessPrevention   string                   `json:"publicAccessPrevention"`
+}
+
+// UniformBucketLevelAccess says whether only IAM governs access to a bucket, and until when that can be turned off.
+type UniformBucketLevelAccess struct {
+	Enabled    bool   `json:"enabled"`
+	LockedTime string `json:"lockedTime,omitzero"`
+}
+
 // Billing is a bucket's billing setting.
 type Billing struct {
 	RequesterPays bool `json:"requesterPays"`
@@ -106,6 +120,7 @@ type bucket struct {
 	// trash holds soft-deleted generations, in the order they were deleted.
 	trash             []*Object
 	softDeleteHistory []policyStep
+	folders           map[string]*ManagedFolder
 	// nextPurge is when the first of trash goes for good.
 	nextPurge time.Time
 	// hardDelete is when a soft-deleted bucket goes for good.
@@ -137,6 +152,9 @@ func (b *bucket) clone() Bucket {
 	if b.Encryption != nil {
 		c.Encryption = new(*b.Encryption)
 	}
+	if b.IamConfiguration != nil {
+		c.IamConfiguration = new(*b.IamConfiguration)
+	}
 	return c
 }
 
@@ -152,7 +170,12 @@ func (b *bucket) softDeleteDuration() time.Duration {
 
 func (b *bucket) requesterPays() bool { return b.Billing != nil && b.Billing.RequesterPays }
 
-func (b *bucket) empty() bool { return len(b.objects) == 0 }
+// empty reports whether b holds no objects and no managed folders.
+func (b *bucket) empty() bool { return len(b.objects) == 0 && len(b.folders) == 0 }
+
+func (b *bucket) uniformAccess() bool {
+	return b.IamConfiguration != nil && b.IamConfiguration.UniformBucketLevelAccess.Enabled
+}
 
 // touch records a change to b's metadata. The caller holds s.mu.
 func (s *Server) touch(b *bucket) { touchAt(b, s.now()) }
@@ -312,6 +335,77 @@ type retentionPolicyInput struct {
 	IsLocked        json.RawMessage `json:"isLocked"`
 }
 
+type uniformAccessInput struct {
+	Enabled    *bool           `json:"enabled"`
+	LockedTime json.RawMessage `json:"lockedTime"`
+}
+
+type iamConfigurationInput struct {
+	BucketPolicyOnly         *uniformAccessInput `json:"bucketPolicyOnly"`
+	UniformBucketLevelAccess *uniformAccessInput `json:"uniformBucketLevelAccess"`
+	PublicAccessPrevention   string              `json:"publicAccessPrevention"`
+}
+
+// uniformAccess returns whether in turns uniform bucket-level access on or off, nil if it does neither; uniformBucketLevelAccess wins over bucketPolicyOnly.
+func (in *iamConfigurationInput) uniformAccess() (*bool, *apiError) {
+	if in == nil {
+		return nil, nil
+	}
+	if err := checkPublicAccessPrevention(in.PublicAccessPrevention); err != nil {
+		return nil, err
+	}
+	var ubla, bpo *bool
+	if in.UniformBucketLevelAccess != nil {
+		ubla = in.UniformBucketLevelAccess.Enabled
+	}
+	if in.BucketPolicyOnly != nil {
+		bpo = in.BucketPolicyOnly.Enabled
+	}
+	return cmp.Or(ubla, bpo), nil
+}
+
+// uniformAccessLock is how long after uniform bucket-level access is turned on it can still be turned off.
+const uniformAccessLock = 90 * 24 * time.Hour
+
+// iamConfiguration is the setting with uniform bucket-level access turned on or off at t, and public access prevention, inherited if empty.
+func iamConfiguration(enabled bool, publicAccess string, t time.Time) *IamConfiguration {
+	u := UniformBucketLevelAccess{Enabled: enabled}
+	if enabled {
+		u.LockedTime = t.Add(uniformAccessLock).UTC().Format(timeFormat)
+	}
+	return &IamConfiguration{BucketPolicyOnly: u, UniformBucketLevelAccess: u, PublicAccessPrevention: cmp.Or(publicAccess, "inherited")}
+}
+
+func publicAccessPrevention(in *iamConfigurationInput) string {
+	if in == nil {
+		return ""
+	}
+	return in.PublicAccessPrevention
+}
+
+// aclRequested reports whether r sets a predefined ACL.
+func aclRequested(r *http.Request) bool {
+	return r.URL.Query().Get("predefinedAcl") != "" || r.URL.Query().Get("predefinedDefaultObjectAcl") != ""
+}
+
+func checkPublicAccessPrevention(p string) *apiError {
+	if p != "" && p != "inherited" && p != "enforced" {
+		return invalid("Invalid argument: publicAccessPrevention '%s' is not valid.", p)
+	}
+	return nil
+}
+
+func uniformAccessBucketACL() *apiError {
+	return &apiError{
+		Status: http.StatusBadRequest, Reason: "badRequest",
+		Message: "Cannot use ACLs on a bucket while uniform bucket-level access is enabled.",
+	}
+}
+
+func uniformAccessObjectACL() *apiError {
+	return invalid("Cannot insert legacy ACL for an object when uniform bucket-level access is enabled. Read more at https://cloud.google.com/storage/docs/uniform-bucket-level-access")
+}
+
 type softDeletePolicyInput struct {
 	RetentionDurationSeconds *int64Value     `json:"retentionDurationSeconds"`
 	EffectiveTime            json.RawMessage `json:"effectiveTime"`
@@ -352,6 +446,7 @@ type bucketInput struct {
 	SoftDeletePolicy      *softDeletePolicyInput `json:"softDeletePolicy"`
 	Billing               *Billing               `json:"billing"`
 	ObjectRetention       *BucketObjectRetention `json:"objectRetention"`
+	IamConfiguration      *iamConfigurationInput `json:"iamConfiguration"`
 	bucketOutputOnly
 	// Lifecycle is accepted without rules, since the client sends it empty.
 	Lifecycle *struct {
@@ -412,6 +507,14 @@ func (s *Server) insertBucket(r *http.Request) (any, *apiError) {
 	}
 	if in.DefaultEventBasedHold != nil {
 		b.DefaultEventBasedHold = *in.DefaultEventBasedHold
+	}
+	uniform, err := in.IamConfiguration.uniformAccess()
+	if err != nil {
+		return nil, err
+	}
+	b.IamConfiguration = &IamConfiguration{UniformBucketLevelAccess: UniformBucketLevelAccess{Enabled: isSet(uniform)}, PublicAccessPrevention: publicAccessPrevention(in.IamConfiguration)}
+	if isSet(uniform) && aclRequested(r) {
+		return nil, uniformAccessBucketACL()
 	}
 	if objectRetention {
 		b.ObjectRetention = &BucketObjectRetention{Mode: "Enabled"}
@@ -500,6 +603,14 @@ func (s *Server) store(b Bucket) (*bucket, *apiError) {
 	if b.SoftDeletePolicy.RetentionDurationSeconds > 0 {
 		b.SoftDeletePolicy.EffectiveTime = now
 	}
+	if c := b.IamConfiguration; c != nil {
+		if err := checkPublicAccessPrevention(c.PublicAccessPrevention); err != nil {
+			return nil, err
+		}
+		b.IamConfiguration = iamConfiguration(c.UniformBucketLevelAccess.Enabled || c.BucketPolicyOnly.Enabled, c.PublicAccessPrevention, t)
+	} else {
+		b.IamConfiguration = iamConfiguration(false, "", t)
+	}
 	b.Location = strings.ToUpper(cmp.Or(b.Location, "US"))
 	b.LocationType = locationType(b.Location, b.CustomPlacementConfig)
 	if len(b.Labels) == 0 {
@@ -566,6 +677,13 @@ func (s *Server) patchBucket(r *http.Request) (any, *apiError) {
 	if cleared("softDeletePolicy") {
 		return nil, invalid("squall: softDeletePolicy cannot be null; a retentionDurationSeconds of 0 turns soft delete off")
 	}
+	if cleared("iamConfiguration") {
+		return nil, invalid("squall: iamConfiguration cannot be null")
+	}
+	uniform, err := in.IamConfiguration.uniformAccess()
+	if err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b, err := s.lookup(r.PathValue("bucket"), "storage.buckets.update")
@@ -612,10 +730,17 @@ func (s *Server) patchBucket(r *http.Request) (any, *apiError) {
 	if err != nil {
 		return nil, err
 	}
+	iam, err := nextIamConfiguration(b, uniform, publicAccessPrevention(in.IamConfiguration), changed)
+	if err != nil {
+		return nil, err
+	}
+	if iam.UniformBucketLevelAccess.Enabled && aclRequested(r) {
+		return nil, uniformAccessBucketACL()
+	}
 	if len(labels) == 0 {
 		labels = nil
 	}
-	b.Labels, b.StorageClass, b.RetentionPolicy, b.SoftDeletePolicy = labels, class, retention, softDelete
+	b.Labels, b.StorageClass, b.RetentionPolicy, b.SoftDeletePolicy, b.IamConfiguration = labels, class, retention, softDelete, iam
 	recordSoftDelete(b, changed)
 	if in.DefaultEventBasedHold != nil {
 		b.DefaultEventBasedHold = *in.DefaultEventBasedHold
@@ -645,6 +770,27 @@ func (s *Server) patchBucket(r *http.Request) (any, *apiError) {
 	}
 	touchAt(b, changed)
 	return b.clone(), nil
+}
+
+// nextIamConfiguration is b's iamConfiguration once uniform, if not nil, turns uniform bucket-level access on or off at t, and publicAccess, if set, replaces its public access prevention.
+func nextIamConfiguration(b *bucket, uniform *bool, publicAccess string, t time.Time) (*IamConfiguration, *apiError) {
+	next := new(*b.IamConfiguration)
+	next.PublicAccessPrevention = cmp.Or(publicAccess, next.PublicAccessPrevention)
+	if uniform == nil || *uniform == b.uniformAccess() {
+		return next, nil
+	}
+	if !*uniform {
+		if len(b.folders) > 0 {
+			return nil, &apiError{
+				Status: http.StatusConflict, Reason: "conflict",
+				Message: "Uniform bucket-level access cannot be disabled while the bucket contains managed folders.",
+			}
+		}
+		if locked, err := time.Parse(time.RFC3339, b.IamConfiguration.UniformBucketLevelAccess.LockedTime); err == nil && !t.Before(locked) {
+			return nil, invalid("Uniform bucket-level access cannot be disabled after it has been enabled for 90 days.")
+		}
+	}
+	return iamConfiguration(*uniform, next.PublicAccessPrevention, t), nil
 }
 
 func (s *Server) deleteBucket(r *http.Request) (any, *apiError) {
@@ -704,7 +850,7 @@ func (s *Server) listBuckets(r *http.Request) (any, *apiError) {
 			}
 		}
 	}
-	items, next, err := page(r, all, key)
+	items, next, err := page(r, all, key, "maxResults")
 	if err != nil {
 		return nil, err
 	}
@@ -745,7 +891,7 @@ func (s *Server) PutBucket(b Bucket) (Bucket, error) {
 		Name: b.Name, Location: b.Location, StorageClass: b.StorageClass, Labels: b.Labels, Versioning: b.Versioning,
 		CORS: b.CORS, CustomPlacementConfig: b.CustomPlacementConfig, Encryption: b.Encryption, RPO: b.RPO, Project: b.Project,
 		RetentionPolicy: b.RetentionPolicy, DefaultEventBasedHold: b.DefaultEventBasedHold, ObjectRetention: b.ObjectRetention,
-		SoftDeletePolicy: b.SoftDeletePolicy, Billing: b.Billing,
+		SoftDeletePolicy: b.SoftDeletePolicy, Billing: b.Billing, IamConfiguration: b.IamConfiguration,
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

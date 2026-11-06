@@ -147,7 +147,8 @@ func (s *Server) restoreObject(r *http.Request) (any, *apiError) {
 	if !ok {
 		return nil, required("generation")
 	}
-	if _, err := boolParam(r, "copySourceAcl"); err != nil {
+	copyACL, err := boolParam(r, "copySourceAcl")
+	if err != nil {
 		return nil, err
 	}
 	bucketName, name := r.PathValue("bucket"), r.PathValue("object")
@@ -156,6 +157,9 @@ func (s *Server) restoreObject(r *http.Request) (any, *apiError) {
 	b, err := s.lookup(bucketName, "storage.objects.restore")
 	if err != nil {
 		return nil, err
+	}
+	if copyACL && b.uniformAccess() {
+		return nil, uniformAccessObjectACL()
 	}
 	if b.softDeleteDuration() == 0 && len(b.trash) == 0 {
 		return nil, &apiError{Status: http.StatusBadRequest, Reason: "SoftDeletePolicyRequired", Message: "Soft delete policy is required to restore soft-deleted objects."}
