@@ -614,7 +614,7 @@ func (s *Server) listObjects(r *http.Request) (any, *apiError) {
 			}
 		}
 	}
-	items, next, err := page(r, all, versionKey)
+	items, next, err := page(r, "maxResults", all, versionKey)
 	if err != nil {
 		return nil, err
 	}

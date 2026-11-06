@@ -34,7 +34,7 @@ failure replays from its seed.
 | [`gcp/resourcemanager`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/resourcemanager) | Cloud Resource Manager: projects (get by ID or number, getIamPolicy, setIamPolicy with etag checks, testIamPermissions answered from the server's access policy), seeded by the test. |
 | [`gcp/servicenetworking`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/servicenetworking) | Service Networking: private service connections (create, list by network, patch with force, deleteConnection), checked against a `gcp/compute` server's networks and allocated ranges and peering the network there, and their long-running operations (get). |
 | [`gcp/serviceusage`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/serviceusage) | Service Usage: services (enable, disable, get, list by state) in projects seeded by the test and named by number or ID, and their long-running operations (get). |
-| [`gcp/storage`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/storage) | Cloud Storage: buckets (insert, get, list, patch labels, versioning, CORS, retention policies, soft delete policies and Requester Pays, lock a retention policy, delete with soft delete, list and restore soft-deleted ones) and objects (multipart and media uploads, get, patch and update metadata, temporary, event-based and default holds, object retention, list with versions or soft-deleted generations, delete by generation, restore). |
+| [`gcp/storage`](https://pkg.go.dev/github.com/parallelworks/squall/gcp/storage) | Cloud Storage: buckets (insert, get, list, patch labels, versioning, CORS, retention policies, soft delete policies, Requester Pays and uniform bucket-level access, lock a retention policy, delete with soft delete, list and restore soft-deleted ones), managed folders (insert, get, list with prefixes and pages, delete, empty unless allowNonEmpty) and objects (multipart and media uploads, get, patch and update metadata, temporary, event-based and default holds, object retention, list with versions or soft-deleted generations, delete by generation, restore). |
 
 Coverage grows with use: each stand-in implements the methods someone needed,
 answers anything else with 404, and documents how faithful it is. Contributions
@@ -427,8 +427,16 @@ For Cloud Storage:
   tokens are positions, so a listing survives deletes between pages.
   Resumable uploads, media reads, IAM policies and HMAC keys are not
   supported.
+- Managed folders need uniform bucket-level access on their bucket, and their
+  names end with `/`. Deleting one that holds objects or other managed
+  folders fails unless `allowNonEmpty=true`, which needs
+  `storage.managedFolders.setIamPolicy` under `WithPolicy` and leaves what it
+  held in place. A bucket with a managed folder left cannot be deleted, nor
+  can its uniform bucket-level access be turned off. `PutManagedFolder` makes
+  one directly. Managed folder IAM policies are not supported.
 - A fault rule's `Resource` is the path below `/storage/v1/`, such as
-  `b/my-bucket/o/my-object`, and for an insert the bucket or object it makes.
+  `b/my-bucket/o/my-object` or `b/my-bucket/managedFolders/logs/`, and for an
+  insert the bucket, object or managed folder it makes.
 
 For Azure Resource Manager:
 

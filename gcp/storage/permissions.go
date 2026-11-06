@@ -35,6 +35,10 @@ var basePermissions = map[string][]string{
 	"storage.objects.delete":              {"storage.objects.delete"},
 	"storage.objects.insert":              {"storage.objects.create"},
 	"storage.objects.restore":             {"storage.objects.restore", "storage.objects.create"},
+	"storage.managedFolders.insert":       {"storage.managedFolders.create"},
+	"storage.managedFolders.list":         {"storage.managedFolders.list"},
+	"storage.managedFolders.get":          {"storage.managedFolders.get"},
+	"storage.managedFolders.delete":       {"storage.managedFolders.delete"},
 }
 
 // Requester Pays calls need serviceUsage with a userProject and createBillingAssignment without one.
@@ -68,6 +72,8 @@ func (s *Server) needs(method, resource string, r *http.Request) []string {
 		add(q.Get("overrideUnlockedRetention") == "true", "storage.objects.overrideUnlockedRetention")
 	case "storage.objects.restore":
 		add(s.exists(resource), "storage.objects.delete")
+	case "storage.managedFolders.delete":
+		add(q.Get("allowNonEmpty") == "true", "storage.managedFolders.setIamPolicy")
 	}
 	if method != "storage.buckets.insert" && method != "storage.buckets.list" && s.requesterPays(resource) {
 		add(q.Get("userProject") != "", serviceUsage)

@@ -13,7 +13,8 @@
 //
 //   - buckets: insert, get, list, patch, delete, lockRetentionPolicy, restore;
 //   - objects: insert by multipart or media upload, get (metadata only),
-//     patch, update, list, delete, restore.
+//     patch, update, list, delete, restore;
+//   - managedFolders: insert, get, list, delete.
 //
 // Other methods answer 404. Where it differs from Cloud Storage:
 //
@@ -33,11 +34,11 @@
 //     and the rest regions. Project numbers are derived from project IDs.
 //   - Writable bucket fields other than name, location, storageClass,
 //     labels, versioning, cors, customPlacementConfig, encryption, rpo,
-//     retentionPolicy, defaultEventBasedHold, softDeletePolicy, billing and
-//     objectRetention are rejected with 400, as are other unknown fields and
-//     ACLs other than private and projectPrivate. cors, encryption and rpo
-//     are recorded, not enforced. There are no IAM policies on buckets or
-//     objects, and no lifecycle, autoclass, hardDeletePause or hierarchical
+//     retentionPolicy, defaultEventBasedHold, softDeletePolicy, billing,
+//     objectRetention and iamConfiguration are rejected with 400, as are
+//     other unknown fields and ACLs other than private and projectPrivate.
+//     cors, encryption and rpo are recorded, not enforced. There are no IAM
+//     policies on buckets, objects or managed folders, and no lifecycle, autoclass, hardDeletePause or hierarchical
 //     namespace. buckets.patch has patch semantics: it merges labels,
 //     deleting one set to null, and clears labels, versioning, cors,
 //     encryption, rpo, retentionPolicy, defaultEventBasedHold or billing set
@@ -59,6 +60,36 @@
 //     generation noncurrent, and objects.list with versions=true lists those
 //     too, ordered by name and then generation. Deleting a bucket fails with
 //     409 conflict while any generation, live or noncurrent, remains.
+//   - iamConfiguration takes uniformBucketLevelAccess and its former name
+//     bucketPolicyOnly, which must agree (400 invalid otherwise, inferred),
+//     and is reported under both once set; publicAccessPrevention other
+//     than inherited is rejected with 400. Turning uniform bucket-level
+//     access on sets a lockedTime 90 days later, after which turning it off
+//     fails with 400 invalid, and while managed folders remain with 409
+//     conflict (statuses and messages inferred). ACLs are not checked
+//     against it.
+//   - Managed folders can be used only in a bucket with uniform bucket-level
+//     access: every managedFolders call on another bucket fails with 409
+//     conflict. Cloud Storage answers that as FAILED_PRECONDITION over gRPC;
+//     the JSON API's 409 for it, as for its other failed preconditions on a
+//     resource's state, and the message are inferred. A name ends with "/", and one sent without it gets one
+//     (inferred); it is 1 to 1,024 bytes of UTF-8 with at most 15 "/"s, no
+//     carriage return or line feed, not "." or ".." and not under
+//     .well-known/acme-challenge/, with 400 invalid otherwise (message
+//     inferred). Inserting one that exists fails with 409 conflict, and a
+//     missing one answers 404 notFound (both messages inferred). id is the
+//     bucket and name joined by "/", and selfLink the folder's path with the
+//     name escaped (both inferred); metageneration stays 1, as nothing
+//     changes a managed folder. Deleting one that holds any object
+//     generation, live or noncurrent, or another managed folder under its
+//     name fails with 409 conflict (status, reason and message inferred),
+//     unless allowNonEmpty=true, which leaves
+//     the objects and nested managed folders in place (the nested ones
+//     inferred). A bucket with a managed folder left is not empty, so
+//     deleting it fails with the 409 conflict for objects, whose message is
+//     inferred to be the same. managedFolders.list takes prefix, pageToken
+//     and pageSize (at most 1,000), and lists in name order. update, the IAM
+//     policy methods and rapidCacheConfig are not supported.
 //   - A retention policy's retentionPeriod is greater than 0 and at most
 //     3,155,760,000 seconds (100 years), and its effectiveTime is when it
 //     was set or its period last changed (inferred). Each object reports
@@ -163,8 +194,10 @@
 //
 // Fault method names are the API's method IDs, such as
 // "storage.buckets.insert". A call's resource is its path below
-// /storage/v1/, such as "b/my-bucket" or "b/my-bucket/o/my-object"; an
-// insert names the bucket or object it creates, and buckets.list names
+// /storage/v1/, such as "b/my-bucket", "b/my-bucket/o/my-object" or
+// "b/my-bucket/managedFolders/logs/", unescaped and with the managed
+// folder's trailing "/"; an insert names the bucket, object or managed
+// folder it creates, and buckets.list names
 // "projects/my-project/b". The JSON API has no long-running operations, so
 // [fault.ModeFailOperation] fails a call as [fault.ModeReject] does.
 //
@@ -176,7 +209,9 @@
 // storage.objects.delete, as does a restore that replaces one; a body that
 // includes retention, even null, needs storage.objects.setRetention, as does
 // an objects.update that removes it by leaving it out (inferred), and
-// overrideUnlockedRetention=true storage.objects.overrideUnlockedRetention.
+// overrideUnlockedRetention=true storage.objects.overrideUnlockedRetention;
+// a managedFolders.delete with allowNonEmpty=true needs
+// storage.managedFolders.setIamPolicy.
 // projection=full needs nothing more: Cloud Storage leaves out the ACLs a
 // caller may not read rather than refusing the call, and the official
 // clients ask for it on every get and list. Permissions are not checked
@@ -304,6 +339,12 @@ func (s *Server) registerRoutes() {
 	s.route("POST "+bucket+"/lockRetentionPolicy", "storage.buckets.lockRetentionPolicy", s.lockRetentionPolicy, bucketTarget,
 		"ifMetagenerationMatch")
 	s.route("POST "+bucket+"/restore", "storage.buckets.restore", s.restoreBucket, bucketTarget, "generation", "projection")
+	s.route("POST "+bucket+"/managedFolders", "storage.managedFolders.insert", s.insertFolder, folderInsertTarget)
+	s.route("GET "+bucket+"/managedFolders", "storage.managedFolders.list", s.listFolders, nil, "prefix", "pageToken", "pageSize")
+	s.route("GET "+bucket+"/managedFolders/{folder}", "storage.managedFolders.get", s.getFolder, folderTarget,
+		"ifMetagenerationMatch", "ifMetagenerationNotMatch")
+	s.route("DELETE "+bucket+"/managedFolders/{folder}", "storage.managedFolders.delete", s.deleteFolder, folderTarget,
+		"allowNonEmpty", "ifMetagenerationMatch", "ifMetagenerationNotMatch")
 	s.route("GET "+bucket+"/o", "storage.objects.list", s.listObjects, nil,
 		"projection", "prefix", "delimiter", "pageToken", "maxResults", "versions", "startOffset", "endOffset",
 		"includeTrailingDelimiter", "matchGlob", "includeFoldersAsPrefixes", "softDeleted", "filter")
@@ -579,14 +620,14 @@ func checkMatch(r *http.Request, match, notMatch string, value int64) *apiError 
 	return nil
 }
 
-// page returns the key-ordered items after the page token, the last key of the page before, up to maxResults.
-func page[T any](r *http.Request, items []T, key func(T) string) ([]T, string, *apiError) {
+// page returns the key-ordered items after the page token, the last key of the page before, up to the sizeParam parameter.
+func page[T any](r *http.Request, sizeParam string, items []T, key func(T) string) ([]T, string, *apiError) {
 	limit := maxList
-	if n, ok, err := int64Param(r, "maxResults"); err != nil {
+	if n, ok, err := int64Param(r, sizeParam); err != nil {
 		return nil, "", err
 	} else if ok {
 		if n < 0 {
-			return nil, "", invalid("Invalid value for maxResults: %d", n)
+			return nil, "", invalid("Invalid value for %s: %d", sizeParam, n)
 		}
 		if n > 0 && n < maxList {
 			limit = int(n)
