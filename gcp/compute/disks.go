@@ -13,6 +13,7 @@ const (
 	diskCreating = "CREATING"
 	diskReady    = "READY"
 	diskDeleting = "DELETING"
+	diskFailed   = "FAILED"
 )
 
 // Disk is a zonal persistent disk, in the API's JSON shape.
@@ -257,6 +258,34 @@ func (s *Server) LookupDisk(project, zone, name string) (Disk, bool) {
 		return Disk{}, false
 	}
 	return jsonClone(d), true
+}
+
+// PutDisk stores d in project and zone as if it had been inserted, and
+// returns it as stored. Its status is READY, or FAILED for a disk whose
+// creation failed, which Compute Engine keeps until it is deleted: it cannot
+// be attached or snapshotted. Use it to set up such state. It fills in what an
+// insert does and fails as an insert would, for a name already taken too.
+func (s *Server) PutDisk(project, zone string, d Disk) (Disk, error) {
+	status := cmp.Or(d.Status, diskReady)
+	if status != diskReady && status != diskFailed {
+		return Disk{}, invalid("Invalid value for field 'resource.status': '%s'. Must be READY or FAILED.", d.Status)
+	}
+	if _, ok := s.zoneRegion[zone]; !ok {
+		return Disk{}, invalid("Invalid value for field 'zone': '%s'. Unknown zone.", zone)
+	}
+	scope := "projects/" + project + "/zones/" + zone
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	stored, err := s.newDisk(scope, "resource", d)
+	if err != nil {
+		return Disk{}, err
+	}
+	if _, ok := lookupIn(s.disks, scope, stored.Name); ok {
+		return Disk{}, alreadyExists(diskPath(scope, stored.Name))
+	}
+	stored.Status = status
+	scoped(s.disks, scope).put(stored.Name, stored)
+	return jsonClone(stored), nil
 }
 
 // release takes user off d's users. The caller holds s.mu.

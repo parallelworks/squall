@@ -44,7 +44,7 @@ func unimplemented(r *http.Request) *apiError {
 func faultError(f fault.Fault) *apiError {
 	return &apiError{
 		Status:  cmp.Or(f.Status, http.StatusServiceUnavailable),
-		Message: fmt.Sprintf("squall: injected fault (%s)", f),
+		Message: f.ErrorMessage(),
 		Reason:  reason.UpperSnake(f.Reason),
 		Domain:  service,
 	}

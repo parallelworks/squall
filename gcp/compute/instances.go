@@ -22,6 +22,8 @@ const (
 	statusRunning      = "RUNNING"
 	statusStopping     = "STOPPING"
 	statusTerminated   = "TERMINATED"
+	statusSuspending   = "SUSPENDING"
+	statusSuspended    = "SUSPENDED"
 
 	maxNetworkInterfaces = 8
 	maxBulkCount         = 1000
@@ -53,6 +55,7 @@ type Instance struct {
 	StartRestricted            bool               `json:"startRestricted"`
 	LastStartTimestamp         string             `json:"lastStartTimestamp,omitzero"`
 	LastStopTimestamp          string             `json:"lastStopTimestamp,omitzero"`
+	LastSuspendedTimestamp     string             `json:"lastSuspendedTimestamp,omitzero"`
 	ResourcePolicies           []string           `json:"resourcePolicies,omitzero"`
 	Hostname                   string             `json:"hostname,omitzero"`
 	MinCPUPlatform             string             `json:"minCpuPlatform,omitzero"`
@@ -234,7 +237,7 @@ func (s *Server) newInstance(zone, region, name, field string, props Instance, b
 	inst.CreationTimestamp = timestamp(s.now())
 	inst.Zone, inst.SelfLink = selfLinkBase+zone, selfLinkBase+path
 	inst.Status, inst.StartRestricted = statusProvisioning, false
-	inst.LastStartTimestamp, inst.LastStopTimestamp, inst.op = "", "", nil
+	inst.LastStartTimestamp, inst.LastStopTimestamp, inst.LastSuspendedTimestamp, inst.op = "", "", "", nil
 	inst.LabelFingerprint = fingerprint(inst.Labels)
 	inst.Tags.Fingerprint = hash(inst.Tags.Items)
 	inst.Metadata.Kind, inst.Metadata.Fingerprint = "compute#metadata", hash(inst.Metadata.Items)
@@ -741,8 +744,9 @@ func decodeValue(b []byte) any {
 }
 
 // bulkNames are the names a bulkInsert creates: those it lists, in order, and
-// then as many from its pattern as count asks for. The caller holds s.mu.
-func (s *Server) bulkNames(zone string, in *bulkInsertInput) ([]string, *apiError) {
+// then as many from its pattern as count asks for, numbered after the
+// instances in zones. The caller holds s.mu.
+func (s *Server) bulkNames(zones []string, in *bulkInsertInput) ([]string, *apiError) {
 	names := slices.Sorted(maps.Keys(in.PerInstanceProperties))
 	for _, name := range names {
 		if p := in.PerInstanceProperties[name]; p.Name != "" && p.Name != name {
@@ -765,7 +769,11 @@ func (s *Server) bulkNames(zone string, in *bulkInsertInput) ([]string, *apiErro
 		return nil, invalid("Invalid value for field 'resource.namePattern': '%s'. The pattern must hold one run of 1 to 18 '#' characters.", in.NamePattern)
 	}
 	next := uint64(0)
-	if c := s.instances[zone]; c != nil {
+	for _, zone := range zones {
+		c := s.instances[zone]
+		if c == nil {
+			continue
+		}
 		for _, name := range c.names {
 			digits, hasPrefix := strings.CutPrefix(name, prefix)
 			if digits, ok := strings.CutSuffix(digits, suffix); hasPrefix && ok && len(digits) == width {
@@ -788,6 +796,65 @@ func (s *Server) bulkNames(zone string, in *bulkInsertInput) ([]string, *apiErro
 	return names, nil
 }
 
+// locationPolicy is a regional bulkInsert's locationPolicy.
+type locationPolicy struct {
+	Locations map[string]struct {
+		Preference  string          `json:"preference"`
+		Constraints json.RawMessage `json:"constraints"`
+	} `json:"locations"`
+	TargetShape string `json:"targetShape"`
+}
+
+// placeBulk returns the zone, as a path, of each of n instances a regional
+// bulkInsert creates in region, from the zones its policy allows: all in the
+// first allowed zone in name order, or spread across the allowed zones in turn
+// when the policy's targetShape is BALANCED. The caller holds s.mu.
+func (s *Server) placeBulk(project, region string, raw json.RawMessage, n int) ([]string, *apiError) {
+	zones := slices.Sorted(slices.Values(s.regionZones[region]))
+	if len(zones) == 0 {
+		return nil, invalid("Invalid value for field 'region': '%s'. Unknown region.", region)
+	}
+	var policy locationPolicy
+	if len(raw) > 0 && string(raw) != "null" {
+		if err := unmarshalStrict(raw, &policy); err != nil {
+			return nil, err
+		}
+	}
+	denied := map[string]bool{}
+	for key, loc := range policy.Locations {
+		zone, ok := strings.CutPrefix(key, "zones/")
+		if !ok || !slices.Contains(zones, zone) {
+			return nil, invalid("Invalid value for field 'resource.locationPolicy.locations': '%s'. The location must be a zone of region '%s'.", key, region)
+		}
+		switch loc.Preference {
+		case "", "PREFERENCE_UNSPECIFIED", "ALLOW":
+		case "DENY":
+			denied[zone] = true
+		default:
+			return nil, invalid("Invalid value for field 'resource.locationPolicy.locations[%s].preference': '%s'.", key, loc.Preference)
+		}
+	}
+	allowed := slices.DeleteFunc(zones, func(z string) bool { return denied[z] })
+	if len(allowed) == 0 {
+		return nil, invalid("Invalid value for field 'resource.locationPolicy': every zone of region '%s' is denied.", region)
+	}
+	switch policy.TargetShape {
+	case "", "ANY", "ANY_SINGLE_ZONE":
+		allowed = allowed[:1]
+	case "BALANCED":
+	default:
+		return nil, invalid("Invalid value for field 'resource.locationPolicy.targetShape': '%s'.", policy.TargetShape)
+	}
+	placed := make([]string, n)
+	for i := range placed {
+		placed[i] = "projects/" + project + "/zones/" + allowed[i%len(allowed)]
+	}
+	return placed, nil
+}
+
+// bulkInsertInstances answers a bulkInsert, zonal or regional. A regional one
+// places its instances with placeBulk, and its names must be free in every
+// zone of the region.
 func (s *Server) bulkInsertInstances(r *http.Request, opFault *apiError) (any, *apiError) {
 	var in bulkInsertInput
 	if err := decodeStrict(r, &in); err != nil {
@@ -818,14 +885,14 @@ func (s *Server) bulkInsertInstances(r *http.Request, opFault *apiError) (any, *
 	if err != nil {
 		return nil, err
 	}
-	zone, region := scopeOf(r), s.regionOfZone(r)
+	project := r.PathValue("project")
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if op, ok := s.requests[reqID]; ok {
 		return encoded(op), nil
 	}
 	if in.SourceInstanceTemplate != "" {
-		template, err := s.templateProperties(projectOf(zone), in.SourceInstanceTemplate)
+		template, err := s.templateProperties(project, in.SourceInstanceTemplate)
 		if err != nil {
 			return nil, err
 		}
@@ -837,11 +904,29 @@ func (s *Server) bulkInsertInstances(r *http.Request, opFault *apiError) (any, *
 	if props.Name != "" {
 		return nil, invalid("Invalid JSON payload received. Unknown name \"name\" at '%s': Cannot find field.", field)
 	}
-	names, err := s.bulkNames(zone, &in)
+	regionName, regional := r.PathValue("region"), r.PathValue("zone") == ""
+	inRegion := []string{scopeOf(r)}
+	if regional {
+		inRegion = nil
+		for _, z := range s.regionZones[regionName] {
+			inRegion = append(inRegion, "projects/"+project+"/zones/"+z)
+		}
+	} else {
+		regionName = s.zoneRegion[r.PathValue("zone")]
+	}
+	region := "projects/" + project + "/regions/" + regionName
+	names, err := s.bulkNames(inRegion, &in)
 	if err != nil {
 		return nil, err
 	}
+	placed := slices.Repeat(inRegion, len(names))
+	if regional {
+		if placed, err = s.placeBulk(project, regionName, in.LocationPolicy, len(names)); err != nil {
+			return nil, err
+		}
+	}
 	type built struct {
+		zone   string
 		inst   *Instance
 		disks  []*Disk
 		claims []claim
@@ -850,10 +935,17 @@ func (s *Server) bulkInsertInstances(r *http.Request, opFault *apiError) (any, *
 		batch     []built
 		insts     []*Instance
 		disks     []*Disk
-		conflicts []operationError
+		conflicts []OperationError
 		creating  = map[string]bool{}
+		metadata  = &bulkInsertMetadata{map[string]bulkInsertStatus{}}
+		created   = map[string]bulkInsertStatus{}
 	)
-	for _, name := range names {
+	for i, name := range names {
+		zone := placed[i]
+		location := "zones/" + zone[strings.LastIndexByte(zone, '/')+1:]
+		status := metadata.PerLocationStatus[location]
+		status.Status, status.TargetVMCount = "DONE", status.TargetVMCount+1
+		metadata.PerLocationStatus[location] = status
 		p := *props
 		p.Hostname = cmp.Or(in.PerInstanceProperties[name].Hostname, p.Hostname)
 		inst, d, c, err := s.newInstance(zone, region, name, field, p, true)
@@ -861,55 +953,66 @@ func (s *Server) bulkInsertInstances(r *http.Request, opFault *apiError) (any, *
 			return nil, err
 		}
 		before := len(conflicts)
-		if _, ok := lookupIn(s.instances, zone, name); ok {
-			conflicts = append(conflicts, operationError{"RESOURCE_ALREADY_EXISTS", alreadyExists(instancePath(zone, name)).Message})
+		for _, z := range inRegion {
+			if _, ok := lookupIn(s.instances, z, name); ok {
+				conflicts = append(conflicts, OperationError{"RESOURCE_ALREADY_EXISTS", alreadyExists(instancePath(z, name)).Message})
+			}
 		}
 		for _, disk := range d {
-			if _, ok := lookupIn(s.disks, zone, disk.Name); ok || creating[disk.Name] {
-				conflicts = append(conflicts, operationError{"RESOURCE_ALREADY_EXISTS", alreadyExists(diskPath(zone, disk.Name)).Message})
+			if _, ok := lookupIn(s.disks, zone, disk.Name); ok || creating[diskPath(zone, disk.Name)] {
+				conflicts = append(conflicts, OperationError{"RESOURCE_ALREADY_EXISTS", alreadyExists(diskPath(zone, disk.Name)).Message})
 			}
 		}
 		if len(conflicts) > before {
 			continue
 		}
 		for _, disk := range d {
-			creating[disk.Name] = true
+			creating[diskPath(zone, disk.Name)] = true
 		}
-		batch = append(batch, built{inst, d, c})
+		batch = append(batch, built{zone, inst, d, c})
 		insts, disks = append(insts, inst), append(disks, d...)
+		done := created[location]
+		done.CreatedVMCount++
+		created[location] = done
 	}
 	conflicted := len(batch) < int(in.MinCount) && opFault == nil
 	if conflicted {
 		opFault = &apiError{
 			Status: http.StatusConflict, Reason: "resourceAlreadyExists", Message: conflicts[0].Message,
-			opErrors: append([]operationError{{"VM_MIN_COUNT_NOT_REACHED", fmt.Sprintf("Requested minimum count of %d VMs could not be created.", in.MinCount)}}, conflicts...),
+			opErrors: append([]OperationError{{"VM_MIN_COUNT_NOT_REACHED", fmt.Sprintf("Requested minimum count of %d VMs could not be created.", in.MinCount)}}, conflicts...),
 		}
 	}
-	location := "zones/" + r.PathValue("zone")
-	status := bulkInsertStatus{Status: "DONE", TargetVMCount: len(names)}
-	metadata := &bulkInsertMetadata{map[string]bulkInsertStatus{location: status}}
-	target := "projects/" + r.PathValue("project")
+	target := "projects/" + project
 	if opFault != nil {
 		op := s.startOperation(r, reqID, "bulkInsert", target, 0, opFault, nil)
 		if !conflicted {
-			status.FailedToCreateVMCount = len(names)
+			for location, status := range metadata.PerLocationStatus {
+				status.FailedToCreateVMCount = status.TargetVMCount
+				metadata.PerLocationStatus[location] = status
+			}
 		}
-		metadata.PerLocationStatus[location], op.BulkInsert = status, metadata
+		op.BulkInsert = metadata
 		return encoded(op), nil
 	}
 	for _, b := range batch {
-		s.storeInstance(zone, region, b.inst, b.disks, b.claims)
+		s.storeInstance(b.zone, region, b.inst, b.disks, b.claims)
 	}
-	created := status
-	created.CreatedVMCount, created.FailedToCreateVMCount = len(batch), len(names)-len(batch)
+	final := map[string]bulkInsertStatus{}
+	for location, status := range metadata.PerLocationStatus {
+		status.CreatedVMCount = created[location].CreatedVMCount
+		status.FailedToCreateVMCount = status.TargetVMCount - status.CreatedVMCount
+		final[location] = status
+	}
 	provisioned := s.provisioned(insts, disks)
 	op := s.startOperation(r, reqID, "bulkInsert", target, 0, nil, func() {
 		provisioned()
-		metadata.PerLocationStatus[location] = created
+		metadata.PerLocationStatus = final
 	})
 	if op.complete != nil {
-		status.Status = "CREATING"
-		metadata.PerLocationStatus[location] = status
+		for location, status := range metadata.PerLocationStatus {
+			status.Status = "CREATING"
+			metadata.PerLocationStatus[location] = status
+		}
 	}
 	op.BulkInsert = metadata
 	track(op, insts, disks, true)

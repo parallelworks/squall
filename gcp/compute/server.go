@@ -12,14 +12,20 @@
 //
 //   - regional addresses: get, list, insert, delete, setLabels;
 //   - zones: list, get;
+//   - accelerator types: aggregatedList, list, get;
 //   - instances: bulkInsert, insert, get, list, aggregatedList, delete, stop,
-//     start, setLabels, setMachineType, addAccessConfig, attachDisk,
-//     detachDisk;
+//     start, suspend, resume, setLabels, setMachineType, addAccessConfig,
+//     attachDisk, detachDisk;
+//   - region instances: bulkInsert;
 //   - disks: get, list, aggregatedList, insert, delete;
 //   - snapshots: insert, get, list, delete;
 //   - resource policies, on the beta API: list, get, insert, delete;
 //   - instance templates: list, get, insert, delete;
-//   - instance group managers: aggregatedList, which is always empty;
+//   - zonal instance group managers: list, aggregatedList, get, insert,
+//     delete, createInstances, deleteInstances, listManagedInstances,
+//     setInstanceTemplate;
+//   - instance group manager resize requests: list, get, insert, cancel,
+//     delete;
 //   - routes: list, get, insert, delete;
 //   - networks: list, get, insert, delete;
 //   - subnetworks: list, aggregatedList, get, insert, delete;
@@ -35,8 +41,9 @@
 //     makes them returns, so the SDK's Operation.Wait returns at once.
 //     [WithSettleAfter] holds them in progress, with their operation RUNNING,
 //     for more reads or until [Server.Settle]: a new instance is PROVISIONING
-//     and then STAGING, a stopping or deleted one STOPPING, a starting one
-//     STAGING, a new snapshot CREATING and a deleted one DELETING. A
+//     and then STAGING, a stopping or deleted one STOPPING, a starting or
+//     resuming one STAGING, a suspending one SUSPENDING, a new snapshot
+//     CREATING and a deleted one DELETING. A
 //     change to an instance that has another in progress finishes that one
 //     first. Every other change finishes before its call returns.
 //   - A call that repeats an earlier call's requestId in the same project, for
@@ -54,8 +61,17 @@
 //     sourceDisk, storageLocations and labels are rejected. Machine and
 //     disk types are any well-formed name, in the zone of the call; nothing
 //     checks that they exist or fit together.
+//   - A disk is CREATING, READY or DELETING. One that is FAILED, as Compute
+//     Engine leaves a disk whose creation failed, is set up with
+//     [Server.PutDisk], since a fault that fails an insert's operation
+//     creates nothing. A FAILED disk can be read, listed and deleted, but not
+//     attached or snapshotted.
 //   - Zones come from a fixed set per region, which [WithZones] changes.
-//     Regional calls take any region.
+//     Regional calls take any region, except a regional bulkInsert, which
+//     needs one with zones. Every zone offers the accelerator types
+//     nvidia-l4 and nvidia-tesla-t4, unless [WithAcceleratorTypes] says
+//     otherwise; a type the server has no description for is described by
+//     its name and takes up to 8 cards.
 //   - Networks are custom mode only: an insert must set autoCreateSubnetworks
 //     to false, and legacy and auto mode networks are rejected with 400. Each
 //     network gets the default route to 0.0.0.0/0 the API creates with it,
@@ -89,19 +105,60 @@
 //     either, and fields the server only
 //     records, such as guestAccelerators or reservationAffinity, keep the
 //     JSON the caller sent. Fields it does not know are rejected with 400.
-//     Instance group managers, deletion protection and resource policies
-//     other than group placement are not supported.
+//     Deletion protection and resource policies other than group placement
+//     are not supported.
+//   - A group creates each instance from its template as a bulk insertion
+//     would, and adds "created-by" and "instance-template" metadata naming
+//     the group and template by project ID. A createInstances or
+//     deleteInstances operation finishes at once while its instances are
+//     created or deleted in the background, which [WithSettleAfter] holds in
+//     progress as it holds any instance change; listManagedInstances then
+//     reports them CREATING or DELETING. An instance the template cannot
+//     make, such as one naming a resource policy that does not exist, stays a
+//     member, CREATING with no instance, whose lastAttempt holds the error. A
+//     createInstances naming an instance that exists in the zone, or a
+//     member, fails with 409 alreadyExists; one with a change in progress
+//     counts a read of it first. A group's targetSize is its number of
+//     members: an instance deleted other than through its group leaves it,
+//     and the group does not replace it. Deleting a group deletes its
+//     instances and resize requests, and deleting a template a group uses
+//     fails with 400 resourceInUseByAnotherResource. Groups are zonal only;
+//     versions, autohealing, target pools and stateful policies are
+//     rejected, and instanceLifecyclePolicy, resourcePolicies, updatePolicy,
+//     targetSizePolicy and namedPorts keep the JSON the caller sent, unchecked.
+//   - A resize request is ACCEPTED when its insert finishes, CREATING while
+//     its instances are created and SUCCEEDED once they run, all before the
+//     insert returns unless [WithSettleAfter] holds it: then each read of the
+//     request or its instances counts, it is CREATING on the last read in
+//     progress, and with a negative count it stays ACCEPTED until
+//     [Server.Settle]. A queued request makes no instances, and the group's
+//     targetSize grows when it does. A request naming an instance that exists,
+//     or one another ACCEPTED request names, fails in its operation with 400.
+//     Only an ACCEPTED request can be cancelled, and it stays CANCELLED until
+//     deleted; only a SUCCEEDED, FAILED or CANCELLED one can be deleted.
+//     Either call otherwise fails with 412 conditionNotMet, saying the request
+//     "has reached a final state" when it has. Capacity never runs out on its
+//     own: [Server.FailResizeRequest] ends a request in FAILED, deleting what
+//     it created, and [Server.FailResizeAttempt] records a failed attempt in
+//     its lastAttempt while it waits. requestedRunDuration is recorded, not
+//     enforced.
 //   - A bulkInsert skips each instance whose name, or a disk it would
 //     create, already exists, and creates the rest when they number at least
 //     minCount: its operation succeeds, counting both in its
 //     perLocationStatus, with no warning for what it skipped. With fewer, its
 //     operation fails with VM_MIN_COUNT_NOT_REACHED and a
 //     RESOURCE_ALREADY_EXISTS error per conflict and creates nothing. It
-//     takes no fixed IP addresses or disk names, as the API does not, and
-//     ignores locationPolicy. A name pattern numbers new names after the
-//     highest existing match. A disk created with an instance is named after
-//     it: the boot disk takes the instance's name, the others the instance's
-//     name and their index.
+//     takes no fixed IP addresses or disk names, as the API does not. A name
+//     pattern numbers new names after the highest existing match. A disk
+//     created with an instance is named after it: the boot disk takes the
+//     instance's name, the others the instance's name and their index.
+//   - A zonal bulkInsert ignores locationPolicy. A regional one places every
+//     instance in the first zone, in name order, that its locationPolicy does
+//     not deny, or with targetShape BALANCED spreads them across those zones
+//     in turn; it ignores location constraints, and does not weigh machine
+//     types, accelerators or capacity. Its names must be free in every zone of
+//     the region, and its name pattern numbers after the matches in all of
+//     them.
 //   - IP addresses come from 100.64.0.0/10 (external) and 10.0.0.0/8
 //     (internal), never from routable ranges. An external address is unique
 //     across every project and region; an internal one is unique within its
@@ -119,9 +176,12 @@
 //     orderBy=creationTimestamp desc, is rejected with 400 rather than
 //     ignored. An aggregatedList lists only the scopes that have items.
 //   - A fault rule's Resource for an insert is the resource being created, so
-//     a rule can target the insert of one name. For a bulkInsert, it is the
-//     first instance it names in perInstanceProperties, or the zone's
-//     instances when it names none.
+//     a rule can target the insert of one name. For a bulkInsert, zonal or
+//     regional, it is the first instance it names in perInstanceProperties,
+//     such as "projects/p/regions/us-east1/instances/node-1", or the zone's or
+//     region's instances when it names none. For a group's createInstances,
+//     deleteInstances, setInstanceTemplate or listManagedInstances it is the
+//     group, and for a resize request's cancel the request.
 //
 // [WithPolicy] grants the caller a set of IAM permissions and refuses a call
 // that needs one it lacks with 403 forbidden, "Required '<permission>'
@@ -176,10 +236,11 @@ type Server struct {
 	policy *access.Policy
 	now    func() time.Time
 
-	settleAfter int
-	regionZones map[string][]string
-	zoneRegion  map[string]string
-	zoneIDs     map[string]uint64
+	settleAfter  int
+	regionZones  map[string][]string
+	accelerators map[string][]string
+	zoneRegion   map[string]string
+	zoneIDs      map[string]uint64
 
 	mu         sync.Mutex
 	nextID     uint64
@@ -197,6 +258,7 @@ type Server struct {
 	snapshots  map[string]*collection[*Snapshot]
 	policies   map[string]*collection[*ResourcePolicy]
 	templates  map[string]*collection[*InstanceTemplate]
+	groups     map[string]*collection[*InstanceGroupManager]
 	routes     map[string]*collection[*Route]
 
 	networks        map[string]*collection[*Network]
@@ -246,22 +308,24 @@ func WithZones(region string, zones ...string) Option {
 // New returns an empty server.
 func New(opts ...Option) *Server {
 	s := &Server{
-		mux:         http.NewServeMux(),
-		now:         time.Now,
-		regionZones: defaultZones(),
-		nextID:      1_000_000_000_000_000_000,
-		addresses:   map[string]*collection[*Address]{},
-		ipHolders:   map[string]string{},
-		operations:  map[string]*operation{},
-		requests:    map[string]*operation{},
-		pending:     map[*operation]struct{}{},
-		instances:   map[string]*collection[*Instance]{},
-		disks:       map[string]*collection[*Disk]{},
-		images:      map[string]*Image{},
-		snapshots:   map[string]*collection[*Snapshot]{},
-		policies:    map[string]*collection[*ResourcePolicy]{},
-		templates:   map[string]*collection[*InstanceTemplate]{},
-		routes:      map[string]*collection[*Route]{},
+		mux:          http.NewServeMux(),
+		now:          time.Now,
+		regionZones:  defaultZones(),
+		accelerators: map[string][]string{},
+		nextID:       1_000_000_000_000_000_000,
+		addresses:    map[string]*collection[*Address]{},
+		ipHolders:    map[string]string{},
+		operations:   map[string]*operation{},
+		requests:     map[string]*operation{},
+		pending:      map[*operation]struct{}{},
+		instances:    map[string]*collection[*Instance]{},
+		disks:        map[string]*collection[*Disk]{},
+		images:       map[string]*Image{},
+		snapshots:    map[string]*collection[*Snapshot]{},
+		policies:     map[string]*collection[*ResourcePolicy]{},
+		templates:    map[string]*collection[*InstanceTemplate]{},
+		groups:       map[string]*collection[*InstanceGroupManager]{},
+		routes:       map[string]*collection[*Route]{},
 
 		networks:        map[string]*collection[*Network]{},
 		subnetworks:     map[string]*collection[*Subnetwork]{},
@@ -299,13 +363,18 @@ func (s *Server) registerRoutes() {
 	s.route("GET "+project+"/zones", "compute.zones.list", "", s.listZones, nil)
 	s.route("GET "+zone, "compute.zones.get", "", s.getZone, nil)
 
+	s.route("GET "+project+"/aggregated/acceleratorTypes", "compute.acceleratorTypes.aggregatedList", "", s.aggregatedAcceleratorTypes, nil)
+	s.route("GET "+zone+"/acceleratorTypes", "compute.acceleratorTypes.list", "", s.listAcceleratorTypes, nil)
+	s.route("GET "+zone+"/acceleratorTypes/{name}", "compute.acceleratorTypes.get", "", s.getAcceleratorType, nil)
+
 	s.route("POST "+zone+"/instances/bulkInsert", "compute.instances.bulkInsert", "/bulkInsert", s.bulkInsertInstances, withBulkTarget)
+	s.route("POST "+region+"/instances/bulkInsert", "compute.regionInstances.bulkInsert", "/bulkInsert", s.bulkInsertInstances, withBulkTarget)
 	s.route("POST "+zone+"/instances", "compute.instances.insert", "", s.insertInstance, withNameFromBody)
 	s.route("GET "+zone+"/instances", "compute.instances.list", "", s.listInstances, nil)
 	s.route("GET "+project+"/aggregated/instances", "compute.instances.aggregatedList", "", s.aggregatedInstances, nil)
 	s.route("GET "+zone+"/instances/{name}", "compute.instances.get", "", s.getInstance, nil)
 	s.route("DELETE "+zone+"/instances/{name}", "compute.instances.delete", "", s.deleteInstance, nil)
-	for _, verb := range []string{"stop", "start", "setLabels", "setMachineType", "addAccessConfig", "attachDisk", "detachDisk"} {
+	for _, verb := range []string{"stop", "start", "suspend", "resume", "setLabels", "setMachineType", "addAccessConfig", "attachDisk", "detachDisk"} {
 		s.route("POST "+zone+"/instances/{name}/"+verb, "compute.instances."+verb, "/"+verb, s.instanceVerb(verb), nil)
 	}
 
@@ -329,7 +398,26 @@ func (s *Server) registerRoutes() {
 	s.route("POST "+global+"/instanceTemplates", "compute.instanceTemplates.insert", "", s.insertTemplate, withNameFromBody)
 	s.route("GET "+global+"/instanceTemplates/{name}", "compute.instanceTemplates.get", "", s.getTemplate, nil)
 	s.route("DELETE "+global+"/instanceTemplates/{name}", "compute.instanceTemplates.delete", "", s.deleteTemplate, nil)
+
+	const (
+		groups  = zone + "/instanceGroupManagers"
+		resizes = groups + "/{group}/resizeRequests"
+	)
+	s.route("GET "+groups, "compute.instanceGroupManagers.list", "", s.listGroupManagers, nil)
 	s.route("GET "+project+"/aggregated/instanceGroupManagers", "compute.instanceGroupManagers.aggregatedList", "", s.aggregatedGroupManagers, nil)
+	s.route("POST "+groups, "compute.instanceGroupManagers.insert", "", s.insertGroupManager, withNameFromBody)
+	s.route("GET "+groups+"/{name}", "compute.instanceGroupManagers.get", "", s.getGroupManager, nil)
+	s.route("DELETE "+groups+"/{name}", "compute.instanceGroupManagers.delete", "", s.deleteGroupManager, nil)
+	s.route("POST "+groups+"/{name}/createInstances", "compute.instanceGroupManagers.createInstances", "/createInstances", s.createGroupInstances, nil)
+	s.route("POST "+groups+"/{name}/deleteInstances", "compute.instanceGroupManagers.deleteInstances", "/deleteInstances", s.deleteGroupInstances, nil)
+	s.route("POST "+groups+"/{name}/setInstanceTemplate", "compute.instanceGroupManagers.setInstanceTemplate", "/setInstanceTemplate", s.setGroupTemplate, nil)
+	s.route("POST "+groups+"/{name}/listManagedInstances", "compute.instanceGroupManagers.listManagedInstances", "/listManagedInstances", s.listManagedInstances, nil)
+
+	s.route("GET "+resizes, "compute.instanceGroupManagerResizeRequests.list", "", s.listResizeRequests, nil)
+	s.route("POST "+resizes, "compute.instanceGroupManagerResizeRequests.insert", "", s.insertResizeRequest, withNameFromBody)
+	s.route("GET "+resizes+"/{name}", "compute.instanceGroupManagerResizeRequests.get", "", s.getResizeRequest, nil)
+	s.route("DELETE "+resizes+"/{name}", "compute.instanceGroupManagerResizeRequests.delete", "", s.deleteResizeRequest, nil)
+	s.route("POST "+resizes+"/{name}/cancel", "compute.instanceGroupManagerResizeRequests.cancel", "/cancel", s.cancelResizeRequest, nil)
 
 	s.route("GET "+global+"/routes", "compute.routes.list", "", s.listRoutes, nil)
 	s.route("POST "+global+"/routes", "compute.routes.insert", "", s.insertRoute, withNameFromBody)
@@ -409,7 +497,7 @@ func withNameFromBody(r *http.Request, collection string) string {
 // route registers h for pattern as method. A non-nil target names the call's
 // resource from the request, in place of its path.
 func (s *Server) route(pattern, method, verb string, h handler, target func(*http.Request, string) string) {
-	startsOperation := !strings.HasPrefix(pattern, http.MethodGet+" ") && verb != "/wait"
+	startsOperation := !strings.HasPrefix(pattern, http.MethodGet+" ") && verb != "/wait" && verb != "/listManagedInstances"
 	s.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 		resource := strings.TrimSuffix(resourcePath(r), verb)
 		if target != nil {

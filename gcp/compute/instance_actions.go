@@ -169,6 +169,10 @@ func (s *Server) instanceVerb(verb string) handler {
 			c = s.stopInstance(inst)
 		case "start":
 			c = s.startInstance(inst)
+		case "suspend":
+			c = s.suspendInstance(inst, path)
+		case "resume":
+			c = s.resumeInstance(inst, path)
 		case "setLabels":
 			c, err = setInstanceLabels(inst, labels)
 		case "setMachineType":
@@ -220,6 +224,40 @@ func (s *Server) startInstance(inst *Instance) change {
 			inst.Status, inst.LastStartTimestamp, inst.op = statusRunning, timestamp(s.now()), nil
 			s.assignEphemeral(inst)
 		},
+	}
+}
+
+// suspendInstance suspends a running inst, unless it is already suspended.
+// The caller holds s.mu.
+func (s *Server) suspendInstance(inst *Instance, path string) change {
+	switch inst.Status {
+	case statusSuspended:
+		return change{}
+	case statusRunning:
+	default:
+		return change{fail: notReady(path)}
+	}
+	return change{
+		now: func() { inst.Status = statusSuspending },
+		later: func() {
+			inst.Status, inst.LastSuspendedTimestamp, inst.op = statusSuspended, timestamp(s.now()), nil
+		},
+	}
+}
+
+// resumeInstance resumes a suspended inst, unless it is already running. The
+// caller holds s.mu.
+func (s *Server) resumeInstance(inst *Instance, path string) change {
+	switch inst.Status {
+	case statusRunning:
+		return change{}
+	case statusSuspended:
+	default:
+		return change{fail: notReady(path)}
+	}
+	return change{
+		now:   func() { inst.Status = statusStaging },
+		later: func() { inst.Status, inst.op = statusRunning, nil },
 	}
 }
 

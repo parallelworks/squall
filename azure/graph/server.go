@@ -588,7 +588,7 @@ func faultError(f fault.Fault) *apiError {
 	if code == "" || code == "backendError" || code == "rateLimitExceeded" {
 		code = cmp.Or(strings.ReplaceAll(http.StatusText(status), " ", ""), "InternalServerError")
 	}
-	return &apiError{Status: status, Code: code, Message: fmt.Sprintf("squall: injected fault (%s)", f)}
+	return &apiError{Status: status, Code: code, Message: f.ErrorMessage()}
 }
 
 func writeError(w http.ResponseWriter, e *apiError) {

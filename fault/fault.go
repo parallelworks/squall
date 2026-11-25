@@ -70,8 +70,26 @@ type Fault struct {
 	Status int
 	// Reason is the machine-readable error reason, such as "backendError".
 	Reason string
+	// Message, when set, is the error's human-readable message, so a fault can
+	// carry the wording of a specific failure that the caller tells apart.
+	Message string
 	// Delay is how long the server waits before it handles the call.
 	Delay time.Duration
+}
+
+// WithMessage returns f with its error message set to message.
+func (f Fault) WithMessage(message string) Fault {
+	f.Message = message
+	return f
+}
+
+// ErrorMessage is the message of the error f answers with: its Message, or
+// one that says the fault was injected.
+func (f Fault) ErrorMessage() string {
+	if f.Message != "" {
+		return f.Message
+	}
+	return fmt.Sprintf("squall: injected fault (%s)", f)
 }
 
 func (f Fault) String() string {
@@ -82,6 +100,9 @@ func (f Fault) String() string {
 	}
 	if f.Reason != "" {
 		fmt.Fprintf(&b, " %s", f.Reason)
+	}
+	if f.Message != "" {
+		fmt.Fprintf(&b, " %q", f.Message)
 	}
 	if f.Delay > 0 {
 		fmt.Fprintf(&b, " after %s", f.Delay)
