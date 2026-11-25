@@ -16,7 +16,7 @@ type apiError struct {
 	Reason  string
 	Message string
 	// opErrors, when set, are the errors an operation that ends in this one lists.
-	opErrors []operationError
+	opErrors []OperationError
 }
 
 func (e *apiError) Error() string { return fmt.Sprintf("%d %s: %s", e.Status, e.Reason, e.Message) }
@@ -48,7 +48,7 @@ func invalid(format string, args ...any) *apiError {
 
 func faultError(f fault.Fault) *apiError {
 	status := cmp.Or(f.Status, http.StatusServiceUnavailable)
-	return &apiError{Status: status, Reason: cmp.Or(f.Reason, "backendError"), Message: fmt.Sprintf("squall: injected fault (%s)", f)}
+	return &apiError{Status: status, Reason: cmp.Or(f.Reason, "backendError"), Message: f.ErrorMessage()}
 }
 
 type errorBody struct {

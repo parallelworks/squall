@@ -274,6 +274,9 @@ func (s *Server) deleteTemplate(r *http.Request, opFault *apiError) (any, *apiEr
 	if !ok {
 		return nil, notFound(path)
 	}
+	if user := s.groupUsing(t.SelfLink); user != "" {
+		return nil, inUse("instance_template", path, user)
+	}
 	if opFault == nil {
 		s.templates[global].remove(name)
 	}
@@ -298,19 +301,4 @@ func (s *Server) InstanceTemplates() []InstanceTemplate {
 	var out []InstanceTemplate
 	each(s.templates, func(t *InstanceTemplate) { out = append(out, jsonClone(t)) })
 	return out
-}
-
-// groupManager stands in for instance group managers, which the server
-// never holds: their aggregated list is always empty.
-type groupManager struct{}
-
-func (groupManager) filterValue(string) string { return "" }
-
-func (s *Server) aggregatedGroupManagers(r *http.Request, _ *apiError) (any, *apiError) {
-	q, err := parseListQuery(r, namedFields)
-	if err != nil {
-		return nil, err
-	}
-	return listAggregated(map[string]*collection[groupManager]{}, r.PathValue("project"), q,
-		"compute#instanceGroupManagerAggregatedList", "instanceGroupManagers", nil), nil
 }

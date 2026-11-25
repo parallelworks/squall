@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v8"
+
 	"github.com/parallelworks/squall/access"
 	"github.com/parallelworks/squall/azure/arm"
 )
@@ -72,5 +74,36 @@ func TestPolicyRecordsWhatAllowedCallsNeeded(t *testing.T) {
 	}
 	if got := policy.Used(); !slices.Equal(got, want) {
 		t.Errorf("Used() = %v, want %v", got, want)
+	}
+}
+
+func TestPolicyChecksComputeActions(t *testing.T) {
+	policy := access.Allow(
+		"Microsoft.Resources/subscriptions/resourceGroups/write",
+		"Microsoft.Network/networkInterfaces/*",
+		"Microsoft.Network/virtualNetworks/subnets/join/action",
+		"Microsoft.Compute/virtualMachines/write",
+	)
+	c := setup(t, arm.WithPolicy(policy))
+	c.createGroup(t, group, nil)
+	nic := c.createNIC(t, group, "nic", nil)
+	c.createVM(t, "vm", nic)
+	for action, call := range map[string]func() error{
+		"Microsoft.Compute/virtualMachines/powerOff/action": func() error {
+			_, err := c.vms.BeginPowerOff(t.Context(), group, "vm", nil)
+			return err
+		},
+		"Microsoft.Compute/skus/read": func() error {
+			_, err := c.skus.NewListPager(nil).NextPage(t.Context())
+			return err
+		},
+		"Microsoft.Compute/galleries/images/versions/write": func() error {
+			_, err := c.versions.BeginUpdate(t.Context(), group, "gallery", "image", "1.0.0", armcompute.GalleryImageVersionUpdate{}, nil)
+			return err
+		},
+	} {
+		if err := call(); code(err) != "AuthorizationFailed" || !strings.Contains(err.Error(), "'"+action+"'") {
+			t.Errorf("%s = %v", action, err)
+		}
 	}
 }

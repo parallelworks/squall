@@ -52,7 +52,7 @@ func faultError(f fault.Fault) *apiError {
 	case "rateLimitExceeded":
 		code = "RequestLimitExceeded"
 	}
-	return &apiError{status, code, fmt.Sprintf("squall: injected fault (%s)", f)}
+	return &apiError{status, code, f.ErrorMessage()}
 }
 
 type errorResponse struct {

@@ -628,3 +628,59 @@ func TestSnapshotAccess(t *testing.T) {
 		t.Fatalf("granting write access = %v", err)
 	}
 }
+
+func TestGalleryImageVersionUpdate(t *testing.T) {
+	c := setup(t, arm.WithSettleAfter(1))
+	c.createGroup(t, group, nil)
+	gp, err := c.galleries.BeginCreateOrUpdate(t.Context(), group, "gallery", armcompute.Gallery{Location: new(location)}, nil)
+	if _, err = wait(t, gp, err); err != nil {
+		t.Fatal(err)
+	}
+	ip, err := c.images.BeginCreateOrUpdate(t.Context(), group, "gallery", "image", imageBody(armcompute.OperatingSystemTypesLinux), nil)
+	if _, err = wait(t, ip, err); err != nil {
+		t.Fatal(err)
+	}
+	dp, err := c.disks.BeginCreateOrUpdate(t.Context(), group, "disk", diskBody(location, 10), nil)
+	if _, err = wait(t, dp, err); err != nil {
+		t.Fatal(err)
+	}
+	body := versionBody(computePrefix + "disks/disk")
+	body.Properties.SafetyProfile = &armcompute.GalleryImageVersionSafetyProfile{BlockDeletionBeforeEndOfLife: new(true)}
+	body.Properties.PublishingProfile.EndOfLifeDate = new(time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC))
+	vp, err := c.versions.BeginCreateOrUpdate(t.Context(), group, "gallery", "image", "1.0.0", body, nil)
+	if _, err = wait(t, vp, err); err != nil {
+		t.Fatal(err)
+	}
+
+	up, err := c.versions.BeginUpdate(t.Context(), group, "gallery", "image", "1.0.0", armcompute.GalleryImageVersionUpdate{
+		Tags: map[string]*string{"k": new("v")},
+		Properties: &armcompute.GalleryImageVersionProperties{
+			SafetyProfile: &armcompute.GalleryImageVersionSafetyProfile{BlockDeletionBeforeEndOfLife: new(false)},
+		},
+	}, nil)
+	if err != nil || up.Done() {
+		t.Fatalf("begin update = %v", err)
+	}
+	if got, err := c.versions.Get(t.Context(), group, "gallery", "image", "1.0.0", nil); err != nil || *got.Properties.ProvisioningState != armcompute.GalleryProvisioningStateUpdating {
+		t.Fatalf("version being updated = %+v, %v", got.Properties, err)
+	}
+	updated, err := up.PollUntilDone(t.Context(), &runtime.PollUntilDoneOptions{Frequency: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	props := updated.Properties
+	if *props.ProvisioningState != armcompute.GalleryProvisioningStateSucceeded || *props.SafetyProfile.BlockDeletionBeforeEndOfLife ||
+		!props.PublishingProfile.EndOfLifeDate.Equal(time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)) ||
+		*props.StorageProfile.OSDiskImage.Source.ID != computePrefix+"disks/disk" || *updated.Tags["k"] != "v" {
+		t.Fatalf("updated version = %+v, %+v", props, updated.Tags)
+	}
+
+	if _, err := c.versions.BeginUpdate(t.Context(), group, "gallery", "image", "1.0.0", armcompute.GalleryImageVersionUpdate{
+		Properties: &armcompute.GalleryImageVersionProperties{StorageProfile: body.Properties.StorageProfile},
+	}, nil); status(err) != http.StatusBadRequest {
+		t.Fatalf("a PATCH of the storage profile = %v", err)
+	}
+	if _, err := c.versions.BeginUpdate(t.Context(), group, "gallery", "image", "2.0.0", armcompute.GalleryImageVersionUpdate{}, nil); code(err) != "ResourceNotFound" {
+		t.Fatalf("updating a missing version = %v", err)
+	}
+}

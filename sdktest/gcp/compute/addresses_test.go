@@ -343,6 +343,26 @@ func TestLostResponseReachesTheCaller(t *testing.T) {
 	}
 }
 
+func TestFaultMessageReachesTheCaller(t *testing.T) {
+	const message = "The resource 'ip-1' is in use"
+	for _, tc := range []struct {
+		name  string
+		fault fault.Fault
+	}{
+		{"rejected", fault.Reject(http.StatusBadRequest, "resourceInUseByAnotherResource").WithMessage(message)},
+		{"operation failed", fault.FailOperation(http.StatusBadRequest).WithMessage(message)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			faults := fault.New().Add(fault.Rule{Method: "compute.addresses.insert", Nth: 1, Fault: tc.fault})
+			c := newClient(t, compute.New(compute.WithFaults(faults)))
+			err := insert(t, c, &computepb.Address{Name: new("ip-1")})
+			if sdkerr.GoogleCode(err) != http.StatusBadRequest || !strings.Contains(err.Error(), message) {
+				t.Fatalf("insert = %v, want HTTP 400 saying %q", err, message)
+			}
+		})
+	}
+}
+
 func TestOperationFailedOnAReadFailsTheRead(t *testing.T) {
 	faults := fault.New().Add(fault.Rule{Method: "compute.regionOperations.get", Nth: 1, Fault: fault.FailOperation(http.StatusForbidden)})
 	s := compute.New(compute.WithFaults(faults))

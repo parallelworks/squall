@@ -561,3 +561,65 @@ func TestResourceSKUsListNone(t *testing.T) {
 		t.Fatalf("skus = %v, %v", page.Value, err)
 	}
 }
+
+func TestResourceSKUs(t *testing.T) {
+	c := setup(t, arm.WithResourceSKUs(
+		arm.ResourceSKU{
+			Name: "Standard_D2s_v5", Tier: "Standard", Size: "D2s_v5", Family: "standardDSv5Family", Location: "East US", Zones: []string{"1", "2", "3"},
+			Capabilities: map[string]string{"vCPUs": "2", "AcceleratedNetworkingEnabled": "True"},
+			Restrictions: []arm.SKURestriction{{Zones: []string{"3"}, ReasonCode: "NotAvailableForSubscription"}},
+		},
+		arm.ResourceSKU{
+			Name: "Standard_D2s_v5", Location: "westus", Capabilities: map[string]string{"AcceleratedNetworkingEnabled": "True"},
+			Restrictions: []arm.SKURestriction{{ReasonCode: "QuotaId"}},
+		},
+		arm.ResourceSKU{ResourceType: "disks", Name: "Premium_LRS", Tier: "Premium", Location: "eastus"},
+	))
+	list := func(filter *string) ([]*armcompute.ResourceSKU, error) {
+		var out []*armcompute.ResourceSKU
+		pager := c.skus.NewListPager(&armcompute.ResourceSKUsClientListOptions{Filter: filter, IncludeExtendedLocations: new("true")})
+		for pager.More() {
+			page, err := pager.NextPage(t.Context())
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, page.Value...)
+		}
+		return out, nil
+	}
+	all, err := list(nil)
+	if err != nil || len(all) != 3 {
+		t.Fatalf("all skus = %v, %v", all, err)
+	}
+	eastus, err := list(new("location eq 'eastus'"))
+	if err != nil || len(eastus) != 2 || *eastus[0].Name != "Standard_D2s_v5" || *eastus[1].ResourceType != "disks" {
+		t.Fatalf("skus in eastus = %v, %v", eastus, err)
+	}
+	vm := eastus[0]
+	if *vm.ResourceType != "virtualMachines" || *vm.Tier != "Standard" || *vm.Size != "D2s_v5" || *vm.Family != "standardDSv5Family" ||
+		len(vm.Locations) != 1 || *vm.Locations[0] != "eastus" || *vm.LocationInfo[0].Location != "eastus" || len(vm.LocationInfo[0].Zones) != 3 {
+		t.Fatalf("vm size = %+v", vm)
+	}
+	if len(vm.Capabilities) != 2 || *vm.Capabilities[0].Name != "AcceleratedNetworkingEnabled" || *vm.Capabilities[0].Value != "True" ||
+		*vm.Capabilities[1].Name != "vCPUs" || *vm.Capabilities[1].Value != "2" {
+		t.Fatalf("capabilities = %+v", vm.Capabilities)
+	}
+	r := vm.Restrictions
+	if len(r) != 1 || *r[0].Type != armcompute.ResourceSKURestrictionsTypeZone || *r[0].ReasonCode != armcompute.ResourceSKURestrictionsReasonCodeNotAvailableForSubscription ||
+		*r[0].Values[0] != "eastus" || *r[0].RestrictionInfo.Locations[0] != "eastus" || *r[0].RestrictionInfo.Zones[0] != "3" {
+		t.Fatalf("zone restriction = %+v", r)
+	}
+	westus, err := list(new("location eq 'WestUS'"))
+	if err != nil || len(westus) != 1 {
+		t.Fatalf("skus in westus = %v, %v", westus, err)
+	}
+	if r := westus[0].Restrictions; len(r) != 1 || *r[0].Type != armcompute.ResourceSKURestrictionsTypeLocation ||
+		*r[0].ReasonCode != armcompute.ResourceSKURestrictionsReasonCodeQuotaID || r[0].RestrictionInfo.Zones != nil {
+		t.Fatalf("location restriction = %+v", r)
+	}
+	for _, f := range []string{"name eq 'Standard_D2s_v5'", "location eq 'eastus' and name eq 'x'"} {
+		if _, err := list(new(f)); status(err) != http.StatusBadRequest {
+			t.Errorf("filter %q = %v", f, err)
+		}
+	}
+}

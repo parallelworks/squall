@@ -441,6 +441,7 @@ func (s *Server) powerChanged(vm *resource) {
 	if d != nil && d.disk != nil && key(d.disk.vm) == key(vm.id) {
 		d.disk.owned = s.now()
 	}
+	s.dateDataDisks(vm)
 }
 
 // releaseOSDisk detaches the VM vm, which is being deleted, from its OS disk,

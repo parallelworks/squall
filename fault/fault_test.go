@@ -172,3 +172,15 @@ func TestFaultString(t *testing.T) {
 		}
 	}
 }
+
+func TestErrorMessage(t *testing.T) {
+	if got, want := fault.Unavailable().WithMessage("try later").ErrorMessage(), "try later"; got != want {
+		t.Fatalf("ErrorMessage = %q, want %q", got, want)
+	}
+	if got, want := fault.Unavailable().ErrorMessage(), "squall: injected fault (reject 503 backendError)"; got != want {
+		t.Fatalf("ErrorMessage = %q, want %q", got, want)
+	}
+	if got, want := fault.Reject(http.StatusConflict, "alreadyExists").WithMessage("taken").String(), `reject 409 alreadyExists "taken"`; got != want {
+		t.Fatalf("String = %q, want %q", got, want)
+	}
+}

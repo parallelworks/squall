@@ -880,10 +880,6 @@ func (s *Server) getInstancePublicIP(c *call) (*reply, *apiError) {
 	}), nil
 }
 
-func (s *Server) listSKUs(c *call) (*reply, *apiError) {
-	return ok(encode(map[string]any{"value": []any{}})), nil
-}
-
 // ScaleSet is a snapshot of a scale set.
 type ScaleSet struct {
 	ID                string

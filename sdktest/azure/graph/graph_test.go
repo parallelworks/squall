@@ -217,6 +217,25 @@ func TestOrganization(t *testing.T) {
 	}
 }
 
+func TestOrganizationWithoutCountry(t *testing.T) {
+	_, client := setup(t, graph.WithOrganization(graph.Organization{NoCountry: true, DefaultUsageLocation: "GB"}))
+	resp, err := client.Organization().Get(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if org := resp.GetValue()[0]; len(resp.GetValue()) != 1 || org.GetCountryLetterCode() != nil || org.GetCountry() != nil || *org.GetDefaultUsageLocation() != "GB" {
+		t.Fatalf("an organization without a country = %v %v", org.GetCountryLetterCode(), org.GetDefaultUsageLocation())
+	}
+
+	_, client = setup(t, graph.WithOrganization(graph.Organization{NoCountry: true, NoDefaultUsageLocation: true}))
+	if resp, err = client.Organization().Get(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if org := resp.GetValue()[0]; org.GetCountryLetterCode() != nil || org.GetDefaultUsageLocation() != nil || *org.GetDisplayName() != "Squall" {
+		t.Fatalf("an organization with neither = %v %v", org.GetCountryLetterCode(), org.GetDefaultUsageLocation())
+	}
+}
+
 func TestNewUsersAreChecked(t *testing.T) {
 	_, client := setup(t)
 	for _, tc := range []struct{ upn, password, message string }{

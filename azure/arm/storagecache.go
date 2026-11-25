@@ -53,7 +53,21 @@ func (s *Server) prepareAmlfs(res *resource, p *parsed) (func(), *apiError) {
 	return s.holdAddress(res, p, subnet, "filesystemSubnet")
 }
 
-// checkAmlfsSubnets answers that any subnet will do, as subnets are not modeled.
+// FailSubnetCheck makes Managed Lustre subnet checks of subnet, a subnet's
+// resource ID, fail with message, as Azure answers a subnet it finds unfit
+// for a file system. An empty message lets checks of it pass again.
+func (s *Server) FailSubnetCheck(subnet, message string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if message == "" {
+		delete(s.subnetChecks, key(subnet))
+		return
+	}
+	s.subnetChecks[key(subnet)] = message
+}
+
+// checkAmlfsSubnets answers that a subnet will do, unless [Server.FailSubnetCheck]
+// says otherwise, as subnets' fitness is not modeled.
 func (s *Server) checkAmlfsSubnets(c *call) (*reply, *apiError) {
 	body, err := readObject(c.r)
 	if err != nil {
@@ -62,8 +76,16 @@ func (s *Server) checkAmlfsSubnets(c *call) (*reply, *apiError) {
 	if err := checkMembers(body, "AmlFilesystemSubnetInfo", "", "filesystemSubnet", "location", "sku", "storageCapacityTiB"); err != nil {
 		return nil, err
 	}
-	if str(body, "filesystemSubnet") == "" {
+	subnet := str(body, "filesystemSubnet")
+	if subnet == "" {
 		return nil, unsupported("a subnet check needs filesystemSubnet")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if message, ok := s.subnetChecks[key(subnet)]; ok {
+		return &reply{status: http.StatusBadRequest, body: encode(map[string]any{
+			"filesystemSubnet": map[string]any{"status": "Invalid", "message": message},
+		})}, nil
 	}
 	return &reply{status: http.StatusOK}, nil
 }

@@ -285,7 +285,7 @@ func blobFaultError(f fault.Fault) *apiError {
 	case "rateLimitExceeded":
 		code, status = "ServerBusy", http.StatusServiceUnavailable
 	}
-	return &apiError{Status: status, Code: code, Message: fmt.Sprintf("squall: injected fault (%s)", f)}
+	return &apiError{Status: status, Code: code, Message: f.ErrorMessage()}
 }
 
 // storageHeaders sets the headers every Blob service answer carries.

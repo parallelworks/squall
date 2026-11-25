@@ -38,6 +38,7 @@ type clients struct {
 	routes     *gcompute.RoutesClient
 	templates  *gcompute.InstanceTemplatesClient
 	managers   *gcompute.InstanceGroupManagersClient
+	resizes    *gcompute.InstanceGroupManagerResizeRequestsClient
 	policies   *gcomputebeta.ResourcePoliciesClient
 	networks   *gcompute.NetworksClient
 	subnets    *gcompute.SubnetworksClient
@@ -70,6 +71,10 @@ func setup(t *testing.T, opts ...compute.Option) *clients {
 		func() error { c.routes, err = gcompute.NewRoutesRESTClient(ctx, o...); return err },
 		func() error { c.templates, err = gcompute.NewInstanceTemplatesRESTClient(ctx, o...); return err },
 		func() error { c.managers, err = gcompute.NewInstanceGroupManagersRESTClient(ctx, o...); return err },
+		func() error {
+			c.resizes, err = gcompute.NewInstanceGroupManagerResizeRequestsRESTClient(ctx, o...)
+			return err
+		},
 		func() error { c.policies, err = gcomputebeta.NewResourcePoliciesRESTClient(ctx, o...); return err },
 		func() error { c.networks, err = gcompute.NewNetworksRESTClient(ctx, o...); return err },
 		func() error { c.subnets, err = gcompute.NewSubnetworksRESTClient(ctx, o...); return err },

@@ -25,18 +25,19 @@
 //     global location (create or update, get; another location fails with
 //     MissingRegistrationForLocation), and A record sets (create or update,
 //     get, delete);
-//   - Microsoft.Compute virtual machines: create or update, get, list in a
-//     group, instance view, deallocate, start and delete, and their
-//     extensions (create or update, get, list on a VM and delete);
+//   - Microsoft.Compute virtual machines: create or update, update, get,
+//     list in a group, instance view, deallocate, power off, start and
+//     delete, their data disks, and their extensions (create or update, get,
+//     list on a VM and delete);
 //   - Microsoft.Compute scale sets in the Uniform orchestration mode: create
 //     or update, update, get, list in a group, delete and delete instances,
 //     and their VMs (list, get);
-//   - Microsoft.Compute resource SKUs: list, which lists none;
+//   - Microsoft.Compute resource SKUs: list, as [WithResourceSKUs] sets them;
 //   - Microsoft.Compute managed disks and snapshots: create or update, get,
 //     list in a group and delete, and a snapshot's access (grant and revoke);
 //   - Microsoft.Compute galleries, their image definitions and image
 //     versions: create or update, get, list in their group, gallery or image
-//     definition, and delete;
+//     definition, and delete, and image versions also update;
 //   - Microsoft.Storage: storage accounts (create, get, list in a group or
 //     subscription, list keys and delete), name availability checks, the
 //     blob, file, queue and table services' properties (set and get), blob
@@ -61,8 +62,13 @@
 //     and delete), their deployments (create or update, get, list and
 //     delete), deleted accounts (get and purge) and model capacities (list,
 //     as [WithModelCapacities] sets them);
+//   - the Azure OpenAI data plane of Cognitive Services accounts, which
+//     [Server.OpenAI] serves: ingestion jobs (create and get);
 //   - Microsoft.Search: search services (create or update, get and delete)
 //     and their admin keys (list);
+//   - the Azure AI Search data plane, which [Server.Search] serves: indexes,
+//     data sources and indexers (create or update, get and delete), indexer
+//     runs and status, and documents (index, and search for all);
 //   - Microsoft.KeyVault: vaults (create or update, get and list in a group);
 //   - Microsoft.Insights: Application Insights components (create or update,
 //     get and list in a group);
@@ -133,6 +139,9 @@
 //     with 400.
 //   - Listing groups or a group's resources with $top returns at most that
 //     many, with no nextLink; Azure may page them instead.
+//   - A fault that fails an operation leaves no trace of the call, where
+//     Azure may leave the resource Failed; [Server.FailProvisioning] sets up
+//     a resource in that state.
 //   - Resource names, subscription IDs and locations are not validated, and
 //     names match without regard to case. Tags are not validated. Fields the
 //     server only records keep the JSON the caller sent; fields it does not
@@ -243,6 +252,23 @@
 //     disk ID, with the group's name upper-cased as Azure writes it. Deleting
 //     it deletes the interfaces whose deleteOption is Delete and detaches the
 //     rest.
+//   - An update that changes a VM's osProfile.customData or its Linux SSH
+//     public keys fails with 409 PropertyChangeNotAllowed, "Changing property
+//     'customData' is not allowed." or naming
+//     linuxConfiguration.ssh.publicKeys, as Azure refuses both; one that
+//     leaves either out keeps it, as a GET leaves out customData.
+//   - A VM create whose operation [fault.ModeFailOperation] fails leaves the
+//     VM Failed, as Azure leaves a VM whose provisioning failed, such as with
+//     AllocationFailed: it has its interfaces and OS disk, no power state, and
+//     an instance view whose one status is
+//     ProvisioningState/failed/{code} at level Error with the error's
+//     message. A PUT over it provisions it again, as a retry does in Azure;
+//     deleting it deletes it. A failed update leaves the VM as it was.
+//   - Powering a VM off (powerOff, with or without skipShutdown) stops it,
+//     showing PowerState/stopping while in progress and then
+//     PowerState/stopped, VM stopped; it keeps its OS disk Attached and its
+//     LastOwnershipUpdateTime, as a stopped VM keeps its resources allocated.
+//     Start runs it again.
 //   - A VM made from an image makes its OS disk a managed disk, Attached and
 //     managed by the VM, and Reserved while the VM is deallocated, as Azure
 //     documents those states. Its SKU is the OS disk's storageAccountType and
@@ -256,8 +282,34 @@
 //     OperationNotAllowed, naming the VM. A disk's LastOwnershipUpdateTime,
 //     capitalized as Azure writes it, is when a VM last attached or released
 //     it, or was last deallocated or started while holding it, and is absent
-//     until then. Data disks, and the OS disks of scale set VMs, are not
-//     modeled.
+//     until then. The disks of scale set VMs are not modeled.
+//   - A VM's PATCH takes tags and storageProfile.dataDisks. The OS disk and
+//     image reference it sends back are kept as they were, except that
+//     renaming the OS disk fails with PropertyChangeNotAllowed; other
+//     properties, identity, plan and zones fail with 400 as not supported,
+//     so change them with a PUT. It answers 200, with an
+//     Azure-AsyncOperation URL while it is in progress.
+//   - A VM's data disks attach managed disks that exist (createOption
+//     Attach), each at its own lun from 0 to 63. A lun outside that range,
+//     which Azure narrows by VM size, or one two disks share ("A disk at LUN
+//     0 already exists.") fails with InvalidParameter, which is inferred.
+//     Other createOptions, image, vhd and sourceResource fail with 400 as
+//     not supported. A PUT or PATCH that lists dataDisks replaces them: a
+//     disk it leaves out, or marks toBeDetached, is detached and dropped from
+//     the list, as Microsoft documents detaching a data disk. One that leaves
+//     out dataDisks keeps them, which for a PUT is inferred, as one that
+//     leaves out osProfile keeps it. Attaching a disk another VM holds fails
+//     with 409 OperationNotAllowed, as for an OS disk; a disk the server does
+//     not hold is recorded, not checked, and the location of one it holds is
+//     not checked. A data disk shows its disk's name and diskSizeGB,
+//     toBeDetached false, and deleteOption Detach unless set, the default
+//     Microsoft documents. Its disk shows managedBy and diskState as an OS
+//     disk does, and its LastOwnershipUpdateTime moves as an OS disk's does.
+//     Deleting the VM detaches its data disks, deleting those whose
+//     deleteOption is Delete, and deleting a group that holds a disk a VM
+//     elsewhere has attached fails with ResourceGroupDeletionBlocked, as an
+//     attached disk cannot be deleted. caching, writeAcceleratorEnabled and
+//     detachOption are recorded, not modeled.
 //   - A VM extension create answers 201, and an update 200, with an
 //     Azure-AsyncOperation URL under
 //     Microsoft.Compute/locations/{location}/operations; a delete in progress
@@ -355,6 +407,15 @@
 //     shows display names such as West US. Replication between regions,
 //     sharing, soft deletion, checking a version's source against its image
 //     definition, and VMs made from a version are not modeled.
+//   - An image version update (PATCH) takes tags and the publishingProfile
+//     and safetyProfile properties, merging the members it gives into the
+//     ones the version has, as an ARM PATCH does; storageProfile,
+//     securityProfile and restore fail with 400, as the server rejects input it
+//     does not model. It answers 200 with an Azure-AsyncOperation URL under
+//     capsOperations while in progress, the version showing Updating, as a
+//     PUT does. safetyProfile.blockDeletionBeforeEndOfLife is recorded: a
+//     blocked version can still be deleted, where Azure refuses it before its
+//     end-of-life date.
 //   - A scale set's VMs are numbered from 0 and never reuse a number. Raising
 //     sku.capacity creates VMs, each with the network interfaces and public
 //     IP addresses its profile describes; lowering it deletes the newest,
@@ -372,8 +433,15 @@
 //     with PropertyChangeNotAllowed. A PATCH takes sku and tags only.
 //     Deleting instances that do not exist fails with InvalidParameter and
 //     deletes nothing. Scale set VMs are always running.
-//   - Resource SKUs list none: a caller that checks availability sees no
-//     restrictions.
+//   - Resource SKUs list those [WithResourceSKUs] sets, none by default, each
+//     in one location, as Azure lists them. The list takes the one $filter
+//     Azure supports, location eq '{location}', matching locations without
+//     regard to case or spaces; any other filter fails with 400. Every SKU is
+//     in the one page, with no nextLink, and includeExtendedLocations adds
+//     nothing, as no SKU has extended locations. A restriction with zones is a
+//     Zone restriction and one without a Location restriction, whose values
+//     and restrictionInfo name the SKU's location. The SKUs a subscription is
+//     offered are not checked when a VM or scale set is created.
 //   - A storage account create that finishes at once answers 200, as Azure
 //     Storage does, and one in progress answers 202 with an empty body and
 //     only a Location URL, under Microsoft.Storage/operations, which answers
@@ -737,7 +805,10 @@
 //     00000000-0000-0000-0000-000000000000, as the server does not read
 //     the caller's token.
 //     An update answers 200 and shows Updating, where Azure answers 201 and
-//     shows Creating. A subnet check answers 200 for any subnet.
+//     shows Creating. A subnet check answers 200 for any subnet, unless
+//     [Server.FailSubnetCheck] fails it: then it answers 400 with the error
+//     the API defines for it, {"filesystemSubnet": {"status": "Invalid",
+//     "message": ...}}, and no x-ms-error-code header.
 //   - A Cognitive Services account change in progress answers with an
 //     Azure-AsyncOperation URL under
 //     Microsoft.CognitiveServices/locations/{location}/operationResults, whose
@@ -761,8 +832,8 @@
 //     and the SDK reads the resource until its provisioningState ends, so
 //     [fault.ModeFailOperation] fails their writes as [fault.ModeReject]
 //     does. A deployment being created shows Accepted. A search service shows
-//     provisioningState and status provisioning, then succeeded and running,
-//     in lower case as Search writes them, and the endpoint
+//     provisioningState and status provisioning, then succeeded and running
+//     (or failed and error), in lower case as Search writes them, and the endpoint
 //     https://{name}.search.windows.net. Deleting a deployment or a search
 //     service answers 200 at once. Search service names are not unique across
 //     the server, where Azure makes them unique across Azure. Admin keys are
@@ -828,6 +899,72 @@
 //     has not replicated yet never fails with PrincipalNotFound, and names
 //     need not be GUIDs or unique across scopes. Deleting the group deletes
 //     the assignments at its scope.
+//   - The Search data plane takes the service from a host name such as
+//     {service}.search.windows.net, or else from the first path segment, and
+//     addresses an index, data source or indexer as indexes/{name} or, as
+//     the REST API also accepts, indexes('{name}'). Services in different
+//     groups may share a name; the one whose ID sorts first is served. Each
+//     call needs an api-version, which may be any value, and one of the
+//     service's admin keys in api-key: a missing or wrong key fails with 403,
+//     as Search answers a wrong one, and a Microsoft Entra ID token with 400
+//     as not supported. Query keys are not modeled. Errors are
+//     {"error": {"code", "message"}} with an empty code, as Search writes
+//     most of them; the messages other than those for a missing api-version,
+//     a concurrent indexer run, an unknown document property and a failed
+//     precondition are inferred. A create answers 201 and an update 200 with
+//     the definition, its @odata.etag and an ETag header, or 204 with Prefer:
+//     return=minimal, and If-Match and If-None-Match apply to writes and
+//     deletes. A get or delete of something that does not exist answers 404,
+//     as Search does. Names follow Microsoft's naming rules: up to 128
+//     characters, an index's lower-case letters, digits and dashes, and a
+//     data source's or indexer's also upper-case letters and underscores.
+//     Definitions keep the JSON the caller sent, @odata annotations aside,
+//     and members Search does not define fail with 400. Deleting a search
+//     service, or its group, deletes what its data plane holds.
+//   - An index needs one key field, of type Edm.String, and each field a name
+//     and a type; an update may add fields but not remove one or change its
+//     type or which is the key, which fails with 400 (inferred). Deleting an
+//     index deletes its documents. Index Documents takes upload, merge,
+//     mergeOrUpload and delete actions, up to 1,000 a batch, and answers each
+//     action's statusCode (201 for a new document, 200 otherwise, 404 for a
+//     merge of a missing one), with 207 when one fails, as Microsoft
+//     documents; values are not checked against their fields' types. Search
+//     Documents (GET) takes a search of * or none, $select, $top (50 unless
+//     set), $skip and $count, and lists the documents in key order, each with
+//     an @search.score of 1 and without fields that are not retrievable;
+//     other parameters, full-text search included, fail with 400.
+//   - A data source needs a type the API lists, credentials.connectionString
+//     and container.name. It shows its connection string as null, and an
+//     update that sends <unchanged> or <redacted> keeps it, as Microsoft
+//     documents. An indexer needs dataSourceName and targetIndexName, which
+//     must exist (400, inferred); skillsets are not modeled, so one that names
+//     a skillset fails with 400. An indexer runs when it is created, unless
+//     disabled, and when run, which answers 202, as Microsoft documents; a run
+//     while another is in progress fails with 409. Indexers read nothing and
+//     index nothing: a run processes no items and leaves the index's
+//     documents as they were. A run is inProgress until the reads of the
+//     indexer's status [WithSettleAfter] sets, or [Server.Settle], then
+//     success. The status shows the indexer running, its last result and up
+//     to 50 executions, newest first, and a Standard service's limits, which
+//     are inferred. Schedules, resets, change tracking and listing are not
+//     served.
+//   - The Azure OpenAI data plane takes the account's custom subdomain from a
+//     host name such as {subdomain}.openai.azure.com, or else from the first
+//     path segment, and serves accounts of kind OpenAI or AIServices; other
+//     accounts, and calls without an api-version, answer 404 Resource not
+//     found, which for a missing api-version is inferred. Each call needs one
+//     of the account's keys in api-key: a missing or wrong one fails with 401
+//     and the message Azure OpenAI answers, and a Microsoft Entra ID token
+//     with 400 as not supported. An ingestion job needs kind SystemCompute,
+//     with searchServiceConnection and datasource, or UserCompute, with
+//     workspaceId, compute, target and datasource. Its connections and data
+//     source are recorded, not checked or read, and it creates nothing in the
+//     search service. A create answers 200 with the job, and one with the ID
+//     of an existing job replaces and restarts it, which is inferred. A job
+//     is running until the reads of it [WithSettleAfter] sets, or
+//     [Server.Settle], then succeeded. A get of a job that does not exist
+//     answers 404, whose code and message are inferred. Listing jobs and
+//     their runs are not served.
 //   - Every namespace is Registered in every subscription unless
 //     [WithUnregisteredProviders] names it; Azure registers only some by
 //     default, such as Microsoft.Resources and Microsoft.CostManagement but
@@ -869,7 +1006,19 @@
 // DeleteContainer, whose resource is {account}/{container}/{blob}. Blob
 // service faults fail as [fault.ModeReject] does for ModeFailOperation, and
 // the generic reasons become InternalError, or ServerBusy for 503 and rate
-// limits. Other fault method names are the operation's Azure RBAC action, such as
+// limits. Search data plane faults are named for the operation's ID in the
+// REST API's specification, such as Indexes_CreateOrUpdate, Indexes_Delete,
+// DataSources_Delete, Indexers_Run, Indexers_GetStatus, Documents_Index or
+// Documents_SearchGet, whose resource is {service}/{collection}/{name} with
+// the service in lower case, such as find/indexers/nightly; ModeFailOperation makes Indexers_Run start a run
+// that ends in transientFailure with the fault's message, and other calls
+// fail as ModeReject does. The generic reasons become an empty code, and a
+// rate limit 503. Azure OpenAI faults are named IngestionJobs_Create and
+// IngestionJobs_Get, whose resource is {subdomain}/ingestion/jobs/{jobId}
+// with the subdomain in lower case;
+// ModeFailOperation makes IngestionJobs_Create answer a job that has failed
+// with the fault's error, and the generic reasons become the HTTP status,
+// such as "503" or "429", as Azure OpenAI writes its codes. Other fault method names are the operation's Azure RBAC action, such as
 // "Microsoft.Compute/virtualMachines/write",
 // "Microsoft.Compute/virtualMachines/deallocate/action" or
 // "Microsoft.Resources/subscriptions/resourceGroups/delete". A call's
@@ -940,7 +1089,9 @@
 // "*" does not grant them, where a grant of "*" here does. Legal holds and
 // policies need containers/setLegalHold/action,
 // containers/clearLegalHold/action, containers/immutabilityPolicies/write and
-// containers/immutabilityPolicies/lock/action. Actions are not
+// containers/immutabilityPolicies/lock/action. The Search and Azure OpenAI
+// data planes authenticate with keys, which Azure RBAC does not apply to, so
+// the policy does not check them. Actions are not
 // checked against the scope they act on: a grant covers every subscription.
 //
 // A lost response aborts the handler with [http.ErrAbortHandler] after
@@ -1008,6 +1159,9 @@ type Server struct {
 	public     *pool
 	deleted    map[string]*softDeleted
 	capacities []ModelCapacity
+	skus       []ResourceSKU
+	// subnetChecks are the messages subnet checks fail with, by the subnet's ID's key.
+	subnetChecks map[string]string
 	// unregistered are the namespaces that start NotRegistered, by their lower-case names.
 	unregistered map[string]string
 	providers    map[string]*provider
@@ -1061,6 +1215,7 @@ func New(opts ...Option) *Server {
 		unregistered: map[string]string{},
 		providers:    map[string]*provider{},
 		exports:      map[string]*export{},
+		subnetChecks: map[string]string{},
 
 		logWorkspacesDeleted: map[string]*softDeleted{},
 		// Neither range is routable on the internet, so a test cannot reach a real host by mistake.
@@ -1169,10 +1324,12 @@ func (s *Server) registerRoutes() {
 	vm := compute + "/virtualMachines/{name}"
 	s.add("GET", compute+"/virtualMachines", vmKind.action("read"), false, s.listVMs)
 	s.add("PUT", vm, vmKind.action("write"), true, s.putVM)
+	s.add("PATCH", vm, vmKind.action("write"), true, s.patchVM)
 	s.add("GET", vm, vmKind.action("read"), false, s.getVM)
 	s.add("GET", vm+"/instanceView", vmKind.action("instanceView/read"), false, s.vmInstanceView)
 	s.add("POST", vm+"/deallocate", vmKind.action("deallocate/action"), true, s.powerVM(powerDeallocated))
 	s.add("POST", vm+"/start", vmKind.action("start/action"), true, s.powerVM(powerRunning))
+	s.add("POST", vm+"/powerOff", vmKind.action("powerOff/action"), true, s.powerVM(powerStopped))
 	s.add("DELETE", vm, vmKind.action("delete"), true, s.deleteVM)
 	s.registerExtensionRoutes()
 

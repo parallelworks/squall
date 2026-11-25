@@ -33,7 +33,7 @@ type operation struct {
 	Zone                string              `json:"zone,omitzero"`
 	Region              string              `json:"region,omitzero"`
 	SelfLink            string              `json:"selfLink"`
-	Error               *operationErrors    `json:"error,omitzero"`
+	Error               *OperationErrors    `json:"error,omitzero"`
 	HTTPErrorStatusCode int                 `json:"httpErrorStatusCode,omitzero"`
 	HTTPErrorMessage    string              `json:"httpErrorMessage,omitzero"`
 	BulkInsert          *bulkInsertMetadata `json:"instancesBulkInsertOperationMetadata,omitzero"`
@@ -45,13 +45,17 @@ type operation struct {
 	complete func()
 	// staging are instances that show STAGING on the operation's last read in progress.
 	staging []*Instance
+	// progress, when set, runs on the operation's last read in progress.
+	progress func()
 }
 
-type operationErrors struct {
-	Errors []operationError `json:"errors"`
+// OperationErrors are the errors of a failed operation or attempt.
+type OperationErrors struct {
+	Errors []OperationError `json:"errors"`
 }
 
-type operationError struct {
+// OperationError is one error of a failed operation or attempt.
+type OperationError struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
 }
@@ -123,9 +127,9 @@ func (s *Server) startOperation(r *http.Request, requestID, opType, target strin
 	case failure != nil:
 		errs := failure.opErrors
 		if errs == nil {
-			errs = []operationError{{Code: reason.UpperSnake(failure.Reason), Message: failure.Message}}
+			errs = []OperationError{{Code: reason.UpperSnake(failure.Reason), Message: failure.Message}}
 		}
-		op.Error = &operationErrors{errs}
+		op.Error = &OperationErrors{errs}
 		op.HTTPErrorStatusCode = failure.Status
 		op.HTTPErrorMessage = strings.ToUpper(http.StatusText(failure.Status))
 		s.done(op)
@@ -173,7 +177,7 @@ func (s *Server) finish(op *operation) {
 		return
 	}
 	complete := op.complete
-	op.complete, op.staging = nil, nil
+	op.complete, op.staging, op.progress = nil, nil, nil
 	delete(s.pending, op)
 	complete()
 	s.done(op)
@@ -194,6 +198,9 @@ func (s *Server) observe(op *operation) {
 			if inst.Status == statusProvisioning {
 				inst.Status = statusStaging
 			}
+		}
+		if op.progress != nil {
+			op.progress()
 		}
 	}
 }

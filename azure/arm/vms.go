@@ -1,6 +1,7 @@
 package arm
 
 import (
+	"bytes"
 	"cmp"
 	"maps"
 	"net/http"
@@ -30,13 +31,18 @@ const (
 	powerDeallocated  = "deallocated"
 	powerStarting     = "starting"
 	powerDeallocating = "deallocating"
+	powerStopped      = "stopped"
+	powerStopping     = "stopping"
 )
 
 type vmState struct {
-	power    string
-	userData any
-	nics     []vmNIC
-	changed  time.Time
+	power      string
+	userData   any
+	customData string
+	nics       []vmNIC
+	changed    time.Time
+	// failure is the error the VM's creation ended in, if it failed.
+	failure *apiError
 }
 
 type vmNIC struct {
@@ -60,6 +66,9 @@ type vmBody struct {
 	osDisk   map[string]any
 	osName   string
 	userData any
+	// customData is the osProfile's customData, which a GET leaves out, when the body sets it.
+	customData    string
+	hasCustomData bool
 }
 
 func parseVM(c *call) (*vmBody, *apiError) {
@@ -144,6 +153,7 @@ func parseVM(c *call) (*vmBody, *apiError) {
 		return nil, err
 	}
 	if os != nil {
+		b.customData, b.hasCustomData = os["customData"].(string)
 		delete(os, "adminPassword")
 		delete(os, "customData")
 	}
@@ -217,17 +227,28 @@ func (s *Server) putVM(c *call) (*reply, *apiError) {
 			return nil, diskAttached(d.name, d.disk.vm)
 		}
 	}
+	disks, err := s.planDataDisks(existing, id, b.props)
+	if err != nil {
+		return nil, err
+	}
 	render := func() []byte { return encode(s.renderVM(res, "")) }
 	paths := computeOps(c, b.location)
 	if c.opFault != nil {
 		op := s.begin(c, paths, 0, nil)
-		if status == http.StatusCreated {
-			s.fillVM(res, b)
+		if status != http.StatusCreated {
+			return accepted(c, op, status, status, false, func() []byte { return withState(res, putState(status), render) }), nil
 		}
-		return accepted(c, op, status, status, false, func() []byte { return withState(res, putState(status), render) }), nil
+		s.applyVM(res, b)
+		s.resources[key(id)] = res
+		res.state, res.vm.power, res.vm.failure, res.vm.changed = stateFailed, "", op.err, s.now()
+		return accepted(c, op, status, status, false, func() []byte { return withState(res, stateCreating, render) }), nil
 	}
 	s.applyVM(res, b)
+	s.applyDataDisks(res, disks)
 	s.resources[key(id)] = res
+	if res.vm.failure != nil {
+		res.vm.power, res.vm.failure = powerStarting, nil
+	}
 	op := s.change(c, res, paths, 0, putState(status), func() {
 		if res.vm.power == powerStarting {
 			res.vm.power, res.vm.changed = powerRunning, s.now()
@@ -252,7 +273,23 @@ func (s *Server) checkVMUpdate(res *resource, b *vmBody) *apiError {
 	if name := str(newOS, "computerName"); name != "" && oldOS != nil && !strings.EqualFold(name, str(oldOS, "computerName")) {
 		return changeNotAllowed("computerName")
 	}
+	if b.hasCustomData && b.customData != res.vm.customData {
+		return changeNotAllowed("customData")
+	}
+	if keys, ok := sshKeys(newOS); ok {
+		if old, _ := sshKeys(oldOS); !bytes.Equal(encode(keys), encode(old)) {
+			return changeNotAllowed("linuxConfiguration.ssh.publicKeys")
+		}
+	}
 	return nil
+}
+
+// sshKeys returns the SSH public keys of a Linux osProfile, and whether it sets them.
+func sshKeys(os map[string]any) (any, bool) {
+	linux, _ := os["linuxConfiguration"].(map[string]any)
+	ssh, _ := linux["ssh"].(map[string]any)
+	keys, ok := ssh["publicKeys"]
+	return keys, ok && keys != nil
 }
 
 // fillVM completes b with what Azure assigns a new VM: the OS disk's name, ID
@@ -333,6 +370,9 @@ func (s *Server) applyVM(res *resource, b *vmBody) {
 	}
 	s.detachNICs(res, false)
 	res.vm.nics, res.vm.userData = b.nics, b.userData
+	if b.hasCustomData {
+		res.vm.customData = b.customData
+	}
 	for _, n := range b.nics {
 		s.resources[key(n.id)].nic.vm = res.id
 	}
@@ -403,6 +443,12 @@ func statuses(state, power string, at time.Time) []any {
 }
 
 func (s *Server) instanceView(res *resource) map[string]any {
+	if f := res.vm.failure; f != nil && res.state == stateFailed {
+		return map[string]any{"statuses": []any{map[string]any{
+			"code": "ProvisioningState/failed/" + f.Code, "level": "Error",
+			"displayStatus": "Provisioning failed", "message": f.Message, "time": timestamp(res.vm.changed),
+		}}}
+	}
 	view := map[string]any{"statuses": statuses(res.state, res.vm.power, res.vm.changed)}
 	if os, _ := object(res.props, "osProfile"); os != nil {
 		view["computerName"] = str(os, "computerName")
@@ -474,15 +520,21 @@ func (s *Server) listVMs(c *call) (*reply, *apiError) {
 	return ok(listBody(s.listed(c, vmKind), func(res *resource) any { return s.renderVM(res, expand) })), nil
 }
 
-// powerVM deallocates or starts a VM.
+// powerVM deallocates, powers off or starts a VM.
 func (s *Server) powerVM(target string) handler {
 	transition, verb := powerStarting, "start"
-	if target == powerDeallocated {
+	switch target {
+	case powerDeallocated:
 		transition, verb = powerDeallocating, "deallocate"
+	case powerStopped:
+		transition, verb = powerStopping, "powerOff"
 	}
 	return func(c *call) (*reply, *apiError) {
 		if c.query("hibernate") == "true" {
 			return nil, unsupported("hibernation is not supported")
+		}
+		if v := c.query("skipShutdown"); v != "" && v != "true" && v != "false" {
+			return nil, invalidParameter("skipShutdown", "The value '%s' of parameter 'skipShutdown' is not valid.", v)
 		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -498,7 +550,9 @@ func (s *Server) powerVM(target string) handler {
 		}
 		op := s.change(c, res, computeOps(c, res.loc), http.StatusNoContent, stateUpdating, func() {
 			res.vm.power, res.vm.changed = target, s.now()
-			s.powerChanged(res)
+			if target != powerStopped {
+				s.powerChanged(res)
+			}
 		})
 		if op.status == opInProgress {
 			res.vm.power, res.vm.changed = transition, s.now()

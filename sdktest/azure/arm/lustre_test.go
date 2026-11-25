@@ -1,12 +1,14 @@
 package arm_test
 
 import (
+	"errors"
 	"net/http"
 	"net/netip"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/storagecache/armstoragecache/v3"
 
@@ -167,5 +169,35 @@ func TestManagedLustrePollingNeedsAscOperations(t *testing.T) {
 	const poll = "Microsoft.StorageCache/locations/ascOperations/read"
 	if _, err = wait(t, p, err); code(err) != "AuthorizationFailed" || !strings.Contains(err.Error(), poll) {
 		t.Fatalf("polling without %s = %v", poll, err)
+	}
+}
+
+func TestFailSubnetCheck(t *testing.T) {
+	c := setup(t)
+	check := func() error {
+		_, err := c.cache.CheckAmlFSSubnets(t.Context(), &armstoragecache.ManagementClientCheckAmlFSSubnetsOptions{
+			AmlFilesystemSubnetInfo: &armstoragecache.AmlFilesystemSubnetInfo{
+				FilesystemSubnet: new(subnet), Location: new(location), SKU: &armstoragecache.SKUName{Name: new("AMLFS-Durable-Premium-250")},
+				StorageCapacityTiB: new(float32(16)),
+			},
+		})
+		return err
+	}
+	const reason = "Subnet has 12 available IPs; 16 are required for this AML file system."
+	c.server.FailSubnetCheck(strings.ToUpper(subnet), reason)
+	err := check()
+	respErr, ok := errors.AsType[*azcore.ResponseError](err)
+	if !ok || respErr.StatusCode != http.StatusBadRequest || respErr.RawResponse.Header.Get("x-ms-error-code") != "" {
+		t.Fatalf("a failed subnet check = %v", err)
+	}
+	var body struct {
+		FilesystemSubnet struct{ Status, Message string } `json:"filesystemSubnet"`
+	}
+	if err := runtime.UnmarshalAsJSON(respErr.RawResponse, &body); err != nil || body.FilesystemSubnet.Status != "Invalid" || body.FilesystemSubnet.Message != reason {
+		t.Fatalf("a failed subnet check's body = %+v, %v", body, err)
+	}
+	c.server.FailSubnetCheck(subnet, "")
+	if err := check(); err != nil {
+		t.Fatalf("a subnet check let pass again = %v", err)
 	}
 }

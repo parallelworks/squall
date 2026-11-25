@@ -182,7 +182,8 @@ func (s *Server) observer() func(*operation) {
 
 // Settle finishes every operation in progress, with the effects finishing
 // has, such as a VM reaching running or a deleted resource group going away,
-// and takes one step of each snapshot copy that was already running.
+// ends the search indexer executions and ingestion jobs that are running, and
+// takes one step of each snapshot copy that was already running.
 func (s *Server) Settle() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -194,6 +195,12 @@ func (s *Server) Settle() {
 	}
 	for op := range s.pending {
 		s.finish(op)
+	}
+	for _, res := range s.resources {
+		if res.searchData != nil {
+			s.settleSearch(res.searchData)
+		}
+		settleJobs(res)
 	}
 	for _, res := range copies {
 		if copying(res) {

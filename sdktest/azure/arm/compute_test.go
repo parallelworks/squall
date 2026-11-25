@@ -259,10 +259,21 @@ func TestVirtualMachineFailedOperation(t *testing.T) {
 	if _, err := p.PollUntilDone(t.Context(), nil); code(err) != "AllocationFailed" {
 		t.Fatalf("failed create = %v", err)
 	}
-	if got := c.server.VirtualMachines(); len(got) != 0 {
-		t.Fatalf("a failed create took effect: %+v", got)
+	if got := c.server.VirtualMachines(); len(got) != 1 || got[0].ProvisioningState != "Failed" || got[0].PowerState != "" {
+		t.Fatalf("after a failed create = %+v", got)
+	}
+	if got, err := c.vms.Get(t.Context(), group, "vm", nil); err != nil || *got.Properties.ProvisioningState != "Failed" {
+		t.Fatalf("failed vm = %+v, %v", got.Properties, err)
+	}
+	view, err := c.vms.InstanceView(t.Context(), group, "vm", nil)
+	if err != nil || len(view.Statuses) != 1 || *view.Statuses[0].Code != "ProvisioningState/failed/AllocationFailed" ||
+		*view.Statuses[0].Level != armcompute.StatusLevelTypesError || *view.Statuses[0].DisplayStatus != "Provisioning failed" {
+		t.Fatalf("failed vm's instance view = %+v, %v", view.Statuses, err)
 	}
 	vm := c.createVM(t, "vm", nic)
+	if view, err := c.vms.InstanceView(t.Context(), group, "vm", nil); err != nil || powerState(view.Statuses) != "running" {
+		t.Fatalf("recreated vm's instance view = %+v, %v", view.Statuses, err)
+	}
 	sp, err := c.vms.BeginStart(t.Context(), group, "vm", nil)
 	if _, err = wait(t, sp, err); code(err) != "InternalServerError" {
 		t.Fatalf("failed start = %v", err)
@@ -355,5 +366,82 @@ func TestVirtualMachineChangePreemptsTheOneInProgress(t *testing.T) {
 	}
 	if got := c.server.VirtualMachines(); len(got) != 1 || got[0].PowerState != "deallocated" {
 		t.Fatalf("VMs = %+v", got)
+	}
+}
+
+func TestVirtualMachinePowerOff(t *testing.T) {
+	c := setup(t, arm.WithSettleAfter(1))
+	c.createGroup(t, group, nil)
+	nic := c.createNIC(t, group, "nic", nil)
+	c.createVM(t, "vm", nic)
+	p, err := c.vms.BeginPowerOff(t.Context(), group, "vm", &armcompute.VirtualMachinesClientBeginPowerOffOptions{SkipShutdown: new(true)})
+	if err != nil || p.Done() {
+		t.Fatalf("begin power off = %v", err)
+	}
+	if view, err := c.vms.InstanceView(t.Context(), group, "vm", nil); err != nil || powerState(view.Statuses) != "stopping" {
+		t.Fatalf("while powering off = %+v, %v", view.Statuses, err)
+	}
+	if _, err := p.PollUntilDone(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	view, err := c.vms.InstanceView(t.Context(), group, "vm", nil)
+	if err != nil || powerState(view.Statuses) != "stopped" || *view.Statuses[len(view.Statuses)-1].DisplayStatus != "VM stopped" {
+		t.Fatalf("after power off = %+v, %v", view.Statuses, err)
+	}
+	if got := c.server.Disks(); len(got) != 1 || got[0].State != "Attached" {
+		t.Fatalf("a stopped VM's disk = %+v", got)
+	}
+	sp, err := c.vms.BeginStart(t.Context(), group, "vm", nil)
+	if _, err = wait(t, sp, err); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.server.VirtualMachines(); got[0].PowerState != "running" {
+		t.Fatalf("after start = %+v", got)
+	}
+}
+
+func TestVirtualMachineSecretsDoNotChange(t *testing.T) {
+	c := setup(t)
+	c.createGroup(t, group, nil)
+	nic := c.createNIC(t, group, "nic", nil)
+	linux := func(customData *string, key string) armcompute.VirtualMachine {
+		vm := vmBody(nic.ID)
+		vm.Properties.OSProfile.CustomData = customData
+		vm.Properties.OSProfile.LinuxConfiguration = &armcompute.LinuxConfiguration{SSH: &armcompute.SSHConfiguration{
+			PublicKeys: []*armcompute.SSHPublicKey{{KeyData: new(key), Path: new("/home/azureuser/.ssh/authorized_keys")}},
+		}}
+		return vm
+	}
+	put := func(vm armcompute.VirtualMachine) error {
+		p, err := c.vms.BeginCreateOrUpdate(t.Context(), group, "vm", vm, nil)
+		_, err = wait(t, p, err)
+		return err
+	}
+	if err := put(linux(new("Y2xvdWQtaW5pdA=="), "ssh-rsa AAAA")); err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range map[string]struct {
+		vm     armcompute.VirtualMachine
+		target string
+	}{
+		"customData": {linux(new("b3RoZXI="), "ssh-rsa AAAA"), "customData"},
+		"ssh key":    {linux(new("Y2xvdWQtaW5pdA=="), "ssh-rsa BBBB"), "linuxConfiguration.ssh.publicKeys"},
+	} {
+		err := put(tc.vm)
+		if code(err) != "PropertyChangeNotAllowed" || status(err) != http.StatusConflict ||
+			!strings.Contains(err.Error(), "Changing property '"+tc.target+"' is not allowed.") {
+			t.Errorf("changing the %s = %v", name, err)
+		}
+	}
+	got, err := c.vms.Get(t.Context(), group, "vm", nil)
+	if err != nil || got.Properties.OSProfile.CustomData != nil {
+		t.Fatalf("get = %+v, %v", got.Properties.OSProfile, err)
+	}
+	got.Properties.OSProfile.AdminPassword = nil
+	if err := put(got.VirtualMachine); err != nil {
+		t.Fatalf("putting back what a get read = %v", err)
+	}
+	if err := put(linux(new("Y2xvdWQtaW5pdA=="), "ssh-rsa AAAA")); err != nil {
+		t.Fatalf("putting the same secrets again = %v", err)
 	}
 }

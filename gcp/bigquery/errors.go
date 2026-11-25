@@ -66,7 +66,7 @@ func notEnabled(project string) *apiError {
 }
 
 func faultError(f fault.Fault) *apiError {
-	return &apiError{Status: cmp.Or(f.Status, http.StatusServiceUnavailable), Reason: cmp.Or(f.Reason, "backendError"), Message: fmt.Sprintf("squall: injected fault (%s)", f)}
+	return &apiError{Status: cmp.Or(f.Status, http.StatusServiceUnavailable), Reason: cmp.Or(f.Reason, "backendError"), Message: f.ErrorMessage()}
 }
 
 // rpcNames follow Google's HTTP mapping of google.rpc.Code.

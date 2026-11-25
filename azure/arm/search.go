@@ -86,13 +86,17 @@ func (s *Server) listAdminKeys(c *call) (*reply, *apiError) {
 }
 
 // renderSearch shows the service's endpoint, and its state in lower case as
-// Search writes it: provisioning, then succeeded and running.
+// Search writes it: provisioning, then succeeded and running, or failed and
+// error.
 func renderSearch(res *resource) map[string]any {
 	m, props := envelope(res)
 	props["endpoint"] = "https://" + res.name + ".search.windows.net"
 	props["provisioningState"], props["status"], props["statusDetails"] = "provisioning", "provisioning", ""
-	if res.state == stateSucceeded {
+	switch res.state {
+	case stateSucceeded:
 		props["provisioningState"], props["status"] = "succeeded", "running"
+	case stateFailed:
+		props["provisioningState"], props["status"] = "failed", "error"
 	}
 	return m
 }

@@ -104,6 +104,78 @@ func (s *Server) registerGalleryRoutes() {
 		s.add("GET", l.path, l.kind.action("read"), false, s.getGallery(l))
 		s.add("DELETE", l.path, l.kind.action("delete"), true, s.deleteCompute(l.kind, l.id, capsOps))
 	}
+	s.add("PATCH", galleryVersion, galleryVersionKind.action("write"), true, s.patchGalleryVersion)
+}
+
+// patchGalleryVersion updates an image version's tags, publishingProfile or
+// safetyProfile, merging each profile's members into the ones it has.
+func (s *Server) patchGalleryVersion(c *call) (*reply, *apiError) {
+	body, err := readObject(c.r)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkMembers(body, "GalleryImageVersionUpdate", "", "id", "name", "type", "tags", "properties"); err != nil {
+		return nil, err
+	}
+	props, err := object(body, "properties")
+	if err != nil {
+		return nil, err
+	}
+	if err := checkMembers(props, "GalleryImageVersionProperties", "properties", slices.Concat(galleryVersionKind.props, galleryVersionKind.readOnly)...); err != nil {
+		return nil, err
+	}
+	for _, k := range []string{"restore", "securityProfile", "storageProfile"} {
+		if props[k] != nil {
+			return nil, unsupported("updating %s with PATCH is not supported; use PUT", k)
+		}
+	}
+	_, hasTags := body["tags"]
+	tags, err := tagsOf(body)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.writableGroup(c); err != nil {
+		return nil, err
+	}
+	res, err := s.claim(galleryVersionID(c), "")
+	if err != nil {
+		return nil, err
+	}
+	if res == nil || res.kind != galleryVersionKind {
+		return nil, resourceNotFound(galleryKind.typ, galleryName(galleryVersionID(c)), c.val("rg"))
+	}
+	p := &parsed{location: res.loc, tags: res.tags, top: res.top, props: maps.Clone(res.props)}
+	if hasTags {
+		p.tags = tags
+	}
+	for _, k := range []string{"publishingProfile", "safetyProfile"} {
+		patch, err := object(props, k)
+		if err != nil {
+			return nil, err
+		}
+		if patch == nil {
+			continue
+		}
+		merged, _ := p.props[k].(map[string]any)
+		merged = maps.Clone(merged)
+		if merged == nil {
+			merged = map[string]any{}
+		}
+		maps.Copy(merged, patch)
+		p.props[k] = merged
+	}
+	render := func() []byte { return encode(renderGallery(res, false)) }
+	paths := capsOps(c, res.loc)
+	if c.opFault != nil {
+		op := s.begin(c, paths, 0, nil)
+		op.target, op.state = res.id, stateUpdating
+		return accepted(c, op, http.StatusOK, http.StatusOK, false, func() []byte { return withState(res, stateUpdating, render) }), nil
+	}
+	s.update(res, p)
+	op := s.change(c, res, paths, 0, stateUpdating, nil)
+	return accepted(c, op, http.StatusOK, http.StatusOK, false, render), nil
 }
 
 // prepareGalleryImage validates p as the new body of the image definition

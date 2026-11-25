@@ -49,7 +49,10 @@
 //     Microsoft Entra documents, whichever domain is the default; that it is
 //     the first such domain [WithDomains] sets is inferred.
 //   - The organization is the one [WithOrganization] describes, with the
-//     verified domains [WithDomains] sets. It shows the members Graph's
+//     verified domains [WithDomains] sets. A tenant lists exactly one
+//     organization, as Graph lists it. Its countryLetterCode and
+//     defaultUsageLocation may be null, as Graph allows, for a tenant set up
+//     without them; country, state and city are always null. It shows the members Graph's
 //     example of the call shows, with empty plans and notification lists;
 //     each verified domain's capabilities, "Email, OfficeCommunicationsOnline"
 //     as in that example, and type Managed are inferred.
@@ -131,6 +134,12 @@ type Organization struct {
 	CountryLetterCode string
 	// DefaultUsageLocation is the usage location new users get, such as US.
 	DefaultUsageLocation string
+	// NoCountry leaves the tenant without a country, so countryLetterCode is
+	// null, as Graph shows a tenant that never set one.
+	NoCountry bool
+	// NoDefaultUsageLocation leaves the tenant without a default usage
+	// location, so defaultUsageLocation is null.
+	NoDefaultUsageLocation bool
 }
 
 // Server is a stand-in for Microsoft Graph. Create one with [New]. It is
@@ -178,13 +187,15 @@ func WithDomains(domains ...Domain) Option {
 
 // WithOrganization sets the directory's organization. A field left empty
 // keeps its default: the tenant ID 00000000-0000-0000-0000-000000000001, the
-// display name Squall, and US as the country and default usage location.
+// display name Squall, and US as the country and default usage location;
+// NoCountry and NoDefaultUsageLocation leave those out instead.
 func WithOrganization(org Organization) Option {
 	return func(s *Server) {
 		s.org = Organization{
 			ID: cmp.Or(org.ID, s.org.ID), DisplayName: cmp.Or(org.DisplayName, s.org.DisplayName),
 			CountryLetterCode:    cmp.Or(org.CountryLetterCode, s.org.CountryLetterCode),
 			DefaultUsageLocation: cmp.Or(org.DefaultUsageLocation, s.org.DefaultUsageLocation),
+			NoCountry:            org.NoCountry, NoDefaultUsageLocation: org.NoDefaultUsageLocation,
 		}
 	}
 }
@@ -501,10 +512,17 @@ func (s *Server) listOrganization(c *call) (*reply, *apiError) {
 			})
 		}
 	}
+	var country, usageLocation any = s.org.CountryLetterCode, s.org.DefaultUsageLocation
+	if s.org.NoCountry {
+		country = nil
+	}
+	if s.org.NoDefaultUsageLocation {
+		usageLocation = nil
+	}
 	org := map[string]any{
 		"id": s.org.ID, "deletedDateTime": nil, "businessPhones": []string{}, "city": nil, "country": nil,
-		"countryLetterCode": s.org.CountryLetterCode, "createdDateTime": s.created.UTC().Format(time.RFC3339),
-		"defaultUsageLocation": s.org.DefaultUsageLocation, "displayName": s.org.DisplayName,
+		"countryLetterCode": country, "createdDateTime": s.created.UTC().Format(time.RFC3339),
+		"defaultUsageLocation": usageLocation, "displayName": s.org.DisplayName,
 		"isMultipleDataLocationsForServicesEnabled": nil, "marketingNotificationEmails": []string{}, "onPremisesLastSyncDateTime": nil,
 		"onPremisesSyncEnabled": nil, "postalCode": nil, "preferredLanguage": "en", "securityComplianceNotificationMails": []string{},
 		"securityComplianceNotificationPhones": []string{}, "state": nil, "street": nil, "technicalNotificationMails": []string{},
@@ -588,7 +606,7 @@ func faultError(f fault.Fault) *apiError {
 	if code == "" || code == "backendError" || code == "rateLimitExceeded" {
 		code = cmp.Or(strings.ReplaceAll(http.StatusText(status), " ", ""), "InternalServerError")
 	}
-	return &apiError{Status: status, Code: code, Message: fmt.Sprintf("squall: injected fault (%s)", f)}
+	return &apiError{Status: status, Code: code, Message: f.ErrorMessage()}
 }
 
 func writeError(w http.ResponseWriter, e *apiError) {

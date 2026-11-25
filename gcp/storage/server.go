@@ -538,7 +538,7 @@ func conditionNotMet() *apiError {
 
 func faultError(f fault.Fault) *apiError {
 	status := cmp.Or(f.Status, http.StatusServiceUnavailable)
-	return &apiError{Status: status, Reason: cmp.Or(f.Reason, "backendError"), Message: fmt.Sprintf("squall: injected fault (%s)", f)}
+	return &apiError{Status: status, Reason: cmp.Or(f.Reason, "backendError"), Message: f.ErrorMessage()}
 }
 
 type errorBody struct {
